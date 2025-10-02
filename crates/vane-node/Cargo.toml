@@ -1,0 +1,8 @@
+[package]
+name = "vane-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vane-core = { workspace = true }
