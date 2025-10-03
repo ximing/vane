@@ -1,6 +1,9 @@
 // 基础类型定义；Task 2-5 逐步填充。
 use std::fmt;
 
+// SPEC §3.1 向量维度上限（Task 5 补全其余冻结常量）
+pub const DIM_MAX: u32 = 4096;
+
 /// SPEC §10 错误码。code() 返回值与 SPEC §10 表一一对应。
 #[derive(Debug, Clone)]
 pub enum VaneError {
@@ -133,6 +136,83 @@ fn hex_val(c: u8) -> Result<u8> {
     }
 }
 
+/// SPEC §3.1 标量字段类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScalarKind {
+    Int,
+    Float,
+    Bool,
+    Keyword,
+}
+
+/// SPEC §3.1 字段定义。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum FieldDef {
+    Text,
+    Vector { dim: u32, metric: Metric },
+    Scalar { kind: ScalarKind },
+}
+
+/// SPEC §3.1 Collection schema。创建后仅允许附录式扩展（M0 不实现扩展）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Schema {
+    pub fields: Vec<(String, FieldDef)>,
+}
+
+impl Schema {
+    pub fn new(fields: Vec<(String, FieldDef)>) -> Result<Self> {
+        let schema = Self { fields };
+        schema.validate()?;
+        Ok(schema)
+    }
+
+    /// 返回 (name, dim, metric)。§3.1 恰好一个 vector 字段。
+    pub fn vector_field(&self) -> Result<(&str, u32, Metric)> {
+        let mut found: Option<(&str, u32, Metric)> = None;
+        for (name, def) in &self.fields {
+            if let FieldDef::Vector { dim, metric } = def {
+                if found.is_some() {
+                    return Err(VaneError::Schema("multiple vector fields".into()));
+                }
+                found = Some((name.as_str(), *dim, *metric));
+            }
+        }
+        found.ok_or_else(|| VaneError::Schema("no vector field".into()))
+    }
+
+    pub fn text_fields(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|(_, d)| matches!(d, FieldDef::Text))
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+
+    /// §3.1 约束：恰好 1 个 vector 字段；dim ≤ 4096。
+    pub fn validate(&self) -> Result<()> {
+        let mut vec_count = 0;
+        for (_, def) in &self.fields {
+            if let FieldDef::Vector { dim, .. } = def {
+                vec_count += 1;
+                if *dim > DIM_MAX {
+                    return Err(VaneError::Schema(format!(
+                        "dim {} exceeds max {}",
+                        dim, DIM_MAX
+                    )));
+                }
+            }
+        }
+        // SPEC §3.1：恰好一个 vector 字段（M0–M2 限制）
+        if vec_count != 1 {
+            return Err(VaneError::Schema(format!(
+                "expected exactly 1 vector field, got {}",
+                vec_count
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +275,42 @@ mod tests {
     fn metric_variants() {
         let m = Metric::Cosine;
         assert_eq!(format!("{:?}", m), "Cosine");
+    }
+
+    #[test]
+    fn schema_with_single_vector_field_is_valid() {
+        let s = Schema::new(vec![
+            ("title".into(), FieldDef::Text),
+            ("vec".into(), FieldDef::Vector { dim: 384, metric: Metric::Cosine }),
+        ]).unwrap();
+        assert_eq!(s.vector_field().unwrap().0, "vec");
+        assert_eq!(s.vector_field().unwrap().1, 384);
+        assert_eq!(s.text_fields(), vec!["title".to_string()]);
+    }
+
+    #[test]
+    fn schema_with_zero_vector_fields_is_invalid() {
+        // SPEC §3.1：恰好一个 vector 字段（M0–M2 限制）
+        let r = Schema::new(vec![
+            ("body".into(), FieldDef::Text),
+        ]);
+        assert!(matches!(r, Err(VaneError::Schema(_))));
+    }
+
+    #[test]
+    fn schema_with_two_vector_fields_is_invalid() {
+        let r = Schema::new(vec![
+            ("v1".into(), FieldDef::Vector { dim: 128, metric: Metric::Dot }),
+            ("v2".into(), FieldDef::Vector { dim: 256, metric: Metric::Cosine }),
+        ]);
+        assert!(matches!(r, Err(VaneError::Schema(_))));
+    }
+
+    #[test]
+    fn schema_dim_over_4096_rejected() {
+        let r = Schema::new(vec![
+            ("v".into(), FieldDef::Vector { dim: 4097, metric: Metric::Cosine }),
+        ]);
+        assert!(matches!(r, Err(VaneError::Schema(_))));
     }
 }
