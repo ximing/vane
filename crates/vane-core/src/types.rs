@@ -1,8 +1,19 @@
 // 基础类型定义；Task 2-5 逐步填充。
 use std::fmt;
 
-// SPEC §3.1 向量维度上限（Task 5 补全其余冻结常量）
+// SPEC §3.1/§3.2/§3.3/§4.2/§6.1/§6.2/§6.3/§8.2 冻结常量
 pub const DIM_MAX: u32 = 4096;
+pub const TOPK_MAX: u32 = 1000;
+pub const SEGMENT_MAX: usize = 10;
+pub const DOC_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const BM25_K1: f32 = 1.2;
+pub const BM25_B: f32 = 0.75;
+pub const RRF_K: u32 = 60;
+pub const PAGE_CACHE_DEFAULT_MB: u32 = 32;
+pub const PAGE_SIZE: usize = 64 * 1024;
+pub const MAGIC: &[u8; 4] = b"VANE";
+pub const FORMAT_VERSION: u32 = 1;
+pub const MAX_SEGMENT_DOCS_SMALL: u32 = 10_000;
 
 /// SPEC §10 错误码。code() 返回值与 SPEC §10 表一一对应。
 #[derive(Debug, Clone)]
@@ -312,5 +323,21 @@ mod tests {
             ("v".into(), FieldDef::Vector { dim: 4097, metric: Metric::Cosine }),
         ]);
         assert!(matches!(r, Err(VaneError::Schema(_))));
+    }
+
+    #[test]
+    fn frozen_constants_match_spec() {
+        assert_eq!(DIM_MAX, 4096);
+        assert_eq!(TOPK_MAX, 1000);
+        assert_eq!(SEGMENT_MAX, 10);
+        assert_eq!(DOC_MAX_BYTES, 16 * 1024 * 1024);
+        assert_eq!(BM25_K1, 1.2);
+        assert_eq!(BM25_B, 0.75);
+        assert_eq!(RRF_K, 60);
+        assert_eq!(PAGE_CACHE_DEFAULT_MB, 32);
+        assert_eq!(PAGE_SIZE, 64 * 1024);
+        assert_eq!(MAGIC, b"VANE");
+        assert_eq!(FORMAT_VERSION, 1);
+        assert_eq!(MAX_SEGMENT_DOCS_SMALL, 10_000);
     }
 }
