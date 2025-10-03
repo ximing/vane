@@ -1,0 +1,40 @@
+# deny.toml
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"
+notice = "warn"
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    { name = "regex" },
+    { name = "tokio" },
+    { name = "prost" },
+    { name = "tonic" },
+    { name = "openssl" },
+    { name = "lindera" },
+    { name = "ndarray" },
+    { name = "wee_alloc" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
