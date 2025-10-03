@@ -143,7 +143,10 @@ fn hex_val(c: u8) -> Result<u8> {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
         b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(VaneError::InvalidArg(format!("invalid hex char: {:?}", c as char))),
+        _ => Err(VaneError::InvalidArg(format!(
+            "invalid hex char: {:?}",
+            c as char
+        ))),
     }
 }
 
@@ -250,7 +253,10 @@ mod tests {
         assert_eq!(VaneError::NotFound("x".into()).name(), "E_NOT_FOUND");
         assert_eq!(VaneError::Corrupt("x".into()).name(), "E_CORRUPT");
         assert_eq!(VaneError::Version("x".into()).name(), "E_VERSION");
-        assert_eq!(VaneError::TokenizerMismatch("x".into()).name(), "E_TOKENIZER_MISMATCH");
+        assert_eq!(
+            VaneError::TokenizerMismatch("x".into()).name(),
+            "E_TOKENIZER_MISMATCH"
+        );
         assert_eq!(VaneError::DictTooLarge.name(), "E_DICT_TOO_LARGE");
         assert_eq!(VaneError::DictUnavailable.name(), "E_DICT_UNAVAILABLE");
         assert_eq!(VaneError::Busy.name(), "E_BUSY");
@@ -292,8 +298,15 @@ mod tests {
     fn schema_with_single_vector_field_is_valid() {
         let s = Schema::new(vec![
             ("title".into(), FieldDef::Text),
-            ("vec".into(), FieldDef::Vector { dim: 384, metric: Metric::Cosine }),
-        ]).unwrap();
+            (
+                "vec".into(),
+                FieldDef::Vector {
+                    dim: 384,
+                    metric: Metric::Cosine,
+                },
+            ),
+        ])
+        .unwrap();
         assert_eq!(s.vector_field().unwrap().0, "vec");
         assert_eq!(s.vector_field().unwrap().1, 384);
         assert_eq!(s.text_fields(), vec!["title".to_string()]);
@@ -302,26 +315,40 @@ mod tests {
     #[test]
     fn schema_with_zero_vector_fields_is_invalid() {
         // SPEC §3.1：恰好一个 vector 字段（M0–M2 限制）
-        let r = Schema::new(vec![
-            ("body".into(), FieldDef::Text),
-        ]);
+        let r = Schema::new(vec![("body".into(), FieldDef::Text)]);
         assert!(matches!(r, Err(VaneError::Schema(_))));
     }
 
     #[test]
     fn schema_with_two_vector_fields_is_invalid() {
         let r = Schema::new(vec![
-            ("v1".into(), FieldDef::Vector { dim: 128, metric: Metric::Dot }),
-            ("v2".into(), FieldDef::Vector { dim: 256, metric: Metric::Cosine }),
+            (
+                "v1".into(),
+                FieldDef::Vector {
+                    dim: 128,
+                    metric: Metric::Dot,
+                },
+            ),
+            (
+                "v2".into(),
+                FieldDef::Vector {
+                    dim: 256,
+                    metric: Metric::Cosine,
+                },
+            ),
         ]);
         assert!(matches!(r, Err(VaneError::Schema(_))));
     }
 
     #[test]
     fn schema_dim_over_4096_rejected() {
-        let r = Schema::new(vec![
-            ("v".into(), FieldDef::Vector { dim: 4097, metric: Metric::Cosine }),
-        ]);
+        let r = Schema::new(vec![(
+            "v".into(),
+            FieldDef::Vector {
+                dim: 4097,
+                metric: Metric::Cosine,
+            },
+        )]);
         assert!(matches!(r, Err(VaneError::Schema(_))));
     }
 
