@@ -73,6 +73,66 @@ impl std::error::Error for VaneError {}
 
 pub type Result<T> = std::result::Result<T, VaneError>;
 
+/// 检索结果文档（跨 bm25/vector-brute/fusion 模块）。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScoredDoc {
+    pub docid: u64,
+    pub score: f32,
+}
+
+/// SPEC §3.1 向量距离度量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Metric {
+    Cosine,
+    L2,
+    Dot,
+}
+
+/// SPEC §5.4 分词器身份标识（sha256 产物）。
+/// 结构定义在此（workspace），计算逻辑在 02-tokenizer 的 compute_tokenizer_id。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct TokenizerId(pub [u8; 32]);
+
+impl TokenizerId {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        let mut s = String::with_capacity(64);
+        for b in &self.0 {
+            s.push_str(&format!("{:02x}", b));
+        }
+        s
+    }
+
+    pub fn from_hex(s: &str) -> Result<Self> {
+        if s.len() != 64 {
+            return Err(VaneError::InvalidArg(format!(
+                "TokenizerId hex must be 64 chars, got {}",
+                s.len()
+            )));
+        }
+        let mut out = [0u8; 32];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            let hi = hex_val(chunk[0])?;
+            let lo = hex_val(chunk[1])?;
+            out[i] = hi * 16 + lo;
+        }
+        Ok(TokenizerId(out))
+    }
+}
+
+fn hex_val(c: u8) -> Result<u8> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(VaneError::InvalidArg(format!("invalid hex char: {:?}", c as char))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +173,27 @@ mod tests {
         assert!(format!("{}", e).contains("topK exceeds 1000"));
         // std::error::Error trait 可调用 source()
         assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn tokenizer_id_hex_roundtrip() {
+        let raw = [0u8; 32];
+        let id = TokenizerId(raw);
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), 64);
+        let back = TokenizerId::from_hex(&hex).unwrap();
+        assert_eq!(back.as_bytes(), &raw);
+    }
+
+    #[test]
+    fn tokenizer_id_from_hex_rejects_bad_input() {
+        assert!(TokenizerId::from_hex("short").is_err());
+        assert!(TokenizerId::from_hex("zz").is_err());
+    }
+
+    #[test]
+    fn metric_variants() {
+        let m = Metric::Cosine;
+        assert_eq!(format!("{:?}", m), "Cosine");
     }
 }
