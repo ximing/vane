@@ -1,5 +1,6 @@
 use super::memory::MemoryVfs;
 use super::Vfs;
+use super::page_cache::PageCache;
 
 pub fn run_conformance_tests<V: Vfs>(vfs: &V) {
     // create + write_at + read_at
@@ -81,4 +82,46 @@ mod std_fs_tests {
         run_conformance_tests(&vfs);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+#[test]
+fn page_cache_read_through_and_lru_eviction() {
+    let vfs = MemoryVfs::new();
+    vfs.create("data.bin").unwrap();
+    // 写 4 页数据，每页 64 字节（测试用小页）
+    let page_size = 64usize;
+    let mut data = vec![0u8; page_size * 4];
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = (i / page_size) as u8; // page 0 = 0, page 1 = 1, ...
+    }
+    vfs.write_at("data.bin", &data, 0).unwrap();
+
+    // capacity = 2 页
+    let mut cache = PageCache::new(page_size * 2, page_size);
+    // 读 page 0
+    let r0 = cache.read(&vfs, "data.bin", 0, page_size).unwrap();
+    assert_eq!(r0[0], 0);
+    // 读 page 1
+    let r1 = cache.read(&vfs, "data.bin", page_size as u64, page_size).unwrap();
+    assert_eq!(r1[0], 1);
+    // 读 page 2 → 淘汰 page 0
+    let r2 = cache.read(&vfs, "data.bin", (page_size * 2) as u64, page_size).unwrap();
+    assert_eq!(r2[0], 2);
+    // 再读 page 0 → 应重新从 vfs 加载（缓存未命中）
+    let r0b = cache.read(&vfs, "data.bin", 0, page_size).unwrap();
+    assert_eq!(r0b[0], 0);
+}
+
+#[test]
+fn page_cache_invalidate() {
+    let vfs = MemoryVfs::new();
+    vfs.create("f.bin").unwrap();
+    vfs.write_at("f.bin", &[1, 2, 3], 0).unwrap();
+    let mut cache = PageCache::new(1024, 64);
+    cache.read(&vfs, "f.bin", 0, 3).unwrap();
+    // 修改底层文件后 invalidate
+    vfs.write_at("f.bin", &[9, 9, 9], 0).unwrap();
+    cache.invalidate("f.bin");
+    let r = cache.read(&vfs, "f.bin", 0, 3).unwrap();
+    assert_eq!(&r[..3], &[9, 9, 9]);
 }
