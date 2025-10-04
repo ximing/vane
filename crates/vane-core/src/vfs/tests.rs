@@ -60,3 +60,25 @@ fn memory_vfs_conformance() {
     let vfs = MemoryVfs::new();
     run_conformance_tests(&vfs);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod std_fs_tests {
+    use super::super::std_fs::StdFsVfs;
+    use super::run_conformance_tests;
+    use std::path::PathBuf;
+
+    fn tmpdir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vane-vfs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn std_fs_vfs_conformance() {
+        let dir = tmpdir();
+        let vfs = StdFsVfs::with_root(dir.to_str().unwrap());
+        run_conformance_tests(&vfs);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
