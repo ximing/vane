@@ -289,6 +289,12 @@ mod tests {
     }
 
     #[test]
+    fn tokenizer_id_from_hex_rejects_bad_chars_at_full_length() {
+        // 64 chars long but contains illegal hex char 'z'; exercises hex_val branch
+        assert!(TokenizerId::from_hex(&"z".repeat(64)).is_err());
+    }
+
+    #[test]
     fn metric_variants() {
         let m = Metric::Cosine;
         assert_eq!(format!("{:?}", m), "Cosine");

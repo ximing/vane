@@ -18,6 +18,8 @@ deny = [
     { name = "lindera" },
     { name = "ndarray" },
     { name = "wee_alloc" },
+    { name = "dashmap" },
+    { name = "parking_lot" },
 ]
 
 [licenses]
