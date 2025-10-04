@@ -31,13 +31,7 @@ impl PageCache {
         }
     }
 
-    pub fn read(
-        &mut self,
-        vfs: &dyn Vfs,
-        path: &str,
-        offset: u64,
-        len: usize,
-    ) -> Result<Vec<u8>> {
+    pub fn read(&mut self, vfs: &dyn Vfs, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         let mut result = vec![0u8; len];
         let mut remaining = len;
         let mut cur_off = offset;
@@ -63,8 +57,7 @@ impl PageCache {
                         let page_start = page_idx * self.page_size as u64;
                         let n = vfs.read_at(path, &mut page_buf, page_start)?;
                         page_buf.truncate(n);
-                        self.inner
-                            .put(path.to_string(), page_idx, page_buf.clone());
+                        self.inner.put(path.to_string(), page_idx, page_buf.clone());
                         page_buf
                     }
                 }

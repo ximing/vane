@@ -1,8 +1,8 @@
 use crate::types::{Result, VaneError};
 use crate::vfs::Vfs;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
+use std::sync::RwLock;
 
 /// 纯内存 VFS 后端（测试/纯内存场景）。SPEC §6.1 四后端之一。
 pub struct MemoryVfs {
@@ -109,7 +109,10 @@ impl Vfs for MemoryVfs {
             .keys()
             .filter(|path| path.starts_with(&prefix))
             .filter_map(|path| {
-                path[prefix.len()..].split('/').next().map(|s| s.to_string())
+                path[prefix.len()..]
+                    .split('/')
+                    .next()
+                    .map(|s| s.to_string())
             })
             .collect();
         out.sort();

@@ -1,6 +1,6 @@
 use super::memory::MemoryVfs;
-use super::Vfs;
 use super::page_cache::PageCache;
+use super::Vfs;
 
 pub fn run_conformance_tests<V: Vfs>(vfs: &V) {
     // create + write_at + read_at
@@ -53,7 +53,9 @@ pub fn run_conformance_tests<V: Vfs>(vfs: &V) {
     assert!(sub_files.contains(&"y.bin".to_string()));
     // 根目录 list 不含 sub/ 下的文件
     let root_files = vfs.list(".").unwrap();
-    assert!(!root_files.iter().any(|f| f.contains("x.bin") && f.contains("sub")));
+    assert!(!root_files
+        .iter()
+        .any(|f| f.contains("x.bin") && f.contains("sub")));
 }
 
 #[test]
@@ -102,10 +104,14 @@ fn page_cache_read_through_and_lru_eviction() {
     let r0 = cache.read(&vfs, "data.bin", 0, page_size).unwrap();
     assert_eq!(r0[0], 0);
     // 读 page 1
-    let r1 = cache.read(&vfs, "data.bin", page_size as u64, page_size).unwrap();
+    let r1 = cache
+        .read(&vfs, "data.bin", page_size as u64, page_size)
+        .unwrap();
     assert_eq!(r1[0], 1);
     // 读 page 2 → 淘汰 page 0
-    let r2 = cache.read(&vfs, "data.bin", (page_size * 2) as u64, page_size).unwrap();
+    let r2 = cache
+        .read(&vfs, "data.bin", (page_size * 2) as u64, page_size)
+        .unwrap();
     assert_eq!(r2[0], 2);
     // 再读 page 0 → 应重新从 vfs 加载（缓存未命中）
     let r0b = cache.read(&vfs, "data.bin", 0, page_size).unwrap();
@@ -124,4 +130,28 @@ fn page_cache_invalidate() {
     cache.invalidate("f.bin");
     let r = cache.read(&vfs, "f.bin", 0, 3).unwrap();
     assert_eq!(&r[..3], &[9, 9, 9]);
+}
+
+#[test]
+fn memory_vfs_sync_is_noop() {
+    let vfs = MemoryVfs::new();
+    vfs.create("s.bin").unwrap();
+    vfs.write_at("s.bin", b"data", 0).unwrap();
+    // sync 不报错
+    vfs.sync("s.bin").unwrap();
+}
+
+#[test]
+fn memory_vfs_large_append_across_pages() {
+    let vfs = MemoryVfs::new();
+    vfs.create("big.bin").unwrap();
+    let chunk = vec![42u8; 100_000];
+    let off1 = vfs.append("big.bin", &chunk).unwrap();
+    assert_eq!(off1, 0);
+    let off2 = vfs.append("big.bin", &chunk).unwrap();
+    assert_eq!(off2, 100_000);
+    // 读回校验
+    let mut buf = vec![0u8; 50];
+    vfs.read_at("big.bin", &mut buf, 99_990).unwrap();
+    assert!(buf.iter().all(|&b| b == 42));
 }

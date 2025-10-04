@@ -12,11 +12,15 @@ pub struct StdFsVfs {
 #[cfg(not(target_arch = "wasm32"))]
 impl StdFsVfs {
     pub fn new() -> Self {
-        Self { root: PathBuf::new() }
+        Self {
+            root: PathBuf::new(),
+        }
     }
 
     pub fn with_root(root: &str) -> Self {
-        Self { root: PathBuf::from(root) }
+        Self {
+            root: PathBuf::from(root),
+        }
     }
 
     fn resolve(&self, path: &str) -> PathBuf {

@@ -14,9 +14,9 @@ pub trait Vfs: Send + Sync {
 }
 
 pub mod memory;
+pub mod page_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod std_fs;
-pub mod page_cache;
 
 #[cfg(test)]
 mod tests;
