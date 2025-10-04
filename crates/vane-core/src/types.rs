@@ -194,11 +194,11 @@ impl Schema {
         found.ok_or_else(|| VaneError::Schema("no vector field".into()))
     }
 
-    pub fn text_fields(&self) -> Vec<String> {
+    pub fn text_fields(&self) -> Vec<&str> {
         self.fields
             .iter()
             .filter(|(_, d)| matches!(d, FieldDef::Text))
-            .map(|(n, _)| n.clone())
+            .map(|(n, _)| n.as_str())
             .collect()
     }
 
@@ -309,7 +309,7 @@ mod tests {
         .unwrap();
         assert_eq!(s.vector_field().unwrap().0, "vec");
         assert_eq!(s.vector_field().unwrap().1, 384);
-        assert_eq!(s.text_fields(), vec!["title".to_string()]);
+        assert_eq!(s.text_fields(), vec!["title"]);
     }
 
     #[test]
