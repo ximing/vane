@@ -1,6 +1,7 @@
 //! 分词器模块（SPEC §5）。
 
 mod id;
+mod standard;
 
 pub use id::compute_tokenizer_id;
 
