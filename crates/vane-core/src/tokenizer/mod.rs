@@ -1,5 +1,6 @@
 //! 分词器模块（SPEC §5）。
 
+mod cjk_bigram;
 mod id;
 mod standard;
 
