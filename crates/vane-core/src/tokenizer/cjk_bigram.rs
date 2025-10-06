@@ -111,7 +111,7 @@ fn is_cjk(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokenizer::{BuiltinTokenizer, Tokenizer, compute_tokenizer_id};
+    use crate::tokenizer::{compute_tokenizer_id, BuiltinTokenizer, Tokenizer};
 
     fn tok() -> CjkBigramTokenizer {
         CjkBigramTokenizer::new(&[])

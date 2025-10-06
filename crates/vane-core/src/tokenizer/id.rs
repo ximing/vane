@@ -57,10 +57,7 @@ pub(crate) fn serialize_user_dict(entries: &[UserDictEntry]) -> Vec<u8> {
 
 /// 计算 TokenizerId（SPEC §5.4）。
 /// sha256( algorithm_version ‖ builtin_dict_version ‖ user_dict_bytes )
-pub fn compute_tokenizer_id(
-    kind: BuiltinTokenizer,
-    user_dict: &[UserDictEntry],
-) -> TokenizerId {
+pub fn compute_tokenizer_id(kind: BuiltinTokenizer, user_dict: &[UserDictEntry]) -> TokenizerId {
     let mut hasher = Sha256::new();
     hasher.update(algorithm_version(kind));
     hasher.update(builtin_dict_version(kind));

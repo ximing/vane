@@ -24,15 +24,13 @@ impl StandardTokenizer {
 impl Tokenizer for StandardTokenizer {
     fn tokenize(&self, text: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
-        let mut position: u32 = 0;
-        for word in text.unicode_words() {
+        for (word, position) in text.unicode_words().zip(0_u32..) {
             let lower = word.to_lowercase();
             let stemmed = self.stemmer.stem(&lower);
             tokens.push(Token {
                 text: stemmed.into_owned(),
                 position,
             });
-            position += 1;
         }
         tokens
     }
@@ -45,7 +43,7 @@ impl Tokenizer for StandardTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokenizer::{BuiltinTokenizer, Tokenizer, compute_tokenizer_id};
+    use crate::tokenizer::{compute_tokenizer_id, BuiltinTokenizer, Tokenizer};
 
     fn tok() -> StandardTokenizer {
         StandardTokenizer::new(&[])
