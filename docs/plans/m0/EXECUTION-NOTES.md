@@ -37,13 +37,35 @@ worktree 隔离在该环境失败（`Failed to resolve base branch "HEAD": git r
   - P4: StdFsVfs::resolve 每次 create_dir_all，生产化时考虑缓存。
 - **M1 接线备忘**：PageCache 签名 `&mut self`（对齐 README 契约），07/Db 接线时需 `Mutex<PageCache>` 包裹。
 
-### 02-tokenizer — 🔄 实现中（与 01 审查重叠派发）
+### 02-tokenizer — ✅ 完成 + 审查通过（commit 71e4506..f734433）
+- 46 测试通过（tokenizer 31 + 既有 15 无回归），四项自证全绿。
+- 审查 10 项全绿，无阻塞/重要。契约逐字一致，I-4 九维覆盖，position 连续性有专项测试。
+- 偏离 2 处合理（`.err().unwrap()` 绕开 Debug bound、standard 计数器 zip 改写）。
+- **Parked 次要**：cjk_bigram.rs 仍用 `let mut position`（与 standard zip 写法不一致，clippy 未告警，无功能问题）。
 
-### 03-fusion — ✅ 完成（commit 待提交）
-- 27 fusion 测试通过，四项自证全绿（test/clippy/wasm32/fmt）。
-- 既有 01/02 测试无回归（vane-core 全量 73 测试通过）。
-- 签名与 README Global Interface Contracts §03-fusion 逐字一致。
-- **偏离计划（澄清）**：计划自检清单写 "grep `cfg(` 应空"，但 Task 0 Step 4 又要求 mod.rs 末尾追加 `#[cfg(test)] mod tests;` —— 二者矛盾。I-5 不变量本意是"核心零平台分支"（`cfg(target_arch=...)`），`#[cfg(test)]` 是标准测试门控且计划本身要求，按 Task 0 Step 4 执行保留。grep `cfg(` 仅命中 `#[cfg(test)]` 一处。
-- 模块内引用用 `crate::types::` 而非计划示例的 `vane_core::types::`（crate 内不能用自身 crate 名，与 01/02 模块一致）。
+### 03-fusion — ✅ 完成 + 审查通过（commit 4cf5e8b）
+- 73 测试通过（fusion 27 + 既有 46 无回归），四项自证全绿。
+- 审查 8 项全绿，RRF/linear 公式手算验证正确，数值健壮性（max==min/NaN/排序确定性）到位。
+- 偏离 2 处合理（`#[cfg(test)]` 测试门控非 I-5 平台分支、crate 内用 `crate::types`）。
+- **Parked 次要**：P3 NaN 测试命名"rejected"略误导（NaN 非首元素仍 NaN，但调用方契约不含 NaN，可接受）；P4 模块文档措辞 `vane_core::types` 与代码 `crate::types` 不一致。
 
-### 06-vector-brute — 待派发
+### 06-vector-brute — ✅ 完成 + 审查通过（commit cad7cec）
+- 111 测试通过（vector 38 + 既有 73 无回归），四项自证全绿。
+- 审查 9 项全绿，cosine/l2/dot 数值手算正确，filter/topK/NaN 边界全覆盖。
+- 5 处偏离均为修正计划测试数据 bug（dim_mismatch broken test、bitmap 用绝对 docid、tie-break 同分向量），未引入语义错误。
+
+### L1 集成节点 — ✅ 通过（HEAD 344ba7c）
+- `cargo test -p vane-core`：111 passed / 0 failed / 1 ignored
+- `cargo clippy -p vane-core --all-targets -- -D warnings`：clean（集成节点发现 03 测试代码 approx_constant 回归，已修 344ba7c）
+- `cargo check --target wasm32-unknown-unknown -p vane-core`：pass
+- `cargo fmt --check`：pass
+- `bash scripts/check-no-std-fs.sh`：OK
+- **过程教训**：今后所有 implementer 自证 clippy 必须含 `--all-targets`（覆盖测试代码），已固化到 L2+ 派发模板。
+
+---
+
+## L2 · 串行 + 审查/实现重叠（04-segment-format / 05-bm25 / 08-persistence，彼此独立）
+
+### 04-segment-format — 🔄 派发中
+### 05-bm25 — 待派发（算法最重，计划用 opus）
+### 08-persistence — 待派发
