@@ -130,7 +130,7 @@ fn minmax_empty() {
 
 #[test]
 fn minmax_single_element() {
-    let scored = vec![sd(42, 3.14)];
+    let scored = vec![sd(42, 2.5)];
     let out = minmax_normalize(&scored);
     assert!(li_eq(&out, &[(42, 0.0)]));
 }
