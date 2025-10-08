@@ -40,15 +40,24 @@ fn segment_writer_roundtrip_with_memory_vfs() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
     let schema = Schema::new(vec![
         ("title".into(), FieldDef::Text),
-        ("vec".into(), FieldDef::Vector { dim: 4, metric: Metric::Cosine }),
-    ]).unwrap();
+        (
+            "vec".into(),
+            FieldDef::Vector {
+                dim: 4,
+                metric: Metric::Cosine,
+            },
+        ),
+    ])
+    .unwrap();
     let tok_id = TokenizerId([0x11; 32]);
 
-    let mut writer = SegmentWriter::new(
-        vfs.clone(), "segments", &schema, &tok_id, 0,
-    ).unwrap();
-    let d0 = writer.add_doc("doc-0", Some(&[1.0, 0.0, 0.0, 0.0]), r#"{"title":"hello"}"#).unwrap();
-    let d1 = writer.add_doc("doc-1", Some(&[0.0, 1.0, 0.0, 0.0]), r#"{"title":"world"}"#).unwrap();
+    let mut writer = SegmentWriter::new(vfs.clone(), "segments", &schema, &tok_id, 0).unwrap();
+    let d0 = writer
+        .add_doc("doc-0", Some(&[1.0, 0.0, 0.0, 0.0]), r#"{"title":"hello"}"#)
+        .unwrap();
+    let d1 = writer
+        .add_doc("doc-1", Some(&[0.0, 1.0, 0.0, 0.0]), r#"{"title":"world"}"#)
+        .unwrap();
     assert_eq!(d0, 0);
     assert_eq!(d1, 1);
     let meta = writer.finalize().unwrap();
@@ -69,14 +78,23 @@ fn segment_writer_roundtrip_with_memory_vfs() {
 #[test]
 fn segment_reader_roundtrip() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
-    let schema = Schema::new(vec![
-        ("v".into(), FieldDef::Vector { dim: 4, metric: Metric::Cosine }),
-    ]).unwrap();
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
     let tok_id = TokenizerId([0x22; 32]);
 
     let mut writer = SegmentWriter::new(vfs.clone(), "segments", &schema, &tok_id, 0).unwrap();
-    writer.add_doc("alpha", Some(&[1.0, 2.0, 3.0, 4.0]), r#"{"x":1}"#).unwrap();
-    writer.add_doc("beta", Some(&[5.0, 6.0, 7.0, 8.0]), r#"{"x":2}"#).unwrap();
+    writer
+        .add_doc("alpha", Some(&[1.0, 2.0, 3.0, 4.0]), r#"{"x":1}"#)
+        .unwrap();
+    writer
+        .add_doc("beta", Some(&[5.0, 6.0, 7.0, 8.0]), r#"{"x":2}"#)
+        .unwrap();
     let meta = writer.finalize().unwrap();
 
     let seg_dir = format!("segments/seg_{}", meta.ulid);
@@ -102,7 +120,127 @@ fn segment_reader_rejects_bad_magic() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
     let seg_dir = "segments/seg_bad";
     vfs.create(&format!("{}/header.bin", seg_dir)).unwrap();
-    vfs.write_at(&format!("{}/header.bin", seg_dir), b"XXXX", 0).unwrap();
+    vfs.write_at(&format!("{}/header.bin", seg_dir), b"XXXX", 0)
+        .unwrap();
     let r = SegmentReader::open(&vfs, seg_dir);
     assert!(matches!(r, Err(VaneError::Corrupt(_))));
+}
+
+#[test]
+fn segment_immutable_after_finalize() {
+    // finalize 消费 self → 编译期保证不可再调 add_doc。
+    // 此测试验证 finalize 后段文件不被修改。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Dot,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0; 32]), 0).unwrap();
+    w.add_doc("a", Some(&[1.0, 0.0]), "{}").unwrap();
+    let meta = w.finalize().unwrap();
+    // 读回段，验证内容不变
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+    let r1 = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r1.doc_count(), 1);
+    let r2 = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r1.vectors(), r2.vectors()); // 两次读一致
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn segment_stdfs_roundtrip() {
+    use crate::vfs::std_fs::StdFsVfs;
+    let dir = std::env::temp_dir().join(format!("vane-seg-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let vfs =
+        std::sync::Arc::new(StdFsVfs::with_root(dir.to_str().unwrap())) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 3,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(
+        vfs.clone(),
+        "segments",
+        &schema,
+        &TokenizerId([0xff; 32]),
+        0,
+    )
+    .unwrap();
+    w.add_doc("x", Some(&[0.1, 0.2, 0.3]), r#"{"k":"v"}"#)
+        .unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("segments/seg_{}", meta.ulid);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.external_id(0), Some("x"));
+    assert_eq!(r.dim(), 3);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn segment_writer_docid_base_nonzero() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let tok_id = TokenizerId([0x33; 32]);
+    // 第一段 base=0
+    let mut w1 = SegmentWriter::new(vfs.clone(), "seg", &schema, &tok_id, 0).unwrap();
+    w1.add_doc("a", Some(&[1.0, 0.0]), "{}").unwrap();
+    w1.add_doc("b", Some(&[0.0, 1.0]), "{}").unwrap();
+    let m1 = w1.finalize().unwrap();
+    assert_eq!(m1.docid_base, 0);
+    assert_eq!(m1.doc_count, 2);
+    // 第二段 base=2（接续）
+    let mut w2 = SegmentWriter::new(vfs.clone(), "seg", &schema, &tok_id, 2).unwrap();
+    w2.add_doc("c", Some(&[1.0, 1.0]), "{}").unwrap();
+    let m2 = w2.finalize().unwrap();
+    assert_eq!(m2.docid_base, 2);
+    assert_eq!(m2.doc_count, 1);
+    // 读回验证
+    let seg1_dir = format!("seg/seg_{}", m1.ulid);
+    let r1 = SegmentReader::open(&vfs, &seg1_dir).unwrap();
+    assert_eq!(r1.meta().docid_base, 0);
+    let seg2_dir = format!("seg/seg_{}", m2.ulid);
+    let r2 = SegmentReader::open(&vfs, &seg2_dir).unwrap();
+    assert_eq!(r2.meta().docid_base, 2);
+}
+
+#[test]
+fn segment_writer_vector_none_fills_zeros() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 3,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let tok_id = TokenizerId([0x44; 32]);
+    let mut w = SegmentWriter::new(vfs.clone(), "seg", &schema, &tok_id, 0).unwrap();
+    // doc0 有 vector
+    w.add_doc("a", Some(&[1.0, 2.0, 3.0]), "{}").unwrap();
+    // doc1 无 vector → 填零向量
+    w.add_doc("b", None, "{}").unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // doc0 的向量
+    assert_eq!(&r.vectors()[0..3], &[1.0, 2.0, 3.0]);
+    // doc1 的向量 = 零向量
+    assert_eq!(&r.vectors()[3..6], &[0.0, 0.0, 0.0]);
 }

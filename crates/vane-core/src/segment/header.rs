@@ -1,5 +1,5 @@
 use crate::segment::SegmentMeta;
-use crate::types::{FORMAT_VERSION, MAGIC, Result, TokenizerId, VaneError};
+use crate::types::{Result, TokenizerId, VaneError, FORMAT_VERSION, MAGIC};
 
 // header.bin 布局（SPEC §6.3）：
 // magic(4) | format_version(4 BE) | ulid_len(1) | ulid(26) |
@@ -35,17 +35,13 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         return Err(VaneError::Corrupt("header too short".into()));
     }
     if &buf[0..4] != MAGIC {
-        return Err(VaneError::Corrupt(format!(
-            "bad magic: {:?}",
-            &buf[0..4]
-        )));
+        return Err(VaneError::Corrupt(format!("bad magic: {:?}", &buf[0..4])));
     }
     let version = u32::from_be_bytes(buf[4..8].try_into().unwrap());
     if version != FORMAT_VERSION {
         return Err(VaneError::Version(format!(
             "unsupported format_version: {} (expected {})",
-            version,
-            FORMAT_VERSION
+            version, FORMAT_VERSION
         )));
     }
     let mut pos = 8;
@@ -59,7 +55,9 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         .to_string();
     pos += ulid_len;
     if pos + 4 + 8 + 32 + 4 > buf.len() {
-        return Err(VaneError::Corrupt("header truncated at fixed fields".into()));
+        return Err(VaneError::Corrupt(
+            "header truncated at fixed fields".into(),
+        ));
     }
     let doc_count = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
     pos += 4;

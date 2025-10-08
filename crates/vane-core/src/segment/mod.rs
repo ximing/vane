@@ -1,7 +1,7 @@
 pub mod header;
-pub mod ulid;
 #[cfg(test)]
 mod tests;
+pub mod ulid;
 
 use crate::types::{Result, Schema, TokenizerId, VaneError};
 use crate::vfs::Vfs;
@@ -90,7 +90,8 @@ impl SegmentWriter {
         } else if self.dim > 0 {
             // S4: schema 有 vector 字段但 doc 未提供 vector → 填零向量。
             // 保证 docid i 的向量在 vectors[i*dim..]。
-            self.vectors.resize(self.vectors.len() + self.dim as usize, 0.0f32);
+            self.vectors
+                .resize(self.vectors.len() + self.dim as usize, 0.0f32);
         }
         self.id_map.push((docid, external_id.to_string()));
         self.stored.push((docid, stored_json.to_string()));
@@ -308,10 +309,7 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
         let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + len > buf.len() {
-            return Err(VaneError::Corrupt(format!(
-                "{} entry truncated",
-                label
-            )));
+            return Err(VaneError::Corrupt(format!("{} entry truncated", label)));
         }
         let s = std::str::from_utf8(&buf[pos..pos + len])
             .map_err(|e| VaneError::Corrupt(format!("{} utf8: {}", label, e)))?
