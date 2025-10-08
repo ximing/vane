@@ -65,3 +65,44 @@ fn segment_writer_roundtrip_with_memory_vfs() {
     assert!(files.contains(&"vectors.bin".to_string()));
     assert!(files.contains(&"stored.bin".to_string()));
 }
+
+#[test]
+fn segment_reader_roundtrip() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![
+        ("v".into(), FieldDef::Vector { dim: 4, metric: Metric::Cosine }),
+    ]).unwrap();
+    let tok_id = TokenizerId([0x22; 32]);
+
+    let mut writer = SegmentWriter::new(vfs.clone(), "segments", &schema, &tok_id, 0).unwrap();
+    writer.add_doc("alpha", Some(&[1.0, 2.0, 3.0, 4.0]), r#"{"x":1}"#).unwrap();
+    writer.add_doc("beta", Some(&[5.0, 6.0, 7.0, 8.0]), r#"{"x":2}"#).unwrap();
+    let meta = writer.finalize().unwrap();
+
+    let seg_dir = format!("segments/seg_{}", meta.ulid);
+    let reader = SegmentReader::open(&vfs, &seg_dir).unwrap();
+
+    assert_eq!(reader.meta().doc_count, 2);
+    assert_eq!(reader.dim(), 4);
+    assert_eq!(reader.vectors().len(), 8);
+    assert_eq!(&reader.vectors()[0..4], &[1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(reader.external_id(0), Some("alpha"));
+    assert_eq!(reader.external_id(1), Some("beta"));
+    assert_eq!(reader.external_id(999), None);
+    // stored.bin 回填：stored_json(local_docid) 返回写入时的 JSON
+    assert_eq!(reader.stored_json(0), Some(r#"{"x":1}"#));
+    assert_eq!(reader.stored_json(1), Some(r#"{"x":2}"#));
+    assert_eq!(reader.stored_json(999), None);
+    assert_eq!(reader.segment_dir(), seg_dir);
+}
+
+#[test]
+fn segment_reader_rejects_bad_magic() {
+    use crate::types::VaneError;
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let seg_dir = "segments/seg_bad";
+    vfs.create(&format!("{}/header.bin", seg_dir)).unwrap();
+    vfs.write_at(&format!("{}/header.bin", seg_dir), b"XXXX", 0).unwrap();
+    let r = SegmentReader::open(&vfs, seg_dir);
+    assert!(matches!(r, Err(VaneError::Corrupt(_))));
+}

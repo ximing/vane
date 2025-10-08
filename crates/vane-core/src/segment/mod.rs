@@ -171,3 +171,153 @@ impl SegmentWriter {
         Ok(meta)
     }
 }
+
+/// 段读期句柄（SPEC §6.2）。加载 header + vectors + idmap + stored，
+/// 提供查询访问。inverted.bin 由 05-bm25 的 InvertedIndexReader 通过
+/// segment_dir() 单独读取，本结构不加载倒排。
+pub struct SegmentReader {
+    meta: SegmentMeta,
+    vfs: Arc<dyn Vfs>,
+    segment_dir: String,
+    vectors: Vec<f32>,
+    dim: u32,
+    id_map: std::collections::HashMap<u64, String>,
+    // stored.bin 按 docid 索引的 stored JSON（回填 Hit.fields，SPEC §6.2）。
+    // key 为段内局部 docid（0 起，与 id_map 同一 key 空间）。
+    stored: std::collections::HashMap<u64, String>,
+}
+
+/// 模块级辅助：循环 read_at 直到 EOF，拼出完整文件字节。
+fn read_all(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut off = 0u64;
+    loop {
+        let n = vfs.read_at(path, &mut tmp, off)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        off += n as u64;
+    }
+    Ok(buf)
+}
+
+impl SegmentReader {
+    pub fn open(vfs: &Arc<dyn Vfs>, segment_dir: &str) -> Result<Self> {
+        // 读 header
+        let hpath = format!("{}/header.bin", segment_dir);
+        let hbuf = read_all(vfs.as_ref(), &hpath)?;
+        let meta = header::decode_header(&hbuf)?;
+
+        // 读 vectors（doc_count=0 时为空）
+        let vectors: Vec<f32> = if meta.doc_count > 0 {
+            let vpath = format!("{}/vectors.bin", segment_dir);
+            let vbuf = read_all(vfs.as_ref(), &vpath)?;
+            vbuf.chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let dim = if vectors.is_empty() {
+            0
+        } else {
+            (vectors.len() / meta.doc_count as usize) as u32
+        };
+
+        // 读 id_map
+        let id_map = Self::load_id_map(vfs.as_ref(), segment_dir)?;
+
+        // 读 stored.bin（按 docid 索引，供 stored_json() 回填 Hit.fields）
+        let stored = Self::load_stored(vfs.as_ref(), segment_dir)?;
+
+        Ok(Self {
+            meta,
+            vfs: vfs.clone(),
+            segment_dir: segment_dir.to_string(),
+            vectors,
+            dim,
+            id_map,
+            stored,
+        })
+    }
+
+    fn load_stored(
+        vfs: &dyn Vfs,
+        segment_dir: &str,
+    ) -> Result<std::collections::HashMap<u64, String>> {
+        let spath = format!("{}/stored.bin", segment_dir);
+        let buf = read_all(vfs, &spath)?;
+        decode_kv_map(&buf, "stored")
+    }
+
+    fn load_id_map(
+        vfs: &dyn Vfs,
+        segment_dir: &str,
+    ) -> Result<std::collections::HashMap<u64, String>> {
+        let ipath = format!("{}/idmap.bin", segment_dir);
+        let buf = read_all(vfs, &ipath)?;
+        decode_kv_map(&buf, "idmap")
+    }
+
+    pub fn meta(&self) -> &SegmentMeta {
+        &self.meta
+    }
+    pub fn vectors(&self) -> &[f32] {
+        &self.vectors
+    }
+    pub fn dim(&self) -> u32 {
+        self.dim
+    }
+    pub fn doc_count(&self) -> u32 {
+        self.meta.doc_count
+    }
+    pub fn external_id(&self, docid: u64) -> Option<&str> {
+        self.id_map.get(&docid).map(|s| s.as_str())
+    }
+    /// 读取某文档的 stored.bin JSON（回填 Hit.fields，SPEC §6.2 stored.bin）。
+    /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
+    pub fn stored_json(&self, local_docid: u64) -> Option<&str> {
+        self.stored.get(&local_docid).map(|s| s.as_str())
+    }
+    pub fn segment_dir(&self) -> &str {
+        &self.segment_dir
+    }
+    pub fn vfs(&self) -> &Arc<dyn Vfs> {
+        &self.vfs
+    }
+}
+
+/// 解码 stored.bin / idmap.bin 共享的 KV 布局：
+/// magic(4) | version(4 BE) | count(4 LE) | {docid(8 LE)|len(4 LE)|bytes}...
+fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u64, String>> {
+    if buf.len() < 12 {
+        return Ok(std::collections::HashMap::new());
+    }
+    // skip magic(4) + version(4)
+    let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+    let mut pos = 12;
+    let mut map = std::collections::HashMap::with_capacity(count);
+    for _ in 0..count {
+        if pos + 12 > buf.len() {
+            break;
+        }
+        let docid = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + len > buf.len() {
+            return Err(VaneError::Corrupt(format!(
+                "{} entry truncated",
+                label
+            )));
+        }
+        let s = std::str::from_utf8(&buf[pos..pos + len])
+            .map_err(|e| VaneError::Corrupt(format!("{} utf8: {}", label, e)))?
+            .to_string();
+        pos += len;
+        map.insert(docid, s);
+    }
+    Ok(map)
+}
