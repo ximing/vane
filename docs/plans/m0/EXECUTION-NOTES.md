@@ -66,6 +66,24 @@ worktree 隔离在该环境失败（`Failed to resolve base branch "HEAD": git r
 
 ## L2 · 串行 + 审查/实现重叠（04-segment-format / 05-bm25 / 08-persistence，彼此独立）
 
-### 04-segment-format — 🔄 派发中
-### 05-bm25 — 待派发（算法最重，计划用 opus）
+### 04-segment-format — ✅ 完成 + 审查通过（commit b96dfb1..1e15085）
+- 122 测试通过（segment 11 + 既有 111 无回归），四项自证全绿（含 --all-targets clippy）。
+- 审查 13 项达标，可合并。N1 gen_ulid（Ulid::from_parts）、I4 docid_base、I10 stored.bin 裸 JSON、F1 stored_json、S2 scalars 空 stub、S4 vector=None 填零 均落实。
+- **遗留→格式冻结前清理 pass**（不阻塞 05/07/08）：
+  - FF1（重要）：vectors.bin 缺 magic+version 头，违反 §6.2"所有文件以 magic+version 开头"。裁决：加 8 字节头合规，SegmentReader 加载时跳过，不影响 brute_search 拿纯 f32。
+  - FF2（重要）：add_doc 返回局部 docid（从 0 起，全局=base+local）——设计正确（§3.2），但 README §04 注释误导 + base>0 测试缺失。修 README 注释 + 补测试。**07 派发时必须明确：add_doc 返回局部 docid。**
+  - FF3（次要）：format_version 字节序混合（magic/version BE，payload LE）。统一全 LE。
+  - FF4（次要）：E1 vectors.bin dim 推导无校验、E2 stored/idmap 解码静默截断。M1 加严。
+
+### 05-bm25 — 🔄 实现中（opus，算法最重）
 ### 08-persistence — 待派发
+
+---
+
+## M0 格式冻结前清理 pass（DoD 前执行）
+收集执行期发现的格式/文档遗留项，在 M0 格式冻结前统一清理：
+- [来自 01] P1-P4（I11 注释笔误、list 排序统一、PageCache put 去重、resolve 缓存）
+- [来自 02] cjk_bigram position 写法不一致
+- [来自 03] P3 NaN 测试命名、P4 文档路径措辞
+- [来自 04] FF1 vectors.bin magic 头、FF2 add_doc 注释+测试、FF3 字节序统一、FF4 解码健壮性
+- 格式冻结后跑 §13.3 冻结 corpus 兼容测试骨架
