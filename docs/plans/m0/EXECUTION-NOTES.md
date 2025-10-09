@@ -75,8 +75,27 @@ worktree 隔离在该环境失败（`Failed to resolve base branch "HEAD": git r
   - FF3（次要）：format_version 字节序混合（magic/version BE，payload LE）。统一全 LE。
   - FF4（次要）：E1 vectors.bin dim 推导无校验、E2 stored/idmap 解码静默截断。M1 加严。
 
-### 05-bm25 — 🔄 实现中（opus，算法最重）
-### 08-persistence — 待派发
+### 05-bm25 — ✅ 完成 + 审查通过（commit 3df0ab7）
+- 149 测试通过（bm25 27 + 既有 122 无回归），四项自证全绿（含 --all-targets）。
+- 审查 11 项全绿，WAND 与暴力基线 100% 一致（tiebreak 修复正确），posting/vbyte/BM25 公式/错误码全符合 §6.3/§8.1。
+- B4 InvertedIndexReader::open(&Arc) 落实。3 个次要观察（未用 TermEntry.idf、num_docs u32、filter 测试未比 score）记 triage。
+
+### 08-persistence — ✅ 完成 + 审查通过（commit a246904..6263253）
+- 161 测试通过（persistence 12 + 既有 149 无回归），四项自证全绿。
+- 审查 9 项全绿，I-6 原子性（crash-before-rename + 残留 tmp 清理）+ I16 + AutoCommitter 双触发均有测试。
+- B8 仅自有类型加 serde derive。orphans.contains 类型修正合理。
+
+### L2 集成节点 — ✅ 通过（HEAD c1c34b0）
+- `cargo test -p vane-core`：161 passed / 0 failed / 1 ignored
+- `cargo clippy -p vane-core --all-targets -- -D warnings`：clean
+- `cargo check --target wasm32-unknown-unknown -p vane-core`：pass
+- `cargo fmt --check`：pass
+- `bash scripts/check-no-std-fs.sh`：OK（集成节点发现脚本对 segment/tests.rs + persistence 注释误报，已由 01-vfs 稳健化修复 c1c34b0：排除所有 tests.rs + 匹配 std::fs:: 实际用法）
+
+---
+
+## L3 · 07-api-core（单独，集成全部 L1+L2，opus）
+### 07-api-core — 🔄 派发中
 
 ---
 
