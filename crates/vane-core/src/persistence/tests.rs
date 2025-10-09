@@ -136,3 +136,50 @@ fn manifest_store_corrupt_returns_error() {
     let store = ManifestStore::new(vfs, "db");
     assert!(store.load().is_err());
 }
+
+#[test]
+fn auto_committer_default_is_on_1000_1000() {
+    match AutoCommitConfig::default() {
+        AutoCommitConfig::On {
+            interval_ms,
+            max_docs,
+        } => {
+            assert_eq!(interval_ms, 1000);
+            assert_eq!(max_docs, 1000);
+        }
+        AutoCommitConfig::Off => panic!("default should be On"),
+    }
+}
+
+#[test]
+fn auto_committer_triggers_on_max_docs() {
+    let mut ac = AutoCommitter::new(AutoCommitConfig::On {
+        interval_ms: 60_000,
+        max_docs: 100,
+    });
+    assert!(!ac.should_flush());
+    ac.record_docs(50);
+    assert!(!ac.should_flush());
+    ac.record_docs(50);
+    assert!(ac.should_flush());
+    ac.reset();
+    assert!(!ac.should_flush());
+}
+
+#[test]
+fn auto_committer_triggers_on_interval() {
+    let mut ac = AutoCommitter::new(AutoCommitConfig::On {
+        interval_ms: 0,
+        max_docs: 1_000_000,
+    });
+    // interval_ms=0 → 任何时间差都触发（只要有未 flush 文档）
+    ac.record_docs(1);
+    assert!(ac.should_flush());
+}
+
+#[test]
+fn auto_committer_off_never_flushes() {
+    let mut ac = AutoCommitter::new(AutoCommitConfig::Off);
+    ac.record_docs(9999);
+    assert!(!ac.should_flush());
+}

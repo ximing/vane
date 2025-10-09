@@ -124,3 +124,67 @@ impl ManifestStore {
         self.save_atomic(&m)
     }
 }
+
+/// SPEC §7.1 auto-commit 配置。默认 `On { interval_ms=1000, max_docs=1000 }`。
+#[derive(Debug, Clone)]
+pub enum AutoCommitConfig {
+    Off,
+    On { interval_ms: u32, max_docs: u32 },
+}
+
+impl Default for AutoCommitConfig {
+    fn default() -> Self {
+        AutoCommitConfig::On {
+            interval_ms: 1000,
+            max_docs: 1000,
+        }
+    }
+}
+
+/// SPEC §7.1 auto-commit 触发器：无状态计数器 + 时间戳。
+/// 由 api-core 在 add 路径查询 `should_flush()`；触发后调用 `reset()`。
+///
+/// 双触发：`docs_since_flush >= max_docs` 或 `elapsed >= interval_ms`（先到先触发）。
+pub struct AutoCommitter {
+    config: AutoCommitConfig,
+    docs_since_flush: u32,
+    last_flush: std::time::Instant,
+}
+
+impl AutoCommitter {
+    pub fn new(config: AutoCommitConfig) -> Self {
+        Self {
+            config,
+            docs_since_flush: 0,
+            last_flush: std::time::Instant::now(),
+        }
+    }
+
+    pub fn record_docs(&mut self, n: u32) {
+        self.docs_since_flush = self.docs_since_flush.saturating_add(n);
+    }
+
+    pub fn should_flush(&self) -> bool {
+        match &self.config {
+            AutoCommitConfig::Off => false,
+            AutoCommitConfig::On {
+                interval_ms,
+                max_docs,
+            } => {
+                if self.docs_since_flush == 0 {
+                    return false;
+                }
+                if self.docs_since_flush >= *max_docs {
+                    return true;
+                }
+                let elapsed = self.last_flush.elapsed().as_millis() as u32;
+                elapsed >= *interval_ms
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.docs_since_flush = 0;
+        self.last_flush = std::time::Instant::now();
+    }
+}
