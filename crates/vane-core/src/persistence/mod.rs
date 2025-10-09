@@ -115,9 +115,10 @@ impl ManifestStore {
     /// 在指定 collection 的 segment_ulids 中追加一个 ULID（去重），并原子保存。
     pub fn add_segment(&self, collection: &str, ulid: &str) -> Result<()> {
         let mut m = self.load()?.unwrap_or_else(Manifest::empty);
-        let col = m.collections.get_mut(collection).ok_or_else(|| {
-            VaneError::NotFound(format!("collection not found: {}", collection))
-        })?;
+        let col = m
+            .collections
+            .get_mut(collection)
+            .ok_or_else(|| VaneError::NotFound(format!("collection not found: {}", collection)))?;
         if !col.segment_ulids.contains(&ulid.to_string()) {
             col.segment_ulids.push(ulid.to_string());
         }
