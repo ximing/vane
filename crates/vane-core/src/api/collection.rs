@@ -9,14 +9,14 @@
 
 use crate::api::db::DbInner;
 use crate::api::types::*;
-use crate::bm25::{InvertedIndexBuilder, InvertedIndexReader, write_inverted};
-use crate::fusion::{FusionCandidate, linear_fuse, minmax_normalize, rrf_fuse};
+use crate::bm25::{write_inverted, InvertedIndexBuilder, InvertedIndexReader};
+use crate::fusion::{linear_fuse, minmax_normalize, rrf_fuse, FusionCandidate};
 use crate::persistence::{AutoCommitConfig, AutoCommitter, CollectionMeta, ManifestStore};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::tokenizer::build_tokenizer;
-use crate::types::{Result, RRF_K, Schema, TOPK_MAX, TokenizerId as CoreTokenizerId, VaneError};
-use crate::vfs::Vfs;
+use crate::types::{Result, Schema, TokenizerId as CoreTokenizerId, VaneError, RRF_K, TOPK_MAX};
 use crate::vector::brute_search;
+use crate::vfs::Vfs;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -200,7 +200,8 @@ impl Collection {
                 "{}".to_string()
             };
             // I4/FF2：add_doc 返回段内局部 docid（从 0 起），全局 = base + local
-            let local_docid = writer.add_doc(&doc.external_id, doc.vector.as_deref(), &stored_json)?;
+            let local_docid =
+                writer.add_doc(&doc.external_id, doc.vector.as_deref(), &stored_json)?;
             let global_docid = base_docid + local_docid;
             let tokens = doc
                 .text
@@ -255,7 +256,9 @@ impl Collection {
                 (Some(_), None) => SearchMode::Text,
                 (None, Some(_)) => SearchMode::Vector,
                 (None, None) => {
-                    return Err(VaneError::InvalidArg("search requires text or vector".into()))
+                    return Err(VaneError::InvalidArg(
+                        "search requires text or vector".into(),
+                    ))
                 }
             },
         };

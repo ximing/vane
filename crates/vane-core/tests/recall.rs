@@ -34,12 +34,7 @@ fn build_corpus() -> (Arc<MemoryVfs>, Db) {
         .map(|i| Doc {
             id: format!("doc{}", i),
             text: Some(format!("term{} common word{}", i, i % 3)),
-            vector: Some(vec![
-                i as f32 * 0.1,
-                1.0 - i as f32 * 0.05,
-                0.5,
-                0.0,
-            ]),
+            vector: Some(vec![i as f32 * 0.1, 1.0 - i as f32 * 0.05, 0.5, 0.0]),
             meta: None,
         })
         .collect();

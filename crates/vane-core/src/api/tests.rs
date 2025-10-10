@@ -1,9 +1,9 @@
 use super::db::Db;
 use super::types::*;
+use crate::persistence::AutoCommitConfig;
 use crate::tokenizer::BuiltinTokenizer;
 use crate::types::{FieldDef, Metric, Schema, VaneError};
 use crate::vfs::memory::MemoryVfs;
-use crate::persistence::AutoCommitConfig;
 
 #[test]
 fn open_options_default() {
@@ -517,7 +517,10 @@ fn search_hybrid_linear_fusion_returns_results() {
             candidate_multiplier: 3,
         })
         .unwrap();
-    assert!(!hits.is_empty(), "linear fusion should return non-empty results");
+    assert!(
+        !hits.is_empty(),
+        "linear fusion should return non-empty results"
+    );
     for w in hits.windows(2) {
         assert!(w[0].score >= w[1].score, "results should be sorted desc");
     }
@@ -622,7 +625,10 @@ fn delete_and_compact_return_unsupported_in_m0() {
     let col = db
         .collection("docs", schema, CollectionOptions::default())
         .unwrap();
-    assert!(matches!(col.delete(&["x".into()]), Err(VaneError::Unsupported)));
+    assert!(matches!(
+        col.delete(&["x".into()]),
+        Err(VaneError::Unsupported)
+    ));
     assert!(matches!(col.compact(), Err(VaneError::Unsupported)));
     assert!(matches!(col.reindex(), Err(VaneError::Unsupported)));
     assert!(matches!(db.export("/tmp/x"), Err(VaneError::Unsupported)));
