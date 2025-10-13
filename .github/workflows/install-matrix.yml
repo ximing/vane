@@ -1,0 +1,53 @@
+name: install-matrix
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '@vane/node 版本号'
+        required: true
+        default: '0.1.0'
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg_manager: [npm, yarn, pnpm, bun]
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # 注：bun 在 windows 上的支持仍在演进，该组合为软门禁（报警但不阻断）。
+    # SPEC §13.2-4：npm/yarn/pnpm × 三平台 + bun × (linux+macos) 共 11 个组合硬通过。
+    continue-on-error: ${{ matrix.os == 'windows-latest' && matrix.pkg_manager == 'bun' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Setup pkg manager
+        shell: bash
+        run: |
+          case "${{ matrix.pkg_manager }}" in
+            npm)  npm --version ;;
+            yarn) corepack enable; yarn --version ;;
+            pnpm) npm install -g pnpm; pnpm --version ;;
+            bun)  curl -fsSL https://bun.sh/install | bash; echo "$HOME/.bun/bin" >> $GITHUB_PATH; bun --version ;;
+          esac
+      - name: Init test project
+        shell: bash
+        run: |
+          mkdir test-install && cd test-install
+          case "${{ matrix.pkg_manager }}" in
+            npm)  npm init -y; npm install @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
+            yarn) yarn init -y; yarn add @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
+            pnpm) pnpm init; pnpm add @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
+            bun)  bun init -y; bun add @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
+          esac
+      - name: Require and smoke test
+        shell: bash
+        run: |
+          cd test-install
+          node -e "const vane = require('@vane/node'); console.log('loaded:', typeof vane); if (typeof vane.open !== 'function' && typeof vane.VaneDb === 'undefined') { console.error('FAIL: no open/VaneDb export'); process.exit(1); } console.log('OK')"

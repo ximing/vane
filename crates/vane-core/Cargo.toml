@@ -12,3 +12,14 @@ serde_json = { workspace = true }
 unicode-segmentation = { workspace = true }
 rust-stemmers = { workspace = true }
 ulid = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "hybrid_search"
+harness = false
+
+[[bench]]
+name = "batch_add"
+harness = false

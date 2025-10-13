@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy (-D warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+  recall:
+    # I8 裁决：M0 暴力口径 recall 门禁 trivially 满足
+    # （hybrid=暴力双路+RRF 基线，recall=1.0）。
+    # M1 HNSW 落地后补真实回归 job。
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run recall gate
+        run: cargo test --test recall -p vane-core
+
+  wasm32-check:
+    # SPEC §13.3：core 出现 std::fs 即失败（M0 第一天硬门禁）。
+    # 不变量 I-5：核心算法零平台分支。
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: cargo check wasm32
+        run: cargo check --target wasm32-unknown-unknown -p vane-core
+      - name: grep 双保险（禁 std::fs/std::net/mmap）
+        run: bash scripts/check-no-std-fs.sh
+
+  deny:
+    # SPEC §13.3 cargo-deny + 依赖黑名单
+    # （regex / tokio / prost / tonic / openssl / lindera / ndarray / wee_alloc / dashmap / parking_lot）
+    needs: wasm32-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version ^0.16
+      - name: cargo deny check
+        run: cargo deny check --workspace
+
+  # corpus-compat:  # SPEC §13.3 — M1 落地
+  #   needs: test
+  #   run: cargo test --test corpus_compat
