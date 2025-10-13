@@ -3,6 +3,17 @@ name = "vane-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
 
 [dependencies]
+# S14: 锁定 napi 版本，避免 reason 字段访问在新版本失效。
+napi = { version = "=2.16.13", features = ["napi8", "serde-json"] }
+napi-derive = "=2.16.13"
+serde_json = "1"
 vane-core = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
