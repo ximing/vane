@@ -95,7 +95,19 @@ worktree 隔离在该环境失败（`Failed to resolve base branch "HEAD": git r
 ---
 
 ## L3 · 07-api-core（单独，集成全部 L1+L2，opus）
-### 07-api-core — 🔄 派发中
+### 07-api-core — ✅ 完成 + 审查通过（commit 3e92ee3..a28cdd6）
+- 181 测试通过（api 19 + recall 1 + 既有 161 无回归），五项自证全绿（含 --all-targets clippy + no-std-fs）。
+- 审查 16 项全绿，无阻塞/重要。跨模块 16 调用点签名零错配，I-2 双索引原子可见有真实测试+结构保证。
+- 全部裁决落实：I2 幂等、I3 auto_commit、I4/FF2 docid 局部/全局、I5 真实 meta、I6 linear 启用、I7 缓存 reader、I1 占位、I8 recall 骨架、B5 re-export、S9 无 unsafe。
+- **Parked 次要（M1 改进）**：auto-commit flush 吞错；restore 累加 base 未读段头；inv_readers[i] 索引对齐脆弱；search 循环内重复 vector_field()；wrapping_sub→checked_sub；recall 硬编码 1.0（M1 HNSW 后补真实回归）；I2 未校验 auto_commit 差异。
+
+### L3 集成节点 — ✅ 通过（HEAD a28cdd6）
+- 180 unit + 1 recall 测试通过；clippy --all-targets / wasm32 / fmt / no-std-fs 全绿。
+
+---
+
+## L4 · 09-node-binding（napi-rs）
+### 09-node-binding — 🔄 派发中
 
 ---
 
