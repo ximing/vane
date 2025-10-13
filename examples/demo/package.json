@@ -1,0 +1,17 @@
+{
+  "name": "@vane/demo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Vane M0 demo: 10k wiki abstracts hybrid/vector/text comparison",
+  "scripts": {
+    "load": "node load-wiki.js",
+    "compare": "node compare.js",
+    "smoke:vector": "node lib/vector.js",
+    "smoke:data": "node lib/data.js"
+  },
+  "dependencies": {
+    "@vane/node": "file:../../crates/vane-node"
+  },
+  "engines": { "node": ">=18" }
+}
