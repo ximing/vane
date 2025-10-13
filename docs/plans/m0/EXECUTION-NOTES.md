@@ -107,7 +107,65 @@ worktree 隔离在该环境失败（`Failed to resolve base branch "HEAD": git r
 ---
 
 ## L4 · 09-node-binding（napi-rs）
-### 09-node-binding — 🔄 派发中
+### 09-node-binding — ✅ 完成 + 审查通过（commit 6d7bbfb..d069789）
+- napi-rs 本机构建成功（macOS aarch64/Node 20），19 单测 + 4 Rust 集成 + 13 JS(ava) 测试通过，napi build 产出 .node，check-thin.sh 通过。
+- 审查 12 项全绿，无阻塞/重要。§9.3 不桥接 tokio、§10 错误码透传、§12.2 4 平台、B6 Schema 数组、I1 export/reindex、I-7/I-8 薄壳均落实。
+- 10 处偏离合理（orphan rule E0117、Json newtype、BigInt、Status 映射等）。
+- **Parked 次要**：check-thin.sh 注释排除管道冗余（不影响门禁）；[profile.release] 移除后 release 无 LTO（M1 补）。
+
+## 10-ci-gates — ✅ 完成 + 审查通过（commit 223ae8b）
+- ci.yml（fmt/clippy/test/recall/wasm32/deny）、benchmark.yml、release.yml（4 平台）、install-matrix.yml（4 包管理器）、check-bench-regression.py（完整可执行）、criterion benches 骨架（hybrid_search + batch_add）。
+- 审查 12 项达标，无阻塞。3 bench 目标编译通过，clippy --workspace --all-targets --all-features 干净。
+- **Parked 中等（M1 前修）**：
+  - FF5：benchmark.yml main baseline 存 `../vane-main/target/criterion`，`critcmp main current` 在 repo 根读不到 → 回退门禁实际不生效（容错 exit 0 掩盖）。基线数据已产出（benches 运行），但 >10% 报警失效。M1 HNSW 前修（用 criterion 原生 --baseline 或同目录跑）。
+  - FF6：wasm32 体积门禁 ≤800KB 无 job 也无 deferred 注释。SPEC §13.2-3 口径"含 jieba 代码"M1 起生效，M0 无 jieba trivially 满足。加 deferred 注释即可。
+- **Parked 次要**：install-matrix workflow_run version 回退 '0.1.0'；check-bench-regression.py regex 不匹配 ASCII us（容错兜底）；hybrid_search.rs:71-85 冗余死代码。
+
+## L5 · 11-demo
+### 11-demo — ✅ 完成 + 审查通过（commit 97e2de1）
+- demo 跑通：10k 文档灌库（~1950ms，10 段）、5 组 query 三列排序对比（5/5 hybrid 与单路不同，AC4）、sqlite-vec+FTS5 代码量对比（Vane 核心 6 行 vs 手写 ~150-200 行）。AC1-AC7 全满足。
+- 审查 12 项全绿，SPEC §15 demo 验收锚点达成。偏离合理（@vane/node CJS 默认导入、合成英文语料）。
+
+---
+
+## M0 完成状态总表
+
+| 计划 | 状态 | 审查 | commits |
+|---|---|---|---|
+| 00-workspace | ✅ 完成 | 通过 | e4cf491..0333592 |
+| 01-vfs | ✅ 完成 | 通过 | 185bacb..cf4969d + c1c34b0(脚本硬化) |
+| 02-tokenizer | ✅ 完成 | 通过 | 71e4506..f734433 |
+| 03-fusion | ✅ 完成 | 通过 | 4cf5e8b + 344ba7c(clippy 修) |
+| 04-segment-format | ✅ 完成 | 通过 | b96dfb1..1e15085 |
+| 05-bm25 | ✅ 完成 | 通过 | 3df0ab7 |
+| 06-vector-brute | ✅ 完成 | 通过 | cad7cec |
+| 07-api-core | ✅ 完成 | 通过 | 3e92ee3..a28cdd6 |
+| 08-persistence | ✅ 完成 | 通过 | a246904..6263253 |
+| 09-node-binding | ✅ 完成 | 通过 | 6d7bbfb..d069789 |
+| 10-ci-gates | ✅ 完成 | 通过 | 223ae8b |
+| 11-demo | ✅ 完成 | 通过 | 97e2de1 |
+
+## 最终集成门禁 — ✅ 全绿（HEAD 97e2de1）
+- `cargo test --workspace`：180 core + 1 recall + 19 vane-node unit + 4 vane-node integration，全 0 failed
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`：clean
+- `cargo check --target wasm32-unknown-unknown -p vane-core`：pass
+- `cargo fmt --all -- --check`：pass
+- `bash scripts/check-no-std-fs.sh`：OK
+- `bash crates/vane-node/scripts/check-thin.sh`：OK（I-8 薄壳）
+- `cargo bench --no-run -p vane-core`：3 bench 目标编译通过
+
+## Benchmark 基线（macOS aarch64，10k 文档 384 维）
+- hybrid_search_10k_topk10：~3.85 ms（M0 暴力承诺 P99 < 150ms，远超）
+- batch_add/100：~265 µs（~377k docs/s，承诺 ≥5k docs/s，远超）
+- batch_add/500：~1.41 ms（~355k docs/s，远超）
+
+## DoD 验收
+- [x] cargo test 全量通过（Memory + StdFs 双后端同一 conformance 套件，01-vfs；OPFS 后端 M2 实现，trait M0 冻结）
+- [x] cargo check --target wasm32-unknown-unknown -p vane-core 通过
+- [x] benchmark CI 就位并产生基线数据（hybrid P99、批量 add 吞吐）
+- [~] Node 绑定 mac-arm64 本地验证可用 + demo 跑通；linux-x64/darwin-x64/win32-x64 配置于 release.yml，CI 交叉编译待远程仓库触发（本地无 Linux/Windows 环境）
+- [x] docs/plans/m0/ 每份计划标记完成状态与验收结果（见上表 + 本文件）
+- [x] M0 总结报告：docs/plans/m0/M0-SUMMARY.md
 
 ---
 
