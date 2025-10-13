@@ -1,7 +1,5 @@
 node_modules/
 target/
 *.node
-# napi-rs 生成产物（index.js loader + index.d.ts）：由 `napi build` 再生成；
-# 最终 DoD 阶段生成并提交 index.d.ts。
+# napi-rs 生成的 index.js loader：由 `napi build` 再生成，不入库。
 index.js
-index.d.ts

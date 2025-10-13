@@ -2,8 +2,8 @@
   "name": "@vane/node",
   "version": "0.1.0",
   "main": "main.js",
-  "types": "index.d.ts",
-  "files": ["main.js", "index.js", "index.d.ts"],
+  "types": "main.d.ts",
+  "files": ["main.js", "main.d.ts", "index.js", "index.d.ts"],
   "optionalDependencies": {
     "@vane/node-linux-x64-gnu": "0.1.0",
     "@vane/node-darwin-arm64": "0.1.0",

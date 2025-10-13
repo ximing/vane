@@ -1,11 +1,9 @@
-// vane-node: Node.js napi-rs 绑定（薄壳，SPEC §9.3）。
-// Task 1：仅 hello() 验证 napi 构建链路通。Task 2 起逐个加 mod（S13 裁决）。
+// vane-node: Node.js napi-rs 绑定（薄壳，SPEC §9.3 / §14 I-8）。
+// 直连 vane_core::api（不经 C ABI）；异步经 AsyncTask（libuv worker pool），
+// 不桥接 tokio（§9.3）。仅做 JSON ↔ Rust 结构转换，无检索逻辑。
 #![deny(warnings)]
 
-use napi_derive::napi;
-
-/// 构建链路自检导出。Task 2 移除。
-#[napi]
-pub fn hello() -> String {
-    "vane-node".to_string()
-}
+mod collection;
+mod convert;
+mod db;
+mod error;
