@@ -2,18 +2,18 @@ use crate::segment::SegmentMeta;
 use crate::types::{Result, TokenizerId, VaneError, FORMAT_VERSION, MAGIC};
 
 // header.bin 布局（SPEC §6.3）：
-// magic(4) | format_version(4 BE) | ulid_len(1) | ulid(26) |
+// magic(4) | format_version(4 LE) | ulid_len(1) | ulid(26) |
 // doc_count(4 LE) | docid_base(8 LE) | tokenizer_id(32) |
 // tombstone_bytes(4 LE) | tombstone_data
 //
-// 注：format_version 采用大端（to_be_bytes），与计划 Task 1 测试断言
-// bytes[4..8] == [0,0,0,1] 一致；其余数值字段沿用 LE。
+// FA2：全字段统一 LE（含 format_version）。此前 format_version 用 BE 与 payload
+// 字段序混用，现已统一为 LE。
 
 /// header.bin 编码。
 pub fn encode_header(meta: &SegmentMeta) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     let ulid_bytes = meta.ulid.as_bytes();
     out.push(ulid_bytes.len() as u8);
     out.extend_from_slice(ulid_bytes);
@@ -37,7 +37,7 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
     if &buf[0..4] != MAGIC {
         return Err(VaneError::Corrupt(format!("bad magic: {:?}", &buf[0..4])));
     }
-    let version = u32::from_be_bytes(buf[4..8].try_into().unwrap());
+    let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
     if version != FORMAT_VERSION {
         return Err(VaneError::Version(format!(
             "unsupported format_version: {} (expected {})",

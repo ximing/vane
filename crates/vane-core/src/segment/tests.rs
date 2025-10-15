@@ -25,9 +25,9 @@ fn header_roundtrip() {
         tombstones: roaring::RoaringBitmap::new(),
     };
     let bytes = encode_header(&meta).unwrap();
-    // magic + version 开头
+    // magic + version 开头（FA2：全字段统一 LE）
     assert_eq!(&bytes[0..4], b"VANE");
-    assert_eq!(&bytes[4..8], &[0, 0, 0, 1]);
+    assert_eq!(&bytes[4..8], &[1, 0, 0, 0]);
     let decoded = decode_header(&bytes).unwrap();
     assert_eq!(decoded.ulid, meta.ulid);
     assert_eq!(decoded.doc_count, 100);
