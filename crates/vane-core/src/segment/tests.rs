@@ -220,6 +220,86 @@ fn segment_writer_docid_base_nonzero() {
 }
 
 #[test]
+fn vectors_bin_has_magic_version_header() {
+    // FA1（SPEC §6.2）：vectors.bin 必须以 4 字节 magic + 4 字节 format_version(LE) 开头，
+    // 随后才是 f32 LE payload。SegmentReader.open 跳过 8 字节头，vectors() 返回纯 f32。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut writer =
+        SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0x55; 32]), 0).unwrap();
+    writer
+        .add_doc("a", Some(&[1.0, 2.0, 3.0, 4.0]), "{}")
+        .unwrap();
+    let meta = writer.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+
+    // 读原始 vectors.bin 字节，校验头
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut off = 0u64;
+    loop {
+        let n = vfs.read_at(&format!("{}/vectors.bin", seg_dir), &mut tmp, off).unwrap();
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        off += n as u64;
+    }
+    assert_eq!(&buf[0..4], b"VANE");
+    assert_eq!(&buf[4..8], &[1, 0, 0, 0]); // LE
+    assert_eq!(buf.len(), 8 + 4 * 4); // 头 + 1 文档 × 4 维
+
+    // reader 跳过头，vectors() 返回纯 f32
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.vectors().len(), 4);
+    assert_eq!(&r.vectors()[..], &[1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn vectors_bin_empty_segment_still_writes_header() {
+    // FA1：doc_count=0 时 vectors.bin 仍写 8 字节头（空段合规）。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let writer =
+        SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0x66; 32]), 0).unwrap();
+    let meta = writer.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut off = 0u64;
+    loop {
+        let n = vfs.read_at(&format!("{}/vectors.bin", seg_dir), &mut tmp, off).unwrap();
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        off += n as u64;
+    }
+    assert_eq!(buf.len(), 8);
+    assert_eq!(&buf[0..4], b"VANE");
+    assert_eq!(&buf[4..8], &[1, 0, 0, 0]);
+    // reader 读回 doc_count=0，vectors 为空
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.doc_count(), 0);
+    assert!(r.vectors().is_empty());
+}
+
+#[test]
 fn segment_writer_vector_none_fills_zeros() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
     let schema = Schema::new(vec![(

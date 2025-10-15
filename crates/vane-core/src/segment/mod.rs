@@ -101,10 +101,14 @@ impl SegmentWriter {
     pub fn finalize(self) -> Result<SegmentMeta> {
         let seg_dir = format!("{}/seg_{}", self.segments_dir, self.ulid);
 
-        // 写 vectors.bin（f32 LE 连续）
+        // 写 vectors.bin（SPEC §6.2：magic | format_version | f32 LE 连续）
+        // FA1：vectors.bin 加 8 字节头（magic LE + format_version LE，与 FF3 统一 LE）。
+        // doc_count=0 时仍写头（空段合规）。
         let vpath = format!("{}/vectors.bin", seg_dir);
         self.vfs.create(&vpath)?;
-        let mut vbytes = Vec::with_capacity(self.vectors.len() * 4);
+        let mut vbytes = Vec::with_capacity(8 + self.vectors.len() * 4);
+        vbytes.extend_from_slice(crate::types::MAGIC);
+        vbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
         for f in &self.vectors {
             vbytes.extend_from_slice(&f.to_le_bytes());
         }
@@ -212,10 +216,23 @@ impl SegmentReader {
         let meta = header::decode_header(&hbuf)?;
 
         // 读 vectors（doc_count=0 时为空）
+        // FA1：vectors.bin 前 8 字节为 magic+format_version 头，跳过后再 chunks_exact(4)。
         let vectors: Vec<f32> = if meta.doc_count > 0 {
             let vpath = format!("{}/vectors.bin", segment_dir);
             let vbuf = read_all(vfs.as_ref(), &vpath)?;
-            vbuf.chunks_exact(4)
+            if vbuf.len() < 8 || &vbuf[0..4] != crate::types::MAGIC {
+                return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
+            }
+            let version = u32::from_le_bytes(vbuf[4..8].try_into().unwrap());
+            if version != crate::types::FORMAT_VERSION {
+                return Err(VaneError::Version(format!(
+                    "vectors.bin unsupported format_version: {} (expected {})",
+                    version,
+                    crate::types::FORMAT_VERSION
+                )));
+            }
+            vbuf[8..]
+                .chunks_exact(4)
                 .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
                 .collect()
         } else {
