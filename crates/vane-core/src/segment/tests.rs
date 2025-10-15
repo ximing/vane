@@ -269,7 +269,7 @@ fn vectors_bin_has_magic_version_header() {
     // reader 跳过头，vectors() 返回纯 f32
     let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
     assert_eq!(r.vectors().len(), 4);
-    assert_eq!(&r.vectors()[..], &[1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(r.vectors(), &[1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]
