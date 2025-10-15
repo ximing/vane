@@ -79,6 +79,23 @@ jobs:
       - name: cargo deny check
         run: cargo deny check --workspace
 
-  # corpus-compat:  # SPEC §13.3 — M1 落地
-  #   needs: test
-  #   run: cargo test --test corpus_compat
+  corpus-compat:
+    # SPEC §13.3 corpus 格式兼容测试：旧版本写出的库必须被新版本打开。
+    # 此 job 冻结 M0 段格式——任何格式变更必须保持此测试通过，或 bump
+    # FORMAT_VERSION + 提供迁移器/双模读取（SPEC §6.2）。
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Corpus compat test
+        run: cargo test --test corpus_compat -p vane-core
+
+  # wasm32-size (DEFERRED — SPEC §13.2-3)：
+  # 核心 wasm gzip ≤ 800KB（含 jieba 代码、不含词典）；全功能 ≤ 1.2MB；
+  # @vane/dict-zh ≤ 1.5MB；Go embed 增量 < 2MB；500KB 为 M2 优化目标非门禁。
+  # 此门禁 M1 jieba 落地起生效，届时补 wasm-opt + gzip size check：
+  #   - cargo build --release --target wasm32-unknown-unknown -p vane-core
+  #   - wasm-opt -Oz target/wasm32-unknown-unknown/release/vane_core.wasm -o opt.wasm
+  #   - gzip -c opt.wasm | wc -c  （断言 ≤ 800*1024）
+  # M0 段不依赖 jieba，体积门禁暂不实跑。
