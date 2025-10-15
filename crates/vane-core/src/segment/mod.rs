@@ -121,7 +121,7 @@ impl SegmentWriter {
         self.vfs.create(&spath)?;
         let mut sbytes = Vec::new();
         sbytes.extend_from_slice(crate::types::MAGIC);
-        sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_be_bytes());
+        sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
         sbytes.extend_from_slice(&(self.stored.len() as u32).to_le_bytes());
         for (docid, json) in &self.stored {
             sbytes.extend_from_slice(&docid.to_le_bytes());
@@ -136,7 +136,7 @@ impl SegmentWriter {
         self.vfs.create(&ipath)?;
         let mut ibytes = Vec::new();
         ibytes.extend_from_slice(crate::types::MAGIC);
-        ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_be_bytes());
+        ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
         ibytes.extend_from_slice(&(self.id_map.len() as u32).to_le_bytes());
         for (docid, eid) in &self.id_map {
             ibytes.extend_from_slice(&docid.to_le_bytes());
@@ -152,7 +152,7 @@ impl SegmentWriter {
         self.vfs.create(&colpath)?;
         let mut scbytes = Vec::new();
         scbytes.extend_from_slice(crate::types::MAGIC);
-        scbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_be_bytes());
+        scbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
         scbytes.extend_from_slice(&0u32.to_le_bytes()); // 0 个标量字段
         self.vfs.write_at(&colpath, &scbytes, 0)?;
         self.vfs.sync(&colpath)?;
@@ -308,12 +308,24 @@ impl SegmentReader {
 }
 
 /// 解码 stored.bin / idmap.bin 共享的 KV 布局：
-/// magic(4) | version(4 BE) | count(4 LE) | {docid(8 LE)|len(4 LE)|bytes}...
+/// magic(4) | version(4 LE) | count(4 LE) | {docid(8 LE)|len(4 LE)|bytes}...
+/// FA2：version 统一 LE；顺手加 version 校验（FF4 严格化的可接受轻量部分）。
 fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u64, String>> {
     if buf.len() < 12 {
         return Ok(std::collections::HashMap::new());
     }
-    // skip magic(4) + version(4)
+    if &buf[0..4] != crate::types::MAGIC {
+        return Err(VaneError::Corrupt(format!("{} bad magic", label)));
+    }
+    let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    if version != crate::types::FORMAT_VERSION {
+        return Err(VaneError::Version(format!(
+            "{} unsupported format_version: {} (expected {})",
+            label,
+            version,
+            crate::types::FORMAT_VERSION
+        )));
+    }
     let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
     let mut pos = 12;
     let mut map = std::collections::HashMap::with_capacity(count);
