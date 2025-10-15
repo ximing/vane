@@ -206,7 +206,12 @@ fn segment_writer_docid_base_nonzero() {
     assert_eq!(m1.doc_count, 2);
     // 第二段 base=2（接续）
     let mut w2 = SegmentWriter::new(vfs.clone(), "seg", &schema, &tok_id, 2).unwrap();
-    w2.add_doc("c", Some(&[1.0, 1.0]), "{}").unwrap();
+    // FF2：add_doc 返回段内局部 docid（从 0 起），全局 docid = docid_base + 返回值。
+    // base=2 时首 doc 应返回 0（局部），而非全局 2。
+    let local_id = w2.add_doc("c", Some(&[1.0, 1.0]), "{}").unwrap();
+    assert_eq!(local_id, 0, "add_doc 应返回局部 docid（0 起），而非全局 docid");
+    let global_id = m1.docid_base + m1.doc_count as u64 + local_id; // = 0 + 2 + 0 = 2
+    assert_eq!(global_id, 2, "全局 docid = base + local");
     let m2 = w2.finalize().unwrap();
     assert_eq!(m2.docid_base, 2);
     assert_eq!(m2.doc_count, 1);
