@@ -68,6 +68,7 @@ fn memory_vfs_conformance() {
 mod std_fs_tests {
     use super::super::std_fs::StdFsVfs;
     use super::run_conformance_tests;
+    use crate::vfs::Vfs;
     use std::path::PathBuf;
 
     fn tmpdir() -> PathBuf {
@@ -83,6 +84,28 @@ mod std_fs_tests {
         let vfs = StdFsVfs::with_root(dir.to_str().unwrap());
         run_conformance_tests(&vfs);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn std_fs_vfs_list_returns_sorted() {
+        // P2：StdFsVfs::list 与 MemoryVfs::list 一致返回有序结果。
+        let dir = std::env::temp_dir().join(format!(
+            "vane-vfs-sort-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vfs = StdFsVfs::with_root(dir.to_str().unwrap());
+        vfs.create("c.bin").unwrap();
+        vfs.create("a.bin").unwrap();
+        vfs.create("b.bin").unwrap();
+        let files = vfs.list(".").unwrap();
+        assert_eq!(files, vec!["a.bin", "b.bin", "c.bin"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
