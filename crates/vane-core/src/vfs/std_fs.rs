@@ -1,12 +1,17 @@
 use crate::types::{Result, VaneError};
 use crate::vfs::Vfs;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Native 文件系统 VFS 后端。SPEC §6.1 四后端之一。
 /// 这是 core crate 中唯一允许使用 std::fs 的模块（cfg 隔离，§13.3 例外）。
 #[cfg(not(target_arch = "wasm32"))]
 pub struct StdFsVfs {
     root: PathBuf,
+    // P4 生产化缓存：已 create_dir_all 的父目录集合，避免每次 resolve 都 stat。
+    // create_dir_all 本身幂等，此缓存仅减少重复系统调用。
+    created_dirs: Mutex<HashSet<PathBuf>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,21 +19,30 @@ impl StdFsVfs {
     pub fn new() -> Self {
         Self {
             root: PathBuf::new(),
+            created_dirs: Mutex::new(HashSet::new()),
         }
     }
 
     pub fn with_root(root: &str) -> Self {
         Self {
             root: PathBuf::from(root),
+            created_dirs: Mutex::new(HashSet::new()),
         }
     }
 
     fn resolve(&self, path: &str) -> PathBuf {
         // 简化：路径相对于 root
         let p = self.root.join(path);
-        // 确保父目录存在
+        // 确保父目录存在（缓存命中则跳过 create_dir_all）
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if !parent.as_os_str().is_empty() {
+                let mut cache = self.created_dirs.lock().unwrap();
+                if cache.insert(parent.to_path_buf()) {
+                    // 新插入（首次见到此目录）：实际建目录
+                    drop(cache);
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
         }
         p
     }
@@ -120,6 +134,9 @@ impl Vfs for StdFsVfs {
                 out.push(name.to_string());
             }
         }
+        // 与 MemoryVfs::list 一致：返回有序结果（read_dir 顺序依赖平台/FS，
+        // 排序后调用方可预测，conformance 测试用 .contains() 不受影响）。
+        out.sort();
         Ok(out)
     }
 }

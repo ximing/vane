@@ -97,7 +97,7 @@ impl Vfs for MemoryVfs {
     }
 
     fn list(&self, dir: &str) -> Result<Vec<String>> {
-        // 按 dir 前缀过滤，仅返回下一层路径分量（与 StdFsVfs::list 的 read_dir 语义一致：I11）。
+        // 按 dir 前缀过滤，仅返回下一层路径分量（与 StdFsVfs::list 的 read_dir 语义一致）。
         // 即：对 dir="."，文件 "sub/x.bin" 贡献条目 "sub"（目录名），而非完整路径。
         let prefix = if dir == "." || dir.is_empty() {
             String::new()
