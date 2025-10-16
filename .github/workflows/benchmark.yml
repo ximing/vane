@@ -18,21 +18,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install critcmp
         run: cargo install critcmp --locked
-      - name: Run benchmark on current branch
-        run: cargo bench --workspace -- --save-baseline current
-      - name: Checkout main baseline
+      - name: Record trigger ref
+        id: ref
+        run: echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+      # FF5 修复：两个 baseline 必须落在同一 target/criterion 才能被 critcmp 比较。
+      # 此前用 git worktree 在对侧目录跑 main，baseline 隔离在各自 worktree 的
+      # target/criterion，repo 根 critcmp 读不到 → 回退门禁实际失效。
+      # 现改为同一 checkout 内顺序切分支：main 先 --save-baseline main，
+      # 再切回触发分支 --save-baseline current，两者共享 target/criterion。
+      - name: Checkout main and run baseline bench
         run: |
           git fetch origin main:main
-          git worktree add ../vane-main main
-      - name: Run benchmark on main
-        working-directory: ../vane-main
-        run: cargo bench --workspace -- --save-baseline main
+          git checkout main
+          cargo bench --workspace -- --save-baseline main
+      - name: Checkout trigger branch and run current bench
+        run: |
+          git checkout "${{ steps.ref.outputs.branch }}"
+          cargo bench --workspace -- --save-baseline current
       - name: Compare and fail on >10% regression
         run: |
-          # critcmp 输出表格；用脚本解析回退比例
+          # critcmp 退出码在 baseline 缺失等情况下不可靠，故 || true 兜底；
+          # 真正的回退判定交给 check-bench-regression.py 解析其表格输出。
           critcmp main current > compare.txt 2>&1 || true
           cat compare.txt
-          # 解析每个基准：若 current 相对 main 回退 >10% 则失败
           python3 scripts/check-bench-regression.py compare.txt 0.10
       - name: Upload comparison artifact
         if: always()
