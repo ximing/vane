@@ -244,6 +244,7 @@ fn corpus_segment_files_have_magic_version_headers() {
         "stored.bin",
         "idmap.bin",
         "scalars.col",
+        "inverted.bin",
     ] {
         let path = format!("{}/{}", seg_path, fname);
         let mut buf = Vec::new();
