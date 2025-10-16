@@ -1,6 +1,6 @@
 //! SPEC §8.2 融合算法：RRF(k=60) + linear(minmax)。
 //!
-//! 纯函数模块，无状态、无 IO、无 cfg。仅依赖 `std` 与 `vane_core::types::ScoredDoc`。
+//! 纯函数模块，无状态、无 IO、无 cfg。仅依赖 `std` 与 `crate::types::ScoredDoc`。
 
 use crate::types::ScoredDoc;
 use std::collections::HashMap;

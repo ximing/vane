@@ -150,7 +150,9 @@ fn minmax_negative_scores() {
 }
 
 #[test]
-fn minmax_nan_safe_input_rejected() {
+fn minmax_nan_input_does_not_panic() {
+    // P3 命名澄清：minmax 对 NaN 输入不 panic（range==0.0 或 NaN 分支记 0.0），
+    // 但调用方契约不含 NaN——此测试仅验证不 panic，不代表 NaN 是合法输入。
     let scored = vec![sd(0, f32::NAN)];
     let _ = minmax_normalize(&scored);
 }
