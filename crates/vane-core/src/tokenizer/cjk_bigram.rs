@@ -26,6 +26,8 @@ impl CjkBigramTokenizer {
 impl Tokenizer for CjkBigramTokenizer {
     fn tokenize(&self, text: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
+        // position 跨 run 连续递增（不变量 I-4），需可变状态在 run 间累积，
+        // 故不能像 standard 那样用 zip(0_u32..) 局部枚举。
         let mut position: u32 = 0;
 
         let chars: Vec<char> = text.chars().collect();
