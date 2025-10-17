@@ -679,3 +679,101 @@ fn multi_segment_flush_and_search() {
     assert_eq!(hits.len(), 2);
     assert_eq!(hits[0].id, "a");
 }
+
+#[test]
+fn restore_multi_segment_uses_stored_docid_base() {
+    // 验证 restore_from_manifest 从段头读 docid_base（而非累加 doc_count 推断），
+    // 多段 reopen 后 search 命中正确的 external_id（不会因 offset 错位串段）。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+
+    // 第一段：doc a/b
+    let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+    let col = db
+        .collection("docs", schema.clone(), CollectionOptions::default())
+        .unwrap();
+    col.add(&[
+        Doc {
+            id: "a".into(),
+            text: None,
+            vector: Some(vec![1.0, 0.0]),
+            meta: None,
+        },
+        Doc {
+            id: "b".into(),
+            text: None,
+            vector: Some(vec![0.0, 1.0]),
+            meta: None,
+        },
+    ])
+    .unwrap();
+    col.flush().unwrap();
+    // 第二段：doc c/d
+    col.add(&[
+        Doc {
+            id: "c".into(),
+            text: None,
+            vector: Some(vec![1.0, 1.0]),
+            meta: None,
+        },
+        Doc {
+            id: "d".into(),
+            text: None,
+            vector: Some(vec![-1.0, 0.0]),
+            meta: None,
+        },
+    ])
+    .unwrap();
+    col.flush().unwrap();
+    db.close().unwrap();
+
+    // reopen：restore 应正确还原各段 docid_base
+    let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col2 = db2
+        .collection("docs", schema, CollectionOptions::default())
+        .unwrap();
+    // 查 c 的向量，应命中 c 而非 a/b/d（验证第二段 offset=2 正确）
+    let hits = col2
+        .search(&SearchQuery {
+            text: None,
+            vector: Some(vec![1.0, 1.0]),
+            top_k: 4,
+            mode: SearchMode::Vector,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].id, "c", "restore 后应命中正确文档（docid_base 从段头读）");
+    // 再灌一篇验证 next_docid 正确（=4，不与已存在 docid 冲突）
+    let report = col2
+        .add(&[Doc {
+            id: "e".into(),
+            text: None,
+            vector: Some(vec![0.0, -1.0]),
+            meta: None,
+        }])
+        .unwrap();
+    assert_eq!(report.accepted, 1);
+    col2.flush().unwrap();
+    let hits_e = col2
+        .search(&SearchQuery {
+            text: None,
+            vector: Some(vec![0.0, -1.0]),
+            top_k: 1,
+            mode: SearchMode::Vector,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert_eq!(hits_e[0].id, "e");
+}
