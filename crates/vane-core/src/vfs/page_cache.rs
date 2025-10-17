@@ -144,6 +144,9 @@ mod tests {
         let count = inner.order.iter().filter(|(p, _)| p == "f").count();
         assert_eq!(count, 1, "同 key 重复 put 后 order 不应有重复条目");
         assert_eq!(inner.used_bytes, 64);
-        assert_eq!(inner.pages.get(&("f".to_string(), 0)).map(|d| d[0]), Some(1u8));
+        assert_eq!(
+            inner.pages.get(&("f".to_string(), 0)).map(|d| d[0]),
+            Some(1u8)
+        );
     }
 }

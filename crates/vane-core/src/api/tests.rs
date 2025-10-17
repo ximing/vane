@@ -752,7 +752,10 @@ fn restore_multi_segment_uses_stored_docid_base() {
         })
         .unwrap();
     assert!(!hits.is_empty());
-    assert_eq!(hits[0].id, "c", "restore 后应命中正确文档（docid_base 从段头读）");
+    assert_eq!(
+        hits[0].id, "c",
+        "restore 后应命中正确文档（docid_base 从段头读）"
+    );
     // 再灌一篇验证 next_docid 正确（=4，不与已存在 docid 冲突）
     let report = col2
         .add(&[Doc {
