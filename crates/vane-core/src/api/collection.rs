@@ -101,19 +101,22 @@ impl CollectionInner {
         let mut readers = Vec::new();
         let mut offsets = HashMap::new();
         let mut inv_readers = Vec::new();
-        let mut base = 0u64;
+        // 读取每段 header.bin 已持久化的 docid_base（而非累加 doc_count 推断），
+        // 更稳健：段顺序/非连续场景（M1 compaction）也能正确还原 offset。
+        let mut max_end = 0u64;
         for ulid in &meta.segment_ulids {
             let seg_dir = format!("{}/segments/seg_{}", db.db_path, ulid);
             let reader = Arc::new(SegmentReader::open(&db.vfs, &seg_dir)?);
             // I7：同时 open InvertedIndexReader 缓存
             let inv_reader = Arc::new(InvertedIndexReader::open(&db.vfs, &seg_dir)?);
+            let base = reader.meta().docid_base;
             let count = reader.doc_count() as u64;
             offsets.insert(ulid.clone(), base);
-            base += count;
+            max_end = max_end.max(base + count);
             readers.push(reader);
             inv_readers.push(inv_reader);
         }
-        inner.write_state.lock().unwrap().next_docid = base;
+        inner.write_state.lock().unwrap().next_docid = max_end;
         *inner.snapshot.write().unwrap() = readers;
         *inner.seg_offsets.write().unwrap() = offsets;
         *inner.inverted_readers.write().unwrap() = inv_readers;
@@ -152,7 +155,15 @@ impl Collection {
         let should = state.auto_committer.should_flush();
         drop(state);
         if should {
-            let _ = self.flush();
+            // auto-commit flush 失败不再静默吞错：记录到 stderr 供排查。
+            // 不改 AddReport pub API（加失败标志属 pub API 变更，交编排者裁决）；
+            // M1 可引入 log crate 做结构化日志。
+            if let Err(e) = self.flush() {
+                eprintln!(
+                    "[vane] auto-commit flush for collection '{}' failed: {}",
+                    self.inner.name, e
+                );
+            }
         }
         Ok(AddReport {
             accepted: count,
@@ -262,9 +273,9 @@ impl Collection {
                 }
             },
         };
-        // dim 校验
-        if let Some(v) = &query.vector {
-            let dim = self.inner.schema.vector_field()?.1;
+        // dim 校验 + metric 一次性解析（hoist 出循环，避免每段重复 vector_field() 调用）
+        let vf = if let Some(v) = &query.vector {
+            let (_, dim, metric) = self.inner.schema.vector_field()?;
             if v.len() as u32 != dim {
                 return Err(VaneError::Schema(format!(
                     "query vector dim {} != schema dim {}",
@@ -272,7 +283,10 @@ impl Collection {
                     dim
                 )));
             }
-        }
+            Some(metric)
+        } else {
+            None
+        };
 
         let snap = self.inner.snapshot.read().unwrap();
         let offsets = self.inner.seg_offsets.read().unwrap();
@@ -284,12 +298,12 @@ impl Collection {
         let mut vec_candidates: Vec<crate::types::ScoredDoc> = Vec::new();
         let mut text_candidates: Vec<crate::types::ScoredDoc> = Vec::new();
 
-        for (i, reader) in snap.iter().enumerate() {
+        // snap 与 inv_readers 在 flush/restore 中成对维护，zip 迭代对齐更稳健
+        for (reader, inv_reader) in snap.iter().zip(inv_readers.iter()) {
             let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
             // vector 路
             if matches!(mode, SearchMode::Hybrid | SearchMode::Vector) {
-                if let Some(qv) = &query.vector {
-                    let metric = self.inner.schema.vector_field()?.2;
+                if let (Some(qv), Some(metric)) = (&query.vector, vf) {
                     let mut hits = brute_search(
                         reader.vectors(),
                         reader.dim(),
@@ -309,7 +323,6 @@ impl Collection {
             // text 路
             if matches!(mode, SearchMode::Hybrid | SearchMode::Text) {
                 if let Some(qt) = &query.text {
-                    let inv_reader = &inv_readers[i];
                     let tokens = self.inner.tokenizer.tokenize(qt);
                     let mut hits = inv_reader.search(
                         &tokens,
@@ -393,7 +406,12 @@ impl Collection {
             let mut found_fields = None;
             for reader in snap.iter() {
                 let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
-                let local = sd.docid.wrapping_sub(base);
+                // checked_sub：sd.docid < base 时返回 None，跳过该段（更安全，
+                // 避免 wrapping_sub 产生巨大 local 误命中脆弱 external_id 查找）
+                let local = match sd.docid.checked_sub(base) {
+                    Some(l) => l,
+                    None => continue,
+                };
                 if let Some(eid) = reader.external_id(local) {
                     found_id = Some(eid.to_string());
                     if let Some(json) = reader.stored_json(local) {
