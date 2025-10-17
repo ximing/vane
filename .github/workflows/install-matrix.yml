@@ -36,15 +36,27 @@ jobs:
             pnpm) npm install -g pnpm; pnpm --version ;;
             bun)  curl -fsSL https://bun.sh/install | bash; echo "$HOME/.bun/bin" >> $GITHUB_PATH; bun --version ;;
           esac
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          # workflow_dispatch 显式传参优先；否则从 crates/vane-node/package.json 读取
+          # （workflow_run 触发时 github.event.inputs 为空，此前硬编码回退 '0.1.0'
+          # 会与已发布版本脱节）。
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then
+            VER=$(node -p "require('./crates/vane-node/package.json').version")
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
       - name: Init test project
         shell: bash
         run: |
           mkdir test-install && cd test-install
           case "${{ matrix.pkg_manager }}" in
-            npm)  npm init -y; npm install @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
-            yarn) yarn init -y; yarn add @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
-            pnpm) pnpm init; pnpm add @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
-            bun)  bun init -y; bun add @vane/node@${{ github.event.inputs.version || '0.1.0' }} ;;
+            npm)  npm init -y; npm install @vane/node@${{ steps.ver.outputs.version }} ;;
+            yarn) yarn init -y; yarn add @vane/node@${{ steps.ver.outputs.version }} ;;
+            pnpm) pnpm init; pnpm add @vane/node@${{ steps.ver.outputs.version }} ;;
+            bun)  bun init -y; bun add @vane/node@${{ steps.ver.outputs.version }} ;;
           esac
       - name: Require and smoke test
         shell: bash

@@ -64,24 +64,21 @@ fn build_corpus() -> (Db, Vec<f32>) {
 
 fn bench_hybrid_search(c: &mut Criterion) {
     let (db, query_vec) = build_corpus();
-    let col = db.collections();
-    let _name = col.first().cloned().unwrap_or_default();
+    // build_corpus 已创建 "docs" collection；collection() 幂等返回已有句柄。
+    // 此前冗余调用 db.collections() + 重复构造 schema，删除（死代码）。
+    let schema = Schema::new(vec![
+        ("body".into(), FieldDef::Text),
+        (
+            "v".into(),
+            FieldDef::Vector {
+                dim: DIM as u32,
+                metric: Metric::Cosine,
+            },
+        ),
+    ])
+    .unwrap();
     let col = db
-        .collection(
-            "docs",
-            Schema::new(vec![
-                ("body".into(), FieldDef::Text),
-                (
-                    "v".into(),
-                    FieldDef::Vector {
-                        dim: DIM as u32,
-                        metric: Metric::Cosine,
-                    },
-                ),
-            ])
-            .unwrap(),
-            CollectionOptions::default(),
-        )
+        .collection("docs", schema, CollectionOptions::default())
         .unwrap();
 
     let query = SearchQuery {
