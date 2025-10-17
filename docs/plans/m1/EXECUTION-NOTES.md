@@ -38,11 +38,15 @@ M1 的 HNSW 会扩展 segment 格式，必须先把 M0 segment 格式冻结。�
 
 | 项 | 状态 | 备注 |
 |---|---|---|
-| 派发 | ⏳ 待派发 | opus cleanup SubAgent |
-| 自证门禁 | ⏳ | |
-| 编排者集成门禁 | ⏳ | |
-| reviewer 审查 | ⏳ | |
-| 提交 | ⏳ | |
+| 派发 | ✅ | opus cleanup SubAgent（agentId a7d105ea），DONE |
+| 自证门禁 | ✅ | test/clippy/wasm32/fmt/no-std-fs/check-thin/corpus/bench 全绿 |
+| 编排者集成门禁 | ✅ | 2026-08-09 独立复跑全绿，与自证一致；本轮集成节点未抓出遗漏 |
+| reviewer 审查 | ✅ | sonnet reviewer APPROVED_WITH_MINOR，无阻塞。格式冻结核心正确性坐实，pub API 零改动，不变量守住。报告 `docs/plans/m1/00-cleanup-review.md` |
+| 提交 | ✅ | 5236257/e329c53/348f946/37a895d/d4dee8b/c287458（HEAD c287458） |
+
+### 编排者对 implementer 疑问的判断
+1. inverted.bin 头校验缺失 → **Minor 完整性缺口**。据 M0 README 契约 `write_inverted` 格式 `magic|version|num_terms|...`，inverted.bin 已有头。corpus 测试漏校验它。→ 阶段零-B 补一行测试。非阻塞格式冻结。
+2. stored tag 回填带引号 → M0 既有行为（`serde_json::Value::to_string()`），非本次引入。→ 留 M1 07-api 健壮性阶段。非格式冻结问题。
 
 ---
 
