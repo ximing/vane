@@ -103,6 +103,41 @@ plan-splitter（opus，agentId a18d8dbc）产出 12 模块计划 + README + 报�
 ### plan-splitter 第二轮修订（Task #10 续）
 派发 opus plan-splitter（简报 `docs/plans/m1/revision-brief.md`）：应用 SPEC v1.0→v1.1 + 按审查反馈修订全部计划。修订项：B-1 新增 00-text-persistence、B-2 WAL truncate 修复、R-3 推翻方案 A、R-4/R-6 全串行、M-2 MergeTask::new 补 tokenizer、M-3/M1 测试修复、Q-5~Q-8 细化。
 
+### 聚焦复审（Task #10 收尾）
+sonnet 聚焦复审（`review-revision.md`）→ **APPROVED_WITH_MINOR，可进入阶段二**。B-1/B-2/R-3/R-4-R-6/M-*/Q-* 全部闭环。2 实装期 minor：① 00 测试 `TokenizerId::from_bytes` 不存在→改 `TokenizerId([0u8;32])`；② 06 line 68 陈旧注释与 R-3 矛盾→实装时改。02 posting remap 需新增 postings 迭代方法（M1 扩展非破坏，已声明）。
+
+**阶段一完成** ✅（commit ba67d51：SPEC v1.1 + 13 计划 + 评审闭环）。
+
+---
+
+## 阶段二 · M1 TDD 开发（Task #11）
+
+串行 + 审查/实现重叠流水线（worktree 不可用）。依赖拓扑序：
+L0：00-text-persistence → 01-hnsw → 05-jieba-lite → 09-go-cgo(可后移)
+L1：02-tombstone-merge(需 01+00) → 07-dict-node(需 05)
+L2：03-pre-filter(01+02) / 04-wal(02) / 06-userdict-reindex(05+02+00) / 08-dict-go(05+09)
+L3：11-cold-start(01+02) / 12-recall(01+03)
+L4：10-ci-m1（收尾）
+
+每模块：developer SubAgent（TDD，简报=计划文件）→ reviewer → fix 循环 → 层边界集成门禁。模型：opus 算法/集成（01/05/02/06），sonnet 机械（00/03/04/07/08/09/10/11/12）。
+
+### 模块完成状态
+| 模块 | 状态 | 模型 | commits | 审查 |
+|---|---|---|---|---|
+| 00-text-persistence | ⏳ 派发中 | sonnet | — | — |
+| 01-hnsw | ⏸ 待 | opus | — | — |
+| 05-jieba-lite | ⏸ 待 | opus | — | — |
+| 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
+| 02-tombstone-merge | ⏸ 待 | opus | — | — |
+| 07-dict-node | ⏸ 待 | sonnet | — | — |
+| 03-pre-filter | ⏸ 待 | sonnet | — | — |
+| 04-wal | ⏸ 待 | sonnet | — | — |
+| 06-userdict-reindex | ⏸ 待 | opus | — | — |
+| 08-dict-go | ⏸ 待 | sonnet | — | — |
+| 11-cold-start | ⏸ 待 | sonnet | — | — |
+| 12-recall | ⏸ 待 | sonnet | — | — |
+| 10-ci-m1 | ⏸ 待 | sonnet | — | — |
+
 ### 待 plan-splitter 修订项（两名 reviewer 收敛后一次性派发）
 - B1 原文持久化（新增计划任务或并入 02/06）+ corpus 兼容测试更新。
 - B2 MergeTask::new 扩展 tokenizer 参数。
