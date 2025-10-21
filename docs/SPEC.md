@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.0）
+# Vane 技术规范（SPEC v1.1）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -166,6 +166,12 @@ TokenizerId := sha256( algorithm_version ‖ builtin_dict_version ‖ user_dict_
 
 写入 collection 元数据与每个 segment 头部。**任何时刻一个 collection 只有一套生效分词身份**（不变量 I-4，§14）。
 
+**`builtin_dict_version` 语义澄清（v1.1）**：`builtin_dict_version` 是**编译期词典格式 spec 版本**常量（如 `b"jieba-fmt-v1"`），仅当 DAT 结构 / HMM 参数**格式**变更时递增；词典**内容**升级（增删词条、日历版本变化）**不改变** `builtin_dict_version`。词典运行时日历版本（如 `2026.08`）+ 内容 sha256 前缀仅供 §12.3 三渠道一致性校验与 §3.3 升级警告，**不进 TokenizerId**。
+
+效果：
+- 词典内容升级 → `builtin_dict_version` 不变 → TokenizerId 不变 → 旧段可继续查询（REQUIREMENTS §3.3「仅警告不强制重建」满足）。
+- 词典格式升级 → `builtin_dict_version` 递增 → TokenizerId 变化 → reindex 触发（合理：格式不兼容需重建）。
+
 ---
 
 ## 6. 存储格式
@@ -289,7 +295,7 @@ Stable ──setUserDict()──> PendingReindex ──reindex()──> Rebuildi
 
 ### 9.1 约定
 
-- **句柄**：所有对象（Db / Collection / ReindexHandle）对外为 `uint64_t` 不透明句柄，core 内全局注册表 `DashMap<u64, Arc<…>>`；`vane_*_close(h)` 注销。禁止裸指针出边界。
+- **句柄**：所有对象（Db / Collection / ReindexHandle）对外为 `uint64_t` 不透明句柄，core 内全局注册表 `std::sync::RwLock<HashMap<u64, Arc<…>>>`（v1.1：原 `DashMap` 与依赖黑名单冲突，统一 `std::sync`）；`vane_*_close(h)` 注销。禁止裸指针出边界。
 - **错误**：所有函数返回 `int32_t`（0=OK，负值=错误码，§10）；详情经 `vane_last_error_message(h) -> char*` 获取，调用方负责 `vane_string_free`。
 - **内存铁律**：谁分配谁释放，跨边界只借不还。宿主传入 buffer 仅在调用期间借用；C 侧返回的 buffer 由对应 `vane_*_free` 释放。批量结果：arena 一次分配 + 一次 free。
 - **并发**：句柄内部 `RwLock`；API 文档承诺 goroutine 安全并发调用。
@@ -304,6 +310,14 @@ vane_flush(col_h) -> i32
 vane_search(col_h, query_json, out_arena*) -> i32
 vane_delete(col_h, ids_json, out_count*) -> i32
 vane_compact / vane_reindex / vane_export / vane_close / vane_string_free / vane_last_error_message
+```
+
+**v1.1 补列**（ReindexHandle 必需 + M1 词典分发扩展）：
+```
+vane_reindex_progress(h, out_progress*) -> i32   // ReindexHandle.progress() 落 FFI（§4.1 IDL 要求）
+vane_reindex_wait(h) -> i32                       // ReindexHandle.wait() 落 FFI
+vane_load_dict(h, dict_ptr, dict_len) -> i32      // M1 词典分发：注入 jieba 词典字节（Node/Go 侧调用）
+vane_dict_version(out_ptr, out_len*) -> i32       // M1 词典分发：查当前词典日历版本 + sha256 前缀
 ```
 
 参数/返回一律 JSON 序列化（binding 薄壳原则；性能敏感的 `vane_search` 允许 M1 评估升级为定长二进制，需 spec 修订）。
@@ -438,3 +452,4 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 ## Changelog
 
 - **v1.0**（2026-08-09）：自 REQUIREMENTS v1.1 形式化，含第三轮复议结论（默认中文分词 + 自定义词表 + 词表暂存/reindex 语义仲裁）。
+- **v1.1**（2026-08-09）：M1 计划审查闭环后三处修订。S1 §5.4 澄清 `builtin_dict_version` = 编译期词典格式 spec 版本常量（非日历内容版本），词典内容升级不改变 TokenizerId（满足 REQUIREMENTS §3.3「仅警告不强制重建」）。S2 §9.1 FFI 句柄注册表 `DashMap` → `std::sync::RwLock<HashMap>`（消除与依赖黑名单冲突）。S3 §9.2 补列 `vane_reindex_progress` / `vane_reindex_wait`（ReindexHandle IDL 落实）+ `vane_load_dict` / `vane_dict_version`（M1 词典分发扩展）。
