@@ -50,6 +50,56 @@ M1 的 HNSW 会扩展 segment 格式，必须先把 M0 segment 格式冻结。�
 
 ---
 
+## 阶段一 · M1 计划拆分（Task #10）
+
+plan-splitter（opus，agentId a18d8dbc）产出 12 模块计划 + README + 报告。提出 6 个裁决项 R-1~R-6。
+
+### R-item 编排者裁决
+
+- **R-1（export 归属）→ 批准**：export 保留 M2 占位（E_UNSUPPORTED）。SPEC §15 M2 行明确列 export 快照；plan-splitter-brief 误列 M1，以 SPEC 为准。M1 不实装 export。
+- **R-2（reindex 签名）→ 批准**：`reindex()` 落实为 `Result<ReindexHandle>`（SPEC §4.1 M0 冻结 IDL）。M0 的 `Result<()>` 是文档化占位（M0 README 标注 "ReindexHandle 留 M1"），此为回归冻结签名非破坏。同步 Node（VaneReindexHandle napi struct）+ FFI（vane_reindex 返回 handle）。
+- **R-3（TokenizerId 词典版本注入）→ 暂定推翻方案 A，需用户确认**：
+  - 方案 A（JiebaTokenizer 二次哈希叠加 dict.version()+sha256_prefix）**错误**——会使词典升级时 TokenizerId 变化，旧段与 collection 新 TokenizerId 不符 → E_TOKENIZER_MISMATCH → 实质强制重建，违反 SPEC §3.3「词典升级打开老库仅警告不强制重建」+ I-4「禁止查询期多版本词表合并」。
+  - 正解：`builtin_dict_version(Jieba)` = **编译期常量**（dict 格式 spec 版本，如 `b"jieba-lite-v1"`）；`compute_tokenizer_id` 内部用之，**不改签名、不二次哈希**。运行时词典日历版本 + sha256_prefix 仅供 §12.3 三渠道一致性校验 + §3.3 升级警告，不进 TokenizerId。
+  - 这是 SPEC §5.4（TokenizerId 含 builtin_dict_version）与 §3.3（词典升级不强制重建）的张力 → **SPEC 澄清提议**：§5.4 的 `builtin_dict_version` 应澄清为"编译期 dict 格式 spec 版本"而非"运行时日历版本"。需用户确认。
+- **R-4/R-6（rayon / 并行 / cfg）→ 需用户裁决**：
+  - 选项 a：M1 引入 Executor 抽象（SPEC §11，cfg 仅在 Executor impl），native 用 rayon（SPEC 忠实，加依赖）或 std::thread::scope（避依赖，偏离 §11 "rayon"）。honors「并行」Must + I-5。
+  - 选项 b：M1 全串行搜索（plan-splitter 倾向），并行+Executor 延后 M2。避 cfg 污染（I-5 干净），但**延后 §3.1/§8.1「多段并行搜索」Must** → Must 降级需用户裁决。10万×384 HNSW 串行 <50ms 或许可达，50万/M2 100万需并行。
+  - 编排者暂推荐：选项 a（Executor 抽象 + std::thread::scope native + wasm 串行，cfg 仅在 Executor 模块），既 honor Must 又守 I-5，不引 rayon。但偏离 §11 "rayon" 表述 → 需用户确认是否接受 std::thread::scope 替代 rayon，或要求 rayon。
+- **R-5（stored.bin zstd）→ 批准**：stored.bin zstd 延后 M2。SPEC §15 M1 未列；core 加 zstd 会撑爆 800KB wasm 红线（且 I-5 禁止 cfg 隔离压缩）。M0 I10「M1 补 zstd」为愿景笔记非合同。M1 保持 stored.bin 裸 JSON（corpus 兼容测试不断链）。
+
+### 需用户确认项（阶段一检查点）
+- R-3：§5.4 builtin_dict_version 释义（编译期 spec 版本 vs 运行时日历版本）+ 推翻方案 A。
+- R-4/R-6：M1 并行策略（Executor+thread::scope / Executor+rayon / 串行延后 M2）。
+
+### R-item 状态
+| 项 | 裁决 | 状态 |
+|---|---|---|
+| R-1 export M2 | 批准 | ✅ 自主决策 |
+| R-2 reindex ReindexHandle | 批准 | ✅ 自主决策 |
+| R-3 TokenizerId | 暂定推翻方案 A | ⏳ 需用户确认（SPEC 澄清） |
+| R-4/R-6 并行/Executor | 暂推荐 Executor+thread::scope | ⏳ 需用户裁决 |
+| R-5 stored zstd M2 | 批准 | ✅ 自主决策 |
+
+### 双视角 reviewer 审查
+
+**可行性 reviewer（sonnet，agentId aed95126）→ CHANGES_REQUESTED**。报告 `docs/plans/m1/review-feasibility.md`。阻塞项：
+- **B1【已编排者核实为真】M0 未持久化文档原文**：`api/collection.rs:195-223` flush 中 stored_json 仅由 doc.meta 构造，doc.text 仅 tokenize 进倒排后丢弃，原文不入 stored.bin/任何段文件。违反 SPEC §6.2（stored.bin 应含"原文/JSON meta"），M0 README 偏离记录未记载。→ **06 reindex（换分词器重建倒排）不可实现**（reindex 是 M1 Must）。
+  - **编排者裁决**：M1 必须补原文持久化（§6.2 合约补全，非新需求）。12 计划均未覆盖，是真实计划缺口。M1 在 stored.bin 加原文（或新增 text.bin），corpus 兼容测试同步更新（阶段零冻结的是头纪律 magic+version LE，非文件集不可变；M1 扩展格式如 hnsw.bin 同理）。zstd 仍延后 M2（R-5）。**检查点报备用户**。
+- **B2 MergeTask::new 签名缺 tokenizer 参数**：README §02 契约无 tokenizer，02/06 又假设传 Box<dyn Tokenizer>。→ 扩展 MergeTask::new 签名（M1 新类型，非 M0 冻结，可改）。
+- **M1**：12-recall Task 2 测试含 `unimplemented!()`（语义 placeholder）→ 改真实测试。
+- **M2**：README §05 文本"扩展 builtin_dict_version 填词典版本"与 05 方案 A 矛盾。**注**：可行性 reviewer 认为方案 A 正确，**与编排者 R-3 判定（方案 A 违反 §3.3+I-4）冲突**——可行性 reviewer 未深入 §3.3 分析。**待 opus SPEC 契约 reviewer 独立结论裁决**。
+- 可行性 reviewer 对 R-4/R-6 倾向串行方案；M0 API 对接核查总体可信（唯一重大遗漏即 B1）。
+
+**SPEC 契约 reviewer（opus，agentId af760dd0）→ ⏳ 后台审查中**。报告 `docs/plans/m1/review-spec.md`。重点等其 R-3（§5.4 vs §3.3 张力）独立结论。
+
+### 待 plan-splitter 修订项（两名 reviewer 收敛后一次性派发）
+- B1 原文持久化（新增计划任务或并入 02/06）+ corpus 兼容测试更新。
+- B2 MergeTask::new 扩展 tokenizer 参数。
+- M1 12-recall Task 2 placeholder 修复。
+- M2 README §05 文本统一（依 R-3 最终裁决）。
+- R-3/R-4/R-6 依用户裁决落实。
+
 ## 裁决日志（M1 全程追加）
 
 - **FA1~FA5**（2026-08-09，阶段零-A 派发前）：见上。
