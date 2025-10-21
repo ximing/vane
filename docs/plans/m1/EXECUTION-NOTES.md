@@ -53,3 +53,18 @@ M1 的 HNSW 会扩展 segment 格式，必须先把 M0 segment 格式冻结。�
 ## 裁决日志（M1 全程追加）
 
 - **FA1~FA5**（2026-08-09，阶段零-A 派发前）：见上。
+- **FB1**（2026-08-09，阶段零-B 集成门禁）：编排者独立复跑全绿（185 lib +2 corpus +1 recall +19 node +4 ffi；clippy --all-targets --all-features/wasm32/fmt/no-std-fs/check-thin 全绿）。
+- **FB2**（2026-08-09，FF5 验证）：编排者最初用非 critcmp 格式 heredoc 测试触发误报（"no benchmark results parsed"）。复核后确认解析器针对真实 critcmp 表格格式（每数据行 = name+main+current+变化率）编写，对 SubAgent fixture 与编排者构造的真实格式多行样例均正确（回退>10% exit 1、无回退 exit 0、处理 µs/ms 混合/缺失值`-`/负变化）。FF5 回退门禁确实生效（此前 regex 要求行内 `current` 字面词导致永远空解析→exit 0 兜底，已修）。
+- **FB3**（2026-08-09，auto-commit flush 错误暴露）：housekeeping 期保持 eprintln（不改 pub API，wasm32 安全）。`AddReport.auto_commit_flush_error: Option<VaneError>` 字段属 pub API 变更——若做须走 M1 正式变更流程并同步 FFI/Node 绑定，不在 housekeeping 内塞。`log` crate 引入延后 M1（不在黑名单，但 core 加依赖须 wasm32+deny 评估）。→ 记为 M1 可观测性决策项（07-api 或专项）。
+- **FB4**（2026-08-09，LTO）：接受延后。`[profile.release] lto="thin"` 仅在远程 CI 验证 `napi build --platform --release` 无 napi 符号边缘问题后加。→ 记为 M1 发布前 checklist。
+- **FB5**（2026-08-09，restore base 改读段头）：SubAgent 判定 M0 非真实 bug（连续追加场景累加与段头一致），按防御性改进处理（读段头 docid_base + next_docid=max(base+count)），补多段 restore 测试。M1 compaction（非连续段）场景需此正确性。接受。
+
+## 阶段零-B 状态
+
+| 项 | 状态 | 备注 |
+|---|---|---|
+| 派发 | ✅ | sonnet housekeeping SubAgent（agentId aad83ae3），DONE_WITH_CONCERNS |
+| 自证门禁 | ✅ | 全绿 |
+| 编排者集成门禁 | ✅ | FB1，FF5 独立验证 FB2 |
+| reviewer 审查 | ⏳ | sonnet reviewer（agentId a328858b）后台审查中 |
+| 提交 | ✅ | ae52beb..0a0ce5e（HEAD 0a0ce5e） |
