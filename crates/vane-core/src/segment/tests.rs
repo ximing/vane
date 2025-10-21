@@ -312,6 +312,52 @@ fn vectors_bin_empty_segment_still_writes_header() {
 }
 
 #[test]
+fn stored_text_roundtrip() {
+    // SPEC §6.2：stored.bin 含原文 + JSON meta。set_text 在 add_doc 之后、finalize 之前
+    // 调用，为最近一次 add_doc 的文档设置原文；未调 set_text 的文档 text_len=0（空串）。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let tid = TokenizerId([0u8; 32]);
+    let mut w = SegmentWriter::new(vfs.clone(), "db/segments", &schema, &tid, 0).unwrap();
+    let _local0 = w.add_doc("d0", Some(&[1.0, 0.0]), "{}").unwrap();
+    w.set_text("机器学习检索").unwrap();
+    let _local1 = w.add_doc("d1", Some(&[0.0, 1.0]), "{}").unwrap();
+    // d1 不调 set_text → text_len=0
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("db/segments/seg_{}", meta.ulid);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.text(0), Some("机器学习检索"));
+    assert_eq!(r.text(1), Some("")); // 未调 set_text → 空串（text_len=0）
+    assert_eq!(r.text(999), None);
+    // meta JSON 语义不变
+    assert_eq!(r.stored_json(0), Some("{}"));
+}
+
+#[test]
+fn set_text_before_add_doc_errors() {
+    // set_text 在 add_doc 之前调用应报错（无最近文档可绑定）。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(vfs, "db/segments", &schema, &TokenizerId([0u8; 32]), 0).unwrap();
+    let err = w.set_text("nope").unwrap_err();
+    assert!(matches!(err, crate::types::VaneError::Schema(_)));
+}
+
+#[test]
 fn segment_writer_vector_none_fills_zeros() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
     let schema = Schema::new(vec![(
