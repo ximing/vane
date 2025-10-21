@@ -91,7 +91,17 @@ plan-splitter（opus，agentId a18d8dbc）产出 12 模块计划 + README + 报�
 - **M2**：README §05 文本"扩展 builtin_dict_version 填词典版本"与 05 方案 A 矛盾。**注**：可行性 reviewer 认为方案 A 正确，**与编排者 R-3 判定（方案 A 违反 §3.3+I-4）冲突**——可行性 reviewer 未深入 §3.3 分析。**待 opus SPEC 契约 reviewer 独立结论裁决**。
 - 可行性 reviewer 对 R-4/R-6 倾向串行方案；M0 API 对接核查总体可信（唯一重大遗漏即 B1）。
 
-**SPEC 契约 reviewer（opus，agentId af760dd0）→ ⏳ 后台审查中**。报告 `docs/plans/m1/review-spec.md`。重点等其 R-3（§5.4 vs §3.3 张力）独立结论。
+**SPEC 契约 reviewer（opus，agentId af760dd0）→ CHANGES_REQUESTED**。报告 `docs/plans/m1/review-spec.md`。
+- **R-3：opus 完全支持编排者判定**——方案 A 违反 REQUIREMENTS §3.3+I-4，推翻。正解 `builtin_dict_version(Jieba)`=编译期格式常量 `b"jieba-fmt-v1"`，无二次哈希。发现 M0 `id.rs:23` 注释编码错误假设须修。
+- **B-2（opus 独有发现）04-wal truncate 缺陷**：清空整个 WAL→`flush→delete→flush→崩溃` 后 AddTombstone 丢失→已删除文档复活。修复：flush 不 truncate，仅 compact truncate。
+- **R-4/R-6：opus 强论证 M1 全串行**——thread::scope 在 hnsw 违反 I-5；"多段并行搜索"是 §3.1 架构描述非 §2 Must，10万×384≤10段串行满足 <50ms，不构成 Must 降级。
+
+### 用户确认（阶段一检查点，2026-08-09）
+- **SPEC 三处修订全部批准**：S1 §5.4 builtin_dict_version=编译期格式常量；S2 §9.1 DashMap→std::sync::RwLock；S3 §9.2 补 reindex_progress/wait + load_dict/version。
+- **M1 全串行策略批准**：M1 全串行搜索，Executor+并行延后 M2，文档化为阶段性偏离。
+
+### plan-splitter 第二轮修订（Task #10 续）
+派发 opus plan-splitter（简报 `docs/plans/m1/revision-brief.md`）：应用 SPEC v1.0→v1.1 + 按审查反馈修订全部计划。修订项：B-1 新增 00-text-persistence、B-2 WAL truncate 修复、R-3 推翻方案 A、R-4/R-6 全串行、M-2 MergeTask::new 补 tokenizer、M-3/M1 测试修复、Q-5~Q-8 细化。
 
 ### 待 plan-splitter 修订项（两名 reviewer 收敛后一次性派发）
 - B1 原文持久化（新增计划任务或并入 02/06）+ corpus 兼容测试更新。
