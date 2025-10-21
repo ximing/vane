@@ -18,6 +18,14 @@ pub struct SegmentMeta {
     pub tombstones: roaring::RoaringBitmap,
 }
 
+/// stored.bin 写期单条记录（SPEC §6.2：原文 + JSON meta 分离存储）。
+/// text 为 Option<String>：未调 set_text 时为 None，finalize 写入时落空串（text_len=0）。
+struct StoredEntry {
+    docid: u64,
+    text: Option<String>,
+    meta_json: String,
+}
+
 /// 段写期句柄（SPEC §6.2/§6.4）。构建 header.bin / vectors.bin /
 /// stored.bin / scalars.col / idmap.bin；不写 inverted.bin（由 05-bm25 的
 /// write_inverted 单独写）。finalize 消费 self（不变量 I-1：段不可变）。
@@ -30,7 +38,7 @@ pub struct SegmentWriter {
     next_docid: u64,
     vectors: Vec<f32>,
     dim: u32,
-    stored: Vec<(u64, String)>, // (local docid, stored_json)
+    stored: Vec<StoredEntry>, // (local docid, text, meta_json)
     id_map: Vec<(u64, String)>, // (local docid, external_id)
 }
 
@@ -94,8 +102,24 @@ impl SegmentWriter {
                 .resize(self.vectors.len() + self.dim as usize, 0.0f32);
         }
         self.id_map.push((docid, external_id.to_string()));
-        self.stored.push((docid, stored_json.to_string()));
+        self.stored.push(StoredEntry {
+            docid,
+            text: None,
+            meta_json: stored_json.to_string(),
+        });
         Ok(docid)
+    }
+
+    /// 为最近一次 add_doc 的文档设置原文（SPEC §6.2 stored.bin 含原文）。
+    /// 在 add_doc 之后、finalize 之前调用；重复调用覆盖。未调用则该文档 text_len=0。
+    /// 不变量 I-1：仅修改写期 buffer，stored.bin 仍在 finalize 一次性写入（段不可变）。
+    pub fn set_text(&mut self, text: &str) -> Result<()> {
+        let entry = self
+            .stored
+            .last_mut()
+            .ok_or_else(|| VaneError::Schema("set_text called before add_doc".into()))?;
+        entry.text = Some(text.to_string());
+        Ok(())
     }
 
     pub fn finalize(self) -> Result<SegmentMeta> {
@@ -115,18 +139,24 @@ impl SegmentWriter {
         self.vfs.write_at(&vpath, &vbytes, 0)?;
         self.vfs.sync(&vpath)?;
 
-        // 写 stored.bin：magic|version|count|{docid(8 LE)|len(4 LE)|json}...
-        // I10: M0 写裸 JSON（zstd 块压缩延后 M1，format_version 不变）。
+        // 写 stored.bin：magic|version|count|{docid(8 LE)|text_len(4 LE)|text_bytes|meta_json_len(4 LE)|meta_json_bytes}...
+        // SPEC §6.2：原文 + JSON meta 分离存储。format_version 保持 1（补全 spec'd 格式）。
+        // I10: M0 写裸数据（zstd 块压缩延后 M1，format_version 不变）。
         let spath = format!("{}/stored.bin", seg_dir);
         self.vfs.create(&spath)?;
         let mut sbytes = Vec::new();
         sbytes.extend_from_slice(crate::types::MAGIC);
         sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
         sbytes.extend_from_slice(&(self.stored.len() as u32).to_le_bytes());
-        for (docid, json) in &self.stored {
-            sbytes.extend_from_slice(&docid.to_le_bytes());
-            sbytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
-            sbytes.extend_from_slice(json.as_bytes());
+        for entry in &self.stored {
+            sbytes.extend_from_slice(&entry.docid.to_le_bytes());
+            // text 为 None 时落空串（text_len=0 表示无原文）。
+            let text_bytes = entry.text.as_deref().unwrap_or("").as_bytes();
+            sbytes.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
+            sbytes.extend_from_slice(text_bytes);
+            let meta_bytes = entry.meta_json.as_bytes();
+            sbytes.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+            sbytes.extend_from_slice(meta_bytes);
         }
         self.vfs.write_at(&spath, &sbytes, 0)?;
         self.vfs.sync(&spath)?;
@@ -177,6 +207,12 @@ impl SegmentWriter {
     }
 }
 
+/// stored.bin 读期单条记录（SPEC §6.2：原文 + JSON meta）。
+struct StoredReadEntry {
+    text: String,
+    meta_json: String,
+}
+
 /// 段读期句柄（SPEC §6.2）。加载 header + vectors + idmap + stored，
 /// 提供查询访问。inverted.bin 由 05-bm25 的 InvertedIndexReader 通过
 /// segment_dir() 单独读取，本结构不加载倒排。
@@ -187,9 +223,9 @@ pub struct SegmentReader {
     vectors: Vec<f32>,
     dim: u32,
     id_map: std::collections::HashMap<u64, String>,
-    // stored.bin 按 docid 索引的 stored JSON（回填 Hit.fields，SPEC §6.2）。
+    // stored.bin 按 docid 索引的原文 + meta JSON（回填 Hit.fields / reindex 重建倒排，SPEC §6.2）。
     // key 为段内局部 docid（0 起，与 id_map 同一 key 空间）。
-    stored: std::collections::HashMap<u64, String>,
+    stored: std::collections::HashMap<u64, StoredReadEntry>,
 }
 
 /// 模块级辅助：循环 read_at 直到 EOF，拼出完整文件字节。
@@ -264,10 +300,10 @@ impl SegmentReader {
     fn load_stored(
         vfs: &dyn Vfs,
         segment_dir: &str,
-    ) -> Result<std::collections::HashMap<u64, String>> {
+    ) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
         let spath = format!("{}/stored.bin", segment_dir);
         let buf = read_all(vfs, &spath)?;
-        decode_kv_map(&buf, "stored")
+        decode_stored(&buf)
     }
 
     fn load_id_map(
@@ -296,8 +332,17 @@ impl SegmentReader {
     }
     /// 读取某文档的 stored.bin JSON（回填 Hit.fields，SPEC §6.2 stored.bin）。
     /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
+    /// 语义不变：仍返回 meta JSON（原文经 text() 读出）。
     pub fn stored_json(&self, local_docid: u64) -> Option<&str> {
-        self.stored.get(&local_docid).map(|s| s.as_str())
+        self.stored.get(&local_docid).map(|e| e.meta_json.as_str())
+    }
+
+    /// 读取某文档的原文（SPEC §6.2 stored.bin 含原文）。
+    /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
+    /// 无原文（text_len=0，写期未调 set_text）返回 Some("")；docid 不存在返回 None。
+    /// 06-userdict-reindex 经此读原文用新分词器重建倒排；02-tombstone-merge 经此读原文写入新段。
+    pub fn text(&self, local_docid: u64) -> Option<&str> {
+        self.stored.get(&local_docid).map(|e| e.text.as_str())
     }
     pub fn segment_dir(&self) -> &str {
         &self.segment_dir
@@ -345,6 +390,70 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
             .to_string();
         pos += len;
         map.insert(docid, s);
+    }
+    Ok(map)
+}
+
+/// 解码 stored.bin 的原文+meta 布局（SPEC §6.2）：
+/// magic(4) | version(4 LE) | count(4 LE) |
+/// {docid(8 LE) | text_len(4 LE) | text_bytes | meta_json_len(4 LE) | meta_json_bytes}...
+///
+/// format_version 仍为 1（补全 spec'd 格式，无发布数据故无迁移）。
+/// 读期 text 始终为 String（写期 Option 在 finalize 落空串），空串表示无原文。
+fn decode_stored(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
+    if buf.len() < 12 {
+        return Ok(std::collections::HashMap::new());
+    }
+    if &buf[0..4] != crate::types::MAGIC {
+        return Err(VaneError::Corrupt("stored bad magic".into()));
+    }
+    let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    if version != crate::types::FORMAT_VERSION {
+        return Err(VaneError::Version(format!(
+            "stored unsupported format_version: {} (expected {})",
+            version,
+            crate::types::FORMAT_VERSION
+        )));
+    }
+    let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+    let mut pos = 12;
+    let mut map = std::collections::HashMap::with_capacity(count);
+    for _ in 0..count {
+        if pos + 8 > buf.len() {
+            return Err(VaneError::Corrupt("stored entry docid truncated".into()));
+        }
+        let docid = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        // text
+        if pos + 4 > buf.len() {
+            return Err(VaneError::Corrupt("stored entry text_len truncated".into()));
+        }
+        let text_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + text_len > buf.len() {
+            return Err(VaneError::Corrupt("stored entry text_bytes truncated".into()));
+        }
+        let text = std::str::from_utf8(&buf[pos..pos + text_len])
+            .map_err(|e| VaneError::Corrupt(format!("stored text utf8: {}", e)))?
+            .to_string();
+        pos += text_len;
+        // meta_json
+        if pos + 4 > buf.len() {
+            return Err(VaneError::Corrupt("stored entry meta_len truncated".into()));
+        }
+        let meta_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + meta_len > buf.len() {
+            return Err(VaneError::Corrupt("stored entry meta_bytes truncated".into()));
+        }
+        let meta_json = std::str::from_utf8(&buf[pos..pos + meta_len])
+            .map_err(|e| VaneError::Corrupt(format!("stored meta utf8: {}", e)))?
+            .to_string();
+        pos += meta_len;
+        map.insert(
+            docid,
+            StoredReadEntry { text, meta_json },
+        );
     }
     Ok(map)
 }
