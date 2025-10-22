@@ -352,7 +352,8 @@ fn set_text_before_add_doc_errors() {
         },
     )])
     .unwrap();
-    let mut w = SegmentWriter::new(vfs, "db/segments", &schema, &TokenizerId([0u8; 32]), 0).unwrap();
+    let mut w =
+        SegmentWriter::new(vfs, "db/segments", &schema, &TokenizerId([0u8; 32]), 0).unwrap();
     let err = w.set_text("nope").unwrap_err();
     assert!(matches!(err, crate::types::VaneError::Schema(_)));
 }

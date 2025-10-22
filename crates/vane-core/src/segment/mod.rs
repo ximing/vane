@@ -38,7 +38,7 @@ pub struct SegmentWriter {
     next_docid: u64,
     vectors: Vec<f32>,
     dim: u32,
-    stored: Vec<StoredEntry>, // (local docid, text, meta_json)
+    stored: Vec<StoredEntry>,   // (local docid, text, meta_json)
     id_map: Vec<(u64, String)>, // (local docid, external_id)
 }
 
@@ -431,7 +431,9 @@ fn decode_stored(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredRead
         let text_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + text_len > buf.len() {
-            return Err(VaneError::Corrupt("stored entry text_bytes truncated".into()));
+            return Err(VaneError::Corrupt(
+                "stored entry text_bytes truncated".into(),
+            ));
         }
         let text = std::str::from_utf8(&buf[pos..pos + text_len])
             .map_err(|e| VaneError::Corrupt(format!("stored text utf8: {}", e)))?
@@ -444,16 +446,15 @@ fn decode_stored(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredRead
         let meta_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + meta_len > buf.len() {
-            return Err(VaneError::Corrupt("stored entry meta_bytes truncated".into()));
+            return Err(VaneError::Corrupt(
+                "stored entry meta_bytes truncated".into(),
+            ));
         }
         let meta_json = std::str::from_utf8(&buf[pos..pos + meta_len])
             .map_err(|e| VaneError::Corrupt(format!("stored meta utf8: {}", e)))?
             .to_string();
         pos += meta_len;
-        map.insert(
-            docid,
-            StoredReadEntry { text, meta_json },
-        );
+        map.insert(docid, StoredReadEntry { text, meta_json });
     }
     Ok(map)
 }
