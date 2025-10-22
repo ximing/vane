@@ -4,6 +4,12 @@
 // scalars.col / inverted.bin）。任何格式变更必须保持此测试通过，或 bump
 // FORMAT_VERSION + 提供迁移器/双模读取（SPEC §6.2）。
 //
+// stored.bin 布局（v1.1 起，00-text-persistence 补全 SPEC §6.2 始终要求的格式，
+// format_version 保持 1，仓库无发布产物故无迁移）：
+//   magic(4)="VANE" | format_version(4 LE)=1 | count(4 LE) |
+//   { docid(8 LE) | text_len(4 LE) | text_bytes | meta_json_len(4 LE) | meta_json_bytes }...
+// 原文 + JSON meta 分离存储；text_len=0 表示无原文（写期未调 set_text）。
+//
 // 流程：用 StdFsVfs 在临时目录建 DB → 声明 collection（text+vector+scalar）→
 // 灌入若干文档（中文/英文 mixed）→ flush → close → 重新 open 同目录 →
 // 验证 manifest 加载、segment 读取、search（hybrid/vector/text 三模式）结果
@@ -271,6 +277,49 @@ fn corpus_segment_files_have_magic_version_headers() {
             "{} format_version 应为 LE=1",
             fname
         );
+    }
+
+    // SPEC §6.2（00-text-persistence）：stored.bin 含原文 + meta 分离存储。
+    // 校验首条记录 text_len > 0 且 text_bytes 等于 corpus_docs()[0].text 的 UTF-8 字节。
+    // 布局：magic(4)|version(4)|count(4)|{docid(8)|text_len(4)|text_bytes|meta_json_len(4)|meta_json_bytes}...
+    {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        let mut off = 0u64;
+        loop {
+            let n = vfs
+                .read_at(&format!("{}/stored.bin", seg_path), &mut tmp, off)
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            off += n as u64;
+        }
+        // 跳过 12 字节头（magic+version+count），读首条 docid(8) + text_len(4)
+        assert!(buf.len() >= 12 + 8 + 4, "stored.bin 首条记录头不全");
+        let text_len = u32::from_le_bytes(buf[20..24].try_into().unwrap()) as usize;
+        let corpus = corpus_docs();
+        let expected_text = corpus[0].text.as_ref().unwrap().as_bytes();
+        assert!(
+            text_len > 0,
+            "首条记录 text_len 应 > 0（corpus 首文档有原文）"
+        );
+        assert_eq!(
+            text_len,
+            expected_text.len(),
+            "首条记录 text_len 应等于 corpus_docs()[0].text 字节数"
+        );
+        let text_bytes = &buf[24..24 + text_len];
+        assert_eq!(
+            text_bytes, expected_text,
+            "首条记录 text_bytes 应等于 corpus_docs()[0].text UTF-8 字节"
+        );
+        // meta_json 紧随其后
+        let meta_off = 24 + text_len;
+        let meta_len =
+            u32::from_le_bytes(buf[meta_off..meta_off + 4].try_into().unwrap()) as usize;
+        assert!(meta_len > 0, "首条记录 meta_json_len 应 > 0（flush 落 {{}}）");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
