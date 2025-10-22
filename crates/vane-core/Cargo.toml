@@ -12,6 +12,10 @@ serde_json = { workspace = true }
 unicode-segmentation = { workspace = true }
 rust-stemmers = { workspace = true }
 ulid = { workspace = true }
+ruzstd = { version = "0.5", optional = true }
+
+[features]
+jieba = ["ruzstd"]
 
 [dev-dependencies]
 criterion = "0.5"

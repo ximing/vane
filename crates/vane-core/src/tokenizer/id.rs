@@ -1,7 +1,7 @@
 //! TokenizerId 计算（SPEC §5.4）。
 //! TokenizerId = sha256( algorithm_version ‖ builtin_dict_version ‖ user_dict_bytes )
 //!
-//! 任何分词算法变更（unicode 边界规则、stemmer 版本、bigram 策略、jieba 词典版本）
+//! 任何分词算法变更（unicode 边界规则、stemmer 版本、bigram 策略、jieba 词典**格式**版本）
 //! 必须递增对应 version 标签，从而产生新 TokenizerId 触发 reindex。
 
 use sha2::{Digest, Sha256};
@@ -18,14 +18,17 @@ fn algorithm_version(kind: BuiltinTokenizer) -> &'static [u8] {
     }
 }
 
-/// 内置词典版本标签（参与 sha256）。
+/// 内置词典**格式**版本标签（参与 sha256，SPEC §5.4 v1.1）。
 /// - standard / cjk_bigram：无内置词典，用空串。
-/// - jieba：M0 占位空串；M1 接入 jieba-lite 后填词典日历版本（如 b"jieba-lite-2026.08"）。
+/// - jieba：编译期**格式**常量 `b"jieba-fmt-v1"`（R-3）。仅当 DAT 结构 / HMM 参数**格式**
+///   变更时递增；词典**内容**升级（增删词条、日历版本变化）**不改变**此值，故不改变
+///   TokenizerId（满足 REQUIREMENTS §3.3「词典升级仅警告不强制重建」）。词典运行时
+///   日历版本 + sha256 前缀存 dict.bin 头 + CollectionMeta，不进 TokenizerId。
 fn builtin_dict_version(kind: BuiltinTokenizer) -> &'static [u8] {
     match kind {
         BuiltinTokenizer::Standard => b"",
         BuiltinTokenizer::CjkBigram => b"",
-        BuiltinTokenizer::Jieba => b"",
+        BuiltinTokenizer::Jieba => b"jieba-fmt-v1",
     }
 }
 

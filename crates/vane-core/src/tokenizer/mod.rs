@@ -2,6 +2,8 @@
 
 mod cjk_bigram;
 mod id;
+#[cfg(feature = "jieba")]
+pub mod jieba;
 mod standard;
 
 pub use id::compute_tokenizer_id;
@@ -46,7 +48,8 @@ pub const MAX_USER_DICT_ENTRIES: usize = 100_000;
 /// 工厂：构建内置分词器（SPEC §5.1 / §5.3 / §10）。
 ///
 /// - `Standard` / `CjkBigram`：M0 完整实现。
-/// - `Jieba`：M0 返回 `Err(VaneError::DictUnavailable)`（M1 实现）。
+/// - `Jieba`：需先加载词典（`JiebaDict::load`）再调 `build_jieba_tokenizer`；
+///   无词典实例时返回 `Err(VaneError::DictUnavailable)`（M0 行为不变，wasm32 永不启用 jieba feature）。
 /// - `user_dict.len() > 100_000`：返回 `Err(VaneError::DictTooLarge)`（SPEC §5.3），优先于 jieba 可用性。
 pub fn build_tokenizer(
     kind: BuiltinTokenizer,
@@ -63,6 +66,23 @@ pub fn build_tokenizer(
         BuiltinTokenizer::CjkBigram => Ok(Box::new(cjk_bigram::CjkBigramTokenizer::new(user_dict))),
         BuiltinTokenizer::Jieba => Err(VaneError::DictUnavailable),
     }
+}
+
+/// 从已加载的 `JiebaDict` 构建 jieba 分词器（SPEC §5.1 / §5.4，R-3）。
+///
+/// `build_tokenizer(Jieba, ..)` 无词典实例时返回 `DictUnavailable`；绑定层（Node/Go）
+/// 加载 dict.bin 后调本函数获取分词器。`JiebaTokenizer::id()` 直接用
+/// `compute_tokenizer_id(Jieba, user_dict)`，无二次哈希（R-3：词典内容升级不改变 TokenizerId）。
+#[cfg(feature = "jieba")]
+pub fn build_jieba_tokenizer(
+    dict: std::sync::Arc<jieba::JiebaDict>,
+    user_dict: &[UserDictEntry],
+) -> crate::types::Result<Box<dyn Tokenizer>> {
+    use crate::types::VaneError;
+    if user_dict.len() > MAX_USER_DICT_ENTRIES {
+        return Err(VaneError::DictTooLarge);
+    }
+    Ok(Box::new(jieba::JiebaTokenizer::new(dict, user_dict)?))
 }
 
 #[cfg(test)]
@@ -146,5 +166,26 @@ mod factory_tests {
         fn assert_send_sync<T: Send + Sync>(_: &T) {}
         let t = build_tokenizer(BuiltinTokenizer::Standard, &[]).unwrap();
         assert_send_sync(&t);
+    }
+
+    // ---- Task 7: build_jieba_tokenizer 接入（feature = "jieba"）----
+
+    #[cfg(feature = "jieba")]
+    #[test]
+    fn build_jieba_with_dict_succeeds() {
+        let bytes = jieba::tests::test_fixture_dict_bin();
+        let dict = std::sync::Arc::new(jieba::JiebaDict::load(&bytes).unwrap());
+        let t = build_jieba_tokenizer(dict, &[]).unwrap();
+        assert!(!t.tokenize("测试").is_empty());
+    }
+
+    // ---- Task 8: 缺词典降级（无 jieba feature 时 build_tokenizer(Jieba) 返回 DictUnavailable）----
+
+    #[test]
+    fn jieba_without_feature_returns_dict_unavailable() {
+        // build_tokenizer(Jieba) 无词典实例时返回 DictUnavailable（M0 行为不变）。
+        // wasm32 永不启用 jieba feature → 此分支是 wasm 侧降级前的最后防线。
+        let r = build_tokenizer(BuiltinTokenizer::Jieba, &[]);
+        assert!(matches!(r, Err(VaneError::DictUnavailable)));
     }
 }
