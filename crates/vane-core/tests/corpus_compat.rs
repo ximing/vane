@@ -317,9 +317,11 @@ fn corpus_segment_files_have_magic_version_headers() {
         );
         // meta_json 紧随其后
         let meta_off = 24 + text_len;
-        let meta_len =
-            u32::from_le_bytes(buf[meta_off..meta_off + 4].try_into().unwrap()) as usize;
-        assert!(meta_len > 0, "首条记录 meta_json_len 应 > 0（flush 落 {{}}）");
+        let meta_len = u32::from_le_bytes(buf[meta_off..meta_off + 4].try_into().unwrap()) as usize;
+        assert!(
+            meta_len > 0,
+            "首条记录 meta_json_len 应 > 0（flush 落 {{}}）"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&dir);
