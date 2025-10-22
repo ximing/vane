@@ -213,6 +213,10 @@ impl Collection {
             // I4/FF2：add_doc 返回段内局部 docid（从 0 起），全局 = base + local
             let local_docid =
                 writer.add_doc(&doc.external_id, doc.vector.as_deref(), &stored_json)?;
+            // SPEC §6.2：原文持久化——add_doc 后 set_text 写入 doc.text（None 落空串）。
+            // 06-userdict-reindex 经 SegmentReader::text 读原文用新分词器重建倒排；
+            // 02-tombstone-merge 经此读原文写入新段。
+            writer.set_text(doc.text.as_deref().unwrap_or(""))?;
             let global_docid = base_docid + local_docid;
             let tokens = doc
                 .text
