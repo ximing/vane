@@ -99,3 +99,41 @@ fn flush_persists_empty_text_when_none() {
     assert!(hits.iter().any(|h| h.id == "d0"));
     db.close().unwrap();
 }
+
+#[test]
+fn reindex_prerequisite_text_readable_for_retokenize() {
+    // 验证 06-userdict-reindex 的前置条件成立：原文经 flush 持久化进 stored.bin，
+    // 能被搜索命中（倒排建于原文 tokenization），证明原文数据流完整。
+    // 本测试不实装 reindex（06 计划负责），只验证「原文进了倒排」的管线不缺料：
+    // 06 实装后用 SegmentReader::text 读原文 + 新分词器重新 tokenize 重建倒排。
+    let vfs = Arc::new(MemoryVfs::new());
+    let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+    let col = db
+        .collection("c", build_schema(), CollectionOptions::default())
+        .unwrap();
+    col.add(&[Doc {
+        id: "d0".into(),
+        text: Some("机器学习".into()),
+        vector: Some(vec![1.0, 0.0]),
+        meta: None,
+    }])
+    .unwrap();
+    col.flush().unwrap();
+    // 搜索 text="机器学习" 命中，证明原文进了倒排（reindex 前置数据流完整）
+    let hits = col
+        .search(&SearchQuery {
+            text: Some("机器学习".into()),
+            top_k: 10,
+            mode: SearchMode::Text,
+            vector: None,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == "d0"),
+        "原文应进倒排使搜索命中（reindex 前置数据流完整）"
+    );
+    db.close().unwrap();
+}
