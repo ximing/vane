@@ -378,7 +378,8 @@ impl Collection {
                     let mut hits = if !force_brute {
                         if let Some(hr) = hnsw_reader {
                             let ef = hr.ef_construction().max(want as u32 * 4) as usize;
-                            hr.search(qv, want, ef, filter_bm, base)
+                            // R-hnsw-vec：向量不进 hnsw.bin，由 SegmentReader.vectors() 传入共享单一副本。
+                            hr.search(qv, want, ef, filter_bm, base, reader.vectors())
                         } else {
                             brute_search(
                                 reader.vectors(),

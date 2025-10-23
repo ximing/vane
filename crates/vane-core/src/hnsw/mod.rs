@@ -7,19 +7,18 @@
 //! - 距离：复用 M0 `Metric` 语义（越大越相似）。内部转距离用于图导航
 //!   （cosine=1-cos；L2=|a-b|²；dot=-dot），单调等价于 -score。
 //!
-//! hnsw.bin 格式（README 契约 + 向量嵌入扩展 R-hnsw-vec）：
+//! hnsw.bin 格式（README 契约，graph-only——不嵌入向量，向量单一副本存 vectors.bin）：
 //! ```text
 //! magic(4) | format_version(4 LE) | dim(4 LE) | metric(1) |
 //! m(4 LE) | ef_construction(4 LE) | entry_point(4 LE) | max_level(4 LE) |
 //! num_nodes(4 LE) |
 //! { local_docid(4 LE) | level(1) |
 //!     for layer in 0..=level: num_neighbors(4 LE) | neighbors(num_neighbors*4 LE)
-//!     vector(dim*4 LE f32)
 //! }
 //! ```
-//! 向量嵌入：Task 3 单元测试仅写 hnsw.bin 即可 search（无 vectors.bin），
-//! 故向量随图一并持久化。api 层 HnswReader 用此向量导航；vectors.bin 仍由
-//! SegmentWriter 写（brute_search 回退与 Hit 回填路径不变）。
+//! 向量不进 hnsw.bin（R-hnsw-vec 修复：避免 vectors.bin + hnsw.bin 双存违反
+//! SPEC §6.2 + §3.3「50 万不塌红线」）。`HnswReader::search` 由 api 层传入
+//! `vectors: &[f32]`（SegmentReader 已加载的 vectors.bin 单一副本）导航。
 
 use crate::types::{Metric, Result, ScoredDoc, VaneError, FORMAT_VERSION, MAGIC};
 use crate::vfs::Vfs;
@@ -59,11 +58,11 @@ impl PartialOrd for DistNode {
 }
 
 /// 图节点。`neighbors[lc]` 为第 lc 层的邻居节点索引。
+/// 不持有向量（R-hnsw-vec：hnsw.bin graph-only，向量由 search 调用方传入）。
 pub struct Node {
     pub local_docid: u32,
     pub level: u32,
     pub neighbors: Vec<Vec<u32>>,
-    pub vector: Vec<f32>,
 }
 
 /// 段内不可变 HNSW 图（SPEC §3.1/§8.1）。
@@ -208,6 +207,8 @@ pub struct HnswWriter {
     m: u32,
     ef_construction: u32,
     nodes: Vec<Node>,
+    /// 写期构建用向量（按 node_idx 索引；不落盘 hnsw.bin）。
+    vectors: Vec<Vec<f32>>,
     entry_point: Option<u32>,
     max_level: u32,
     rng: Rng,
@@ -222,6 +223,7 @@ impl HnswWriter {
             m,
             ef_construction,
             nodes: Vec::new(),
+            vectors: Vec::new(),
             entry_point: None,
             max_level: 0,
             rng: Rng::new(0x9e3779b97f4a7c15),
@@ -244,7 +246,6 @@ impl HnswWriter {
             local_docid,
             level,
             neighbors: (0..=level).map(|_| Vec::new()).collect(),
-            vector: vector.to_vec(),
         };
 
         match self.entry_point {
@@ -253,11 +254,13 @@ impl HnswWriter {
                 self.entry_point = Some(new_idx);
                 self.max_level = level;
                 self.nodes.push(new_node);
+                self.vectors.push(vector.to_vec());
                 return;
             }
             Some(ep) => {
                 // 先入图（neighbors 暂空），保证后续修剪访问 self.nodes[new_idx] 合法。
                 self.nodes.push(new_node);
+                self.vectors.push(vector.to_vec());
                 let mut cur_ep = ep;
                 let query = vector;
                 // 1) 从最高层贪婪下降到 level+1，每层 ef=1 找最近
@@ -285,7 +288,7 @@ impl HnswWriter {
                     self.nodes[new_idx as usize].neighbors[lc as usize] = neighbors.clone();
                     // 双向连接 + 修剪邻居
                     for &nb in &neighbors {
-                        let nb_vec = self.nodes[nb as usize].vector.clone();
+                        let nb_vec = self.vectors[nb as usize].clone();
                         let cur_layer: Vec<u32> = self.nodes[nb as usize]
                             .neighbors
                             .get(lc as usize)
@@ -301,7 +304,7 @@ impl HnswWriter {
                             let mut ranked: Vec<(f32, u32)> = updated
                                 .iter()
                                 .map(|&c| {
-                                    let cv = self.nodes[c as usize].vector.clone();
+                                    let cv = self.vectors[c as usize].clone();
                                     (metric_distance(self.metric, &nb_vec, &cv), c)
                                 })
                                 .collect();
@@ -369,7 +372,7 @@ impl HnswWriter {
         for &ep in entry_points {
             if visited.insert(ep) {
                 let n = &self.nodes[ep as usize];
-                let dist = metric_distance(self.metric, query, &n.vector);
+                let dist = metric_distance(self.metric, query, &self.vectors[ep as usize]);
                 candidates.push(Reverse(DistNode { dist, node: ep }));
                 let passes = passes_filter(filter, n.local_docid, docid_base);
                 if passes {
@@ -394,7 +397,7 @@ impl HnswWriter {
                 for &e in layer {
                     if visited.insert(e) {
                         let en = &self.nodes[e as usize];
-                        let dist = metric_distance(self.metric, query, &en.vector);
+                        let dist = metric_distance(self.metric, query, &self.vectors[e as usize]);
                         let passes = passes_filter(filter, en.local_docid, docid_base);
                         let should_add_candidate = match w.len().cmp(&ef) {
                             std::cmp::Ordering::Less => true,
@@ -449,7 +452,7 @@ fn passes_filter(
     }
 }
 
-/// 写 hnsw.bin 到段目录（SPEC §6.2 + R-hnsw-vec 向量嵌入）。
+/// 写 hnsw.bin 到段目录（SPEC §6.2，graph-only——不写向量）。
 pub fn write_hnsw(vfs: &dyn Vfs, segment_dir: &str, graph: &HnswGraph) -> Result<()> {
     let path = format!("{}/hnsw.bin", segment_dir);
     vfs.create(&path)?;
@@ -479,17 +482,6 @@ pub fn write_hnsw(vfs: &dyn Vfs, segment_dir: &str, graph: &HnswGraph) -> Result
             for &nb in layer {
                 buf.extend_from_slice(&nb.to_le_bytes());
             }
-        }
-        // 向量嵌入（R-hnsw-vec）
-        if n.vector.len() != graph.dim as usize {
-            return Err(VaneError::Corrupt(format!(
-                "hnsw node vector dim {} != graph dim {}",
-                n.vector.len(),
-                graph.dim
-            )));
-        }
-        for &f in &n.vector {
-            buf.extend_from_slice(&f.to_le_bytes());
         }
     }
     vfs.write_at(&path, &buf, 0)?;
@@ -588,22 +580,10 @@ impl HnswReader {
                 }
                 neighbors.push(layer);
             }
-            // 向量
-            let vlen = dim as usize * 4;
-            if pos + vlen > buf.len() {
-                return Err(VaneError::Corrupt("hnsw.bin vector truncated".into()));
-            }
-            let mut vector = Vec::with_capacity(dim as usize);
-            for _ in 0..dim {
-                let f = f32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
-                pos += 4;
-                vector.push(f);
-            }
             nodes.push(Node {
                 local_docid,
                 level,
                 neighbors,
-                vector,
             });
         }
 
@@ -638,6 +618,9 @@ impl HnswReader {
     /// 段级搜索：返回 topk 候选（绝对 docid + score）。
     /// filter 存绝对 docid，内部减 docid_base 转 local。
     /// ef_search 控制精度，默认 max(ef_construction, topk*4)。
+    /// `vectors` 为段内全部向量连续排布（vectors.bin，由 api 层 SegmentReader.vectors() 传入），
+    /// 按 `local_docid * dim` 索引取节点向量算导航/结果距离（R-hnsw-vec：hnsw.bin graph-only）。
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         query: &[f32],
@@ -645,6 +628,7 @@ impl HnswReader {
         ef_search: usize,
         filter: Option<&roaring::RoaringBitmap>,
         docid_base: u64,
+        vectors: &[f32],
     ) -> Vec<ScoredDoc> {
         if topk == 0 {
             return Vec::new();
@@ -661,7 +645,7 @@ impl HnswReader {
         // 1) 从最高层贪婪下降到第 1 层，每层 ef=1 找最近（导航，不过滤）
         let mut cur_ep = ep;
         for lc in (1..=self.max_level).rev() {
-            let w = self.search_layer(query, &[cur_ep], 1, lc, None, 0);
+            let w = self.search_layer(query, &[cur_ep], 1, lc, None, 0, vectors);
             cur_ep = w
                 .into_iter()
                 .min_by(|a, b| a.dist.total_cmp(&b.dist))
@@ -669,14 +653,15 @@ impl HnswReader {
                 .unwrap_or(cur_ep);
         }
         // 2) 第 0 层 ef 搜索（应用 filter 到结果堆）
-        let w = self.search_layer(query, &[cur_ep], ef, 0, filter, docid_base);
+        let w = self.search_layer(query, &[cur_ep], ef, 0, filter, docid_base, vectors);
 
         // 转 ScoredDoc（score 用 metric score 语义），按 score 降序取 topk
         let mut out: Vec<ScoredDoc> = w
             .into_iter()
             .map(|dn| {
                 let n = &self.nodes[dn.node as usize];
-                let score = metric_score(self.metric, query, &n.vector);
+                let nv = node_vector(vectors, n.local_docid, self.dim);
+                let score = metric_score(self.metric, query, nv);
                 ScoredDoc {
                     docid: n.local_docid as u64 + docid_base,
                     score,
@@ -696,6 +681,8 @@ impl HnswReader {
     }
 
     /// 单层贪婪搜索（读期）。复用 HnswWriter 的算法但只读 nodes。
+    /// `vectors` 按 local_docid 索引（R-hnsw-vec：向量不进 hnsw.bin，由调用方传入）。
+    #[allow(clippy::too_many_arguments)]
     fn search_layer(
         &self,
         query: &[f32],
@@ -704,6 +691,7 @@ impl HnswReader {
         lc: u32,
         filter: Option<&roaring::RoaringBitmap>,
         docid_base: u64,
+        vectors: &[f32],
     ) -> Vec<DistNode> {
         if ef == 0 || entry_points.is_empty() {
             return Vec::new();
@@ -716,7 +704,11 @@ impl HnswReader {
         for &ep in entry_points {
             if visited.insert(ep) {
                 let n = &self.nodes[ep as usize];
-                let dist = metric_distance(self.metric, query, &n.vector);
+                let dist = metric_distance(
+                    self.metric,
+                    query,
+                    node_vector(vectors, n.local_docid, self.dim),
+                );
                 candidates.push(Reverse(DistNode { dist, node: ep }));
                 if passes_filter(filter, n.local_docid, docid_base) {
                     w.push(DistNode { dist, node: ep });
@@ -737,7 +729,11 @@ impl HnswReader {
                 for &e in layer {
                     if visited.insert(e) {
                         let en = &self.nodes[e as usize];
-                        let dist = metric_distance(self.metric, query, &en.vector);
+                        let dist = metric_distance(
+                            self.metric,
+                            query,
+                            node_vector(vectors, en.local_docid, self.dim),
+                        );
                         let passes = passes_filter(filter, en.local_docid, docid_base);
                         let should_add = match w.len().cmp(&ef) {
                             std::cmp::Ordering::Less => true,
@@ -778,4 +774,12 @@ fn read_all_vfs(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
         off += n as u64;
     }
     Ok(buf)
+}
+
+/// 从连续排布的 vectors 切片中按 local_docid 取该节点向量（R-hnsw-vec：向量不进 hnsw.bin）。
+#[inline]
+fn node_vector(vectors: &[f32], local_docid: u32, dim: u32) -> &[f32] {
+    let d = dim as usize;
+    let s = local_docid as usize * d;
+    &vectors[s..s + d]
 }

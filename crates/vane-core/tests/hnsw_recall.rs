@@ -6,7 +6,10 @@ use vane_core::vfs::memory::MemoryVfs;
 use vane_core::vfs::Vfs;
 
 #[test]
-fn api_hnsw_recall_vs_brute_at_least_95pct() {
+fn api_hnsw_vector_search_returns_results() {
+    // api 层 HNSW 搜索冒烟：flush 写 hnsw.bin（graph-only）+ vectors.bin，
+    // search 由 api 传 SegmentReader.vectors() 给 HnswReader 导航，返回 topK。
+    // 真实 recall@10 五档回归由 12-recall-regression 负责。
     let vfs = Arc::new(MemoryVfs::new());
     let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
     let schema = Schema::new(vec![(
@@ -42,7 +45,11 @@ fn api_hnsw_recall_vs_brute_at_least_95pct() {
         })
         .unwrap();
     assert_eq!(hnsw_hits.len(), 10);
-    // recall 检查见 12-recall-regression 的完整 job；此处断言不 panic + 10 条
+    // 冒烟：d0 的向量恰好是 q 本身（i=0 → 全零向量除外；i=1 → 0.01*[0..8]），
+    // 这里只断言 HNSW 路返回 topK 且 score 降序，不替 12 做 recall 断言。
+    for w in hnsw_hits.windows(2) {
+        assert!(w[0].score >= w[1].score);
+    }
 }
 
 #[test]

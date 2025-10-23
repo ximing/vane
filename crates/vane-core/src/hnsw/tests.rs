@@ -45,7 +45,9 @@ fn hnsw_search_returns_topk_nearest() {
     vfs.create("seg").unwrap();
     write_hnsw(vfs.as_ref(), "seg", &g).unwrap();
     let r = HnswReader::open(&vfs, "seg").unwrap();
-    let res = r.search(&[2.5, 0.0], 5, 64, None, 0);
+    // R-hnsw-vec：向量不进 hnsw.bin，search 由调用方传 vectors slice。
+    let vectors: Vec<f32> = (0..50u32).flat_map(|i| [i as f32 * 0.1, 0.0]).collect();
+    let res = r.search(&[2.5, 0.0], 5, 64, None, 0, &vectors);
     assert_eq!(res.len(), 5);
     // 最近的是 i=25 (2.5,0.0)
     assert_eq!(res[0].docid, 25);
@@ -63,12 +65,13 @@ fn hnsw_search_with_filter_skips_excluded() {
     vfs.create("seg").unwrap();
     write_hnsw(vfs.as_ref(), "seg", &g).unwrap();
     let r = HnswReader::open(&vfs, "seg").unwrap();
+    let vectors: Vec<f32> = (0..20u32).flat_map(|i| [i as f32, 0.0]).collect();
     let mut bm = roaring::RoaringBitmap::new();
     // 只允许 docid 5,6,7（绝对 = base+local，base=0）
     bm.insert(5);
     bm.insert(6);
     bm.insert(7);
-    let res = r.search(&[6.0, 0.0], 3, 64, Some(&bm), 0);
+    let res = r.search(&[6.0, 0.0], 3, 64, Some(&bm), 0, &vectors);
     assert!(res.iter().all(|d| d.docid >= 5 && d.docid <= 7));
     assert_eq!(res[0].docid, 6);
 }
@@ -119,9 +122,11 @@ fn hnsw_open_missing_file_returns_err() {
 #[test]
 fn hnsw_search_cosine_metric() {
     let mut w = HnswWriter::new(3, Metric::Cosine, 8, 32);
+    let mut vectors: Vec<f32> = Vec::new();
     for i in 0..40u32 {
         let v = [(i as f32).sin(), (i as f32).cos(), (i as f32 * 0.1).sin()];
         w.insert(i, &v);
+        vectors.extend_from_slice(&v);
     }
     let g = w.build();
     let vfs = Arc::new(crate::vfs::memory::MemoryVfs::new()) as Arc<dyn crate::vfs::Vfs>;
@@ -129,7 +134,7 @@ fn hnsw_search_cosine_metric() {
     write_hnsw(vfs.as_ref(), "seg", &g).unwrap();
     let r = HnswReader::open(&vfs, "seg").unwrap();
     let q = [0.0_f32, 1.0, 0.0];
-    let res = r.search(&q, 5, 64, None, 0);
+    let res = r.search(&q, 5, 64, None, 0, &vectors);
     assert_eq!(res.len(), 5);
     // 结果降序
     for w in res.windows(2) {
@@ -140,8 +145,10 @@ fn hnsw_search_cosine_metric() {
 #[test]
 fn hnsw_search_docid_base_offset() {
     let mut w = HnswWriter::new(1, Metric::L2, 4, 8);
+    let mut vectors: Vec<f32> = Vec::new();
     for i in 0..10u32 {
         w.insert(i, &[i as f32]);
+        vectors.push(i as f32);
     }
     let g = w.build();
     let vfs = Arc::new(crate::vfs::memory::MemoryVfs::new()) as Arc<dyn crate::vfs::Vfs>;
@@ -149,7 +156,7 @@ fn hnsw_search_docid_base_offset() {
     write_hnsw(vfs.as_ref(), "seg", &g).unwrap();
     let r = HnswReader::open(&vfs, "seg").unwrap();
     // docid_base=100：结果 docid = local + 100
-    let res = r.search(&[5.0], 3, 32, None, 100);
+    let res = r.search(&[5.0], 3, 32, None, 100, &vectors);
     assert_eq!(res.len(), 3);
     assert!(res.iter().all(|d| d.docid >= 100 && d.docid <= 109));
     assert_eq!(res[0].docid, 105); // local 5
@@ -187,11 +194,55 @@ fn hnsw_recall_vs_brute_small_scale() {
         let e = s + dim as usize;
         let q = &vectors[s..e];
         let brute = brute_search(&vectors, dim, q, Metric::L2, 10, None, 0);
-        let hnsw = r.search(q, 10, 200, None, 0);
+        let hnsw = r.search(q, 10, 200, None, 0, &vectors);
         let brute_set: std::collections::HashSet<u64> = brute.iter().map(|d| d.docid).collect();
         let hits = hnsw.iter().filter(|d| brute_set.contains(&d.docid)).count();
         recall_sum += hits as f32 / 10.0;
     }
     let recall = recall_sum / queries as f32;
     assert!(recall >= 0.95, "recall {} < 0.95", recall);
+}
+
+#[test]
+fn hnsw_bin_is_graph_only_no_embedded_vectors() {
+    // R-hnsw-vec 修复验证：hnsw.bin 不含向量（graph-only）。
+    // 断言 hnsw.bin 大小 == 头(33) + 每节点 graph-only 记录（无 dim*4 向量尾部）。
+    let dim = 4u32;
+    let mut w = HnswWriter::new(dim, Metric::L2, 4, 8);
+    for i in 0..10u32 {
+        let v: Vec<f32> = (0..dim).map(|j| (i * j) as f32 * 0.1).collect();
+        w.insert(i, &v);
+    }
+    let g = w.build();
+    let vfs = Arc::new(crate::vfs::memory::MemoryVfs::new()) as Arc<dyn crate::vfs::Vfs>;
+    vfs.create("seg").unwrap();
+    write_hnsw(vfs.as_ref(), "seg", &g).unwrap();
+    // 读 hnsw.bin 全字节
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let mut off = 0u64;
+    loop {
+        let n = vfs.read_at("seg/hnsw.bin", &mut tmp, off).unwrap();
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        off += n as u64;
+    }
+    // 计算预期 graph-only 大小：头 33 + 每节点 { local_docid(4) + level(1) + 各层 num_neighbors(4)+neighbors }
+    let mut expected = 33usize;
+    for n in &g.nodes {
+        expected += 4 + 1;
+        for layer in &n.neighbors {
+            expected += 4 + layer.len() * 4;
+        }
+    }
+    assert_eq!(
+        buf.len(),
+        expected,
+        "hnsw.bin size {} != graph-only expected {} (vectors would add {} bytes)",
+        buf.len(),
+        expected,
+        g.nodes.len() * dim as usize * 4
+    );
 }

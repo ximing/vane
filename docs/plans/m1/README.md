@@ -128,8 +128,9 @@ use vane_core::vfs::Vfs;
 use std::sync::Arc;
 
 /// 段内不可变 HNSW 图（SPEC §3.1/§8.1）。写期由 HnswWriter 构建，
-/// 读期由 HnswReader 从 hnsw.bin 加载。
-pub struct HnswGraph { /* M, ef_construction, entry_point, layers, 邻接表 */ }
+/// 读期由 HnswReader 从 hnsw.bin（graph-only）加载；向量不进 hnsw.bin，
+/// search 由 api 层传 SegmentReader.vectors() 导航（R-hnsw-vec）。
+pub struct HnswGraph { /* M, ef_construction, entry_point, layers, 邻接表（不含向量） */ }
 
 pub struct HnswWriter { /* ... */ }
 impl HnswWriter {
@@ -141,10 +142,11 @@ impl HnswWriter {
     pub fn build(self) -> HnswGraph;
 }
 
-/// 写 hnsw.bin 到段目录（SPEC §6.2）。
+/// 写 hnsw.bin 到段目录（SPEC §6.2，graph-only——不写向量）。
 /// 格式：magic(4) | format_version(4 LE) | dim(4 LE) | metric(1) |
 ///       m(4 LE) | ef_construction(4 LE) | entry_point(4 LE) | max_level(4 LE) |
 ///       num_nodes(4 LE) | { local_docid(4 LE) | level(1) | num_neighbors(4 LE) | neighbors... }
+/// 向量不进 hnsw.bin（R-hnsw-vec：单一副本存 vectors.bin，避免双存违反 §3.3/§13.1）。
 pub fn write_hnsw(vfs: &dyn Vfs, segment_dir: &str, graph: &HnswGraph) -> Result<()>;
 
 pub struct HnswReader { /* ... */ }
@@ -152,10 +154,13 @@ impl HnswReader {
     /// open 缺失 hnsw.bin（M0 corpus 无 hnsw.bin）时返回 Err；
     /// api 层 catch 后 fallback `brute_search`（与 Task 5「hnsw_readers 无该段则 brute」一致）。
     /// M0 corpus 可被 M1 打开并暴力检索（Q-5）。
+    /// open 仅读 graph-only hnsw.bin（不读 vectors.bin）。
     pub fn open(vfs: &Arc<dyn Vfs>, segment_dir: &str) -> Result<Self>;
     /// 段级搜索：返回 topk 候选（local_docid + score）。
     /// filter 用于 pre-filter（位图存绝对 docid，内部减 docid_base 转 local）。
     /// ef_search 控制精度，默认 max(ef_construction, topk*4)。
+    /// `vectors` 为段内全部向量连续排布（vectors.bin，由 api 层 SegmentReader.vectors() 传入），
+    /// 按 `local_docid * dim` 索引取节点向量算导航/结果距离（R-hnsw-vec：hnsw.bin graph-only）。
     pub fn search(
         &self,
         query: &[f32],
@@ -163,6 +168,7 @@ impl HnswReader {
         ef_search: usize,
         filter: Option<&roaring::RoaringBitmap>,
         docid_base: u64,
+        vectors: &[f32],
     ) -> Vec<ScoredDoc>;
     pub fn doc_count(&self) -> u32;
 }
@@ -286,7 +292,7 @@ impl SegmentWriter {
 }
 ```
 
-**Consumes from M0**：`Filter`/`FilterCond`/`ScalarValue`（api::types）、`Schema`、`SegmentReader`。Consumes from 01：`HnswReader::search(filter)`、M0 `InvertedIndexReader::search(filter)`（已支持）、M0 `brute_search(filter)`（已支持）。
+**Consumes from M0**：`Filter`/`FilterCond`/`ScalarValue`（api::types）、`Schema`、`SegmentReader`。Consumes from 01：`HnswReader::search(filter, vectors)`（vectors 由 api 层 SegmentReader.vectors() 传入）、M0 `InvertedIndexReader::search(filter)`（已支持）、M0 `brute_search(filter)`（已支持）。
 
 **Produces for**：12-recall-regression。
 
