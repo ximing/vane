@@ -441,7 +441,9 @@ fn search_topk_over_1000_rejected() {
 }
 
 #[test]
-fn search_filter_rejected_in_m0() {
+fn search_filter_accepted_but_not_compiled_in_m1() {
+    // 01-hnsw Task 5：M1 不再 reject filter（03-pre-filter 负责编译）。
+    // filter 透传 None 占位，搜索正常返回（filter 不生效，等 03 接入）。
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
     let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let schema = Schema::new(vec![(
@@ -469,7 +471,8 @@ fn search_filter_rejected_in_m0() {
         }),
         candidate_multiplier: 3,
     });
-    assert!(matches!(r, Err(VaneError::InvalidArg(_))));
+    // 无文档：返回空 Vec（Ok），不再 Err(InvalidArg)
+    assert!(matches!(r, Ok(hits) if hits.is_empty()));
 }
 
 #[test]

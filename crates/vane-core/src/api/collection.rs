@@ -11,6 +11,7 @@ use crate::api::db::DbInner;
 use crate::api::types::*;
 use crate::bm25::{write_inverted, InvertedIndexBuilder, InvertedIndexReader};
 use crate::fusion::{linear_fuse, minmax_normalize, rrf_fuse, FusionCandidate};
+use crate::hnsw::{write_hnsw, HnswReader, HnswWriter};
 use crate::persistence::{AutoCommitConfig, AutoCommitter, CollectionMeta, ManifestStore};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::tokenizer::build_tokenizer;
@@ -46,6 +47,8 @@ pub(crate) struct CollectionInner {
     seg_offsets: RwLock<HashMap<String, u64>>,
     // I7：InvertedIndexReader 随段快照缓存，search 直接用，避免每次重开
     inverted_readers: RwLock<Vec<Arc<InvertedIndexReader>>>,
+    // 01-hnsw：HnswReader 随段快照缓存。Option 因 M0 段无 hnsw.bin（Q-5 → fallback brute）。
+    hnsw_readers: RwLock<Vec<Option<Arc<HnswReader>>>>,
 }
 
 struct WriteState {
@@ -88,6 +91,7 @@ impl CollectionInner {
             snapshot: RwLock::new(Vec::new()),
             seg_offsets: RwLock::new(HashMap::new()),
             inverted_readers: RwLock::new(Vec::new()),
+            hnsw_readers: RwLock::new(Vec::new()),
         })
     }
 
@@ -101,6 +105,7 @@ impl CollectionInner {
         let mut readers = Vec::new();
         let mut offsets = HashMap::new();
         let mut inv_readers = Vec::new();
+        let mut hnsw_readers = Vec::new();
         // 读取每段 header.bin 已持久化的 docid_base（而非累加 doc_count 推断），
         // 更稳健：段顺序/非连续场景（M1 compaction）也能正确还原 offset。
         let mut max_end = 0u64;
@@ -109,17 +114,24 @@ impl CollectionInner {
             let reader = Arc::new(SegmentReader::open(&db.vfs, &seg_dir)?);
             // I7：同时 open InvertedIndexReader 缓存
             let inv_reader = Arc::new(InvertedIndexReader::open(&db.vfs, &seg_dir)?);
+            // 01-hnsw（Q-5）：M0 段无 hnsw.bin → open 返回 Err → push None（fallback brute）
+            let hnsw_reader = match HnswReader::open(&db.vfs, &seg_dir) {
+                Ok(r) => Some(Arc::new(r)),
+                Err(_) => None,
+            };
             let base = reader.meta().docid_base;
             let count = reader.doc_count() as u64;
             offsets.insert(ulid.clone(), base);
             max_end = max_end.max(base + count);
             readers.push(reader);
             inv_readers.push(inv_reader);
+            hnsw_readers.push(hnsw_reader);
         }
         inner.write_state.lock().unwrap().next_docid = max_end;
         *inner.snapshot.write().unwrap() = readers;
         *inner.seg_offsets.write().unwrap() = offsets;
         *inner.inverted_readers.write().unwrap() = inv_readers;
+        *inner.hnsw_readers.write().unwrap() = hnsw_readers;
         Ok(inner)
     }
 }
@@ -232,21 +244,58 @@ impl Collection {
         let inverted = inv_builder.build();
         write_inverted(self.inner.vfs.as_ref(), &seg_dir, &inverted)?;
 
+        // 01-hnsw：从 reader.vectors() 构建 HnswWriter → build → write_hnsw。
+        // 段内不可变（I-1）：hnsw.bin 写一次，读期不修改（I-3 删除走 tombstone）。
+        // 先 open SegmentReader 取 vectors/dim/metric，再写 hnsw.bin，最后复用同一 reader 入快照。
+        let reader = Arc::new(SegmentReader::open(&self.inner.vfs, &seg_dir)?);
+        let hnsw_reader = {
+            let (dim, metric) = self
+                .inner
+                .schema
+                .vector_field()
+                .map(|(_, d, m)| (d, m))
+                .unwrap_or((0, crate::types::Metric::Cosine));
+            let vectors = reader.vectors();
+            let doc_count = reader.doc_count();
+            if dim > 0 && doc_count > 0 {
+                let mut hw = HnswWriter::new(dim, metric, 16, 200);
+                let d = dim as usize;
+                for i in 0..doc_count {
+                    let v = &vectors[(i as usize) * d..(i as usize + 1) * d];
+                    hw.insert(i, v);
+                }
+                let graph = hw.build();
+                // 写失败不阻塞 flush 主路径——HnswReader::open 会返回 Err → fallback brute。
+                if let Err(e) = write_hnsw(self.inner.vfs.as_ref(), &seg_dir, &graph) {
+                    eprintln!(
+                        "[vane] hnsw write for segment {} failed: {} (fallback to brute)",
+                        meta.ulid, e
+                    );
+                }
+            }
+            // open：若 hnsw.bin 缺失/损坏 → None（fallback brute_search，Q-5）
+            match HnswReader::open(&self.inner.vfs, &seg_dir) {
+                Ok(r) => Some(Arc::new(r)),
+                Err(_) => None,
+            }
+        };
+
         // 更新 manifest（I-6 原子切换）
         let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
         manifest_store.add_segment(&self.inner.name, &meta.ulid)?;
 
         // 更新段快照（Arc swap 语义：写锁替换 Vec）
-        let reader = Arc::new(SegmentReader::open(&self.inner.vfs, &seg_dir)?);
         // I7：open 一次 InvertedIndexReader 并缓存
         let inv_reader = Arc::new(InvertedIndexReader::open(&self.inner.vfs, &seg_dir)?);
         {
             let mut snap = self.inner.snapshot.write().unwrap();
             let mut offsets = self.inner.seg_offsets.write().unwrap();
             let mut inv_readers = self.inner.inverted_readers.write().unwrap();
+            let mut hnsw_readers = self.inner.hnsw_readers.write().unwrap();
             offsets.insert(meta.ulid.clone(), base_docid);
             snap.push(reader);
             inv_readers.push(inv_reader);
+            hnsw_readers.push(hnsw_reader);
         }
         Ok(())
     }
@@ -258,9 +307,9 @@ impl Collection {
                 query.top_k, TOPK_MAX
             )));
         }
-        if query.filter.is_some() {
-            return Err(VaneError::InvalidArg("filter not supported in M0".into()));
-        }
+        // 01-hnsw Task 5：filter 编译由 03-pre-filter 实装；本计划不再 reject，
+        // 透传 None 占位（03 接入后补编译位图 + 自适应回退判定）。
+        let filter_bm: Option<&roaring::RoaringBitmap> = None;
         // mode 推断（S8：Auto 内部用，绑定层不暴露 "auto" 字符串）
         let mode = match query.mode {
             SearchMode::Hybrid => SearchMode::Hybrid,
@@ -296,31 +345,62 @@ impl Collection {
         let offsets = self.inner.seg_offsets.read().unwrap();
         // I7：用缓存的 InvertedIndexReader，避免每次 search 重开
         let inv_readers = self.inner.inverted_readers.read().unwrap();
+        // 01-hnsw：HnswReader 缓存（Option：M0 段无 hnsw.bin → None → fallback brute）
+        let hnsw_readers = self.inner.hnsw_readers.read().unwrap();
         let topk = query.top_k as usize;
         let cand = topk * query.candidate_multiplier as usize;
 
         let mut vec_candidates: Vec<crate::types::ScoredDoc> = Vec::new();
         let mut text_candidates: Vec<crate::types::ScoredDoc> = Vec::new();
 
-        // snap 与 inv_readers 在 flush/restore 中成对维护，zip 迭代对齐更稳健
-        for (reader, inv_reader) in snap.iter().zip(inv_readers.iter()) {
+        // 自适应回退（SPEC §8.1）：filter 位图基数 < 2*topk → 暴力精确扫描。
+        // M1 filter_bm=None（03 接入后补），此分支在 03 前不会触发。
+        let force_brute = match filter_bm {
+            Some(bm) => (bm.len() as usize) < 2 * topk,
+            None => false,
+        };
+
+        // snap/inv_readers/hnsw_readers 在 flush/restore 中成对维护，zip 迭代对齐
+        for ((reader, inv_reader), hnsw_reader) in
+            snap.iter().zip(inv_readers.iter()).zip(hnsw_readers.iter())
+        {
             let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
             // vector 路
             if matches!(mode, SearchMode::Hybrid | SearchMode::Vector) {
                 if let (Some(qv), Some(metric)) = (&query.vector, vf) {
-                    let mut hits = brute_search(
-                        reader.vectors(),
-                        reader.dim(),
-                        qv,
-                        metric,
-                        if matches!(mode, SearchMode::Hybrid) {
-                            cand
+                    let want = if matches!(mode, SearchMode::Hybrid) {
+                        cand
+                    } else {
+                        topk
+                    };
+                    // 01-hnsw：有 HnswReader 且无需强制暴力 → HNSW 搜索；
+                    // 否则 fallback brute_search（M0 段无 hnsw.bin / 低选择率回退 / 写失败）
+                    let mut hits = if !force_brute {
+                        if let Some(hr) = hnsw_reader {
+                            let ef = hr.ef_construction().max(want as u32 * 4) as usize;
+                            hr.search(qv, want, ef, filter_bm, base)
                         } else {
-                            topk
-                        },
-                        None,
-                        base,
-                    );
+                            brute_search(
+                                reader.vectors(),
+                                reader.dim(),
+                                qv,
+                                metric,
+                                want,
+                                filter_bm,
+                                base,
+                            )
+                        }
+                    } else {
+                        brute_search(
+                            reader.vectors(),
+                            reader.dim(),
+                            qv,
+                            metric,
+                            want,
+                            filter_bm,
+                            base,
+                        )
+                    };
                     vec_candidates.append(&mut hits);
                 }
             }
@@ -443,6 +523,17 @@ impl Collection {
             }
         }
         Ok(hits)
+    }
+
+    /// 当前段快照的 ULID 列表（测试与诊断用；01-hnsw Task 5 测试依赖）。
+    pub fn segment_ulids(&self) -> Vec<String> {
+        self.inner
+            .snapshot
+            .read()
+            .unwrap()
+            .iter()
+            .map(|r| r.meta().ulid.clone())
+            .collect()
     }
 
     // I1 裁决：M0 占位
