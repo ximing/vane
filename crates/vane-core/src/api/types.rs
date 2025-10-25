@@ -55,7 +55,7 @@ pub enum FusionSpec {
     Linear { alpha: f32 },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
     Int(i64),
     Float(f64),
