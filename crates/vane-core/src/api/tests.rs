@@ -614,7 +614,9 @@ fn i2_dual_index_atomic_visibility() {
 }
 
 #[test]
-fn delete_and_compact_return_unsupported_in_m0() {
+fn delete_compact_implemented_reindex_export_still_unsupported() {
+    // 02-tombstone-merge 实装后：delete/compact 已落地（不再 E_UNSUPPORTED）。
+    // reindex（06）/export（M2）仍占位。
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
     let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let schema = Schema::new(vec![(
@@ -628,11 +630,11 @@ fn delete_and_compact_return_unsupported_in_m0() {
     let col = db
         .collection("docs", schema, CollectionOptions::default())
         .unwrap();
-    assert!(matches!(
-        col.delete(&["x".into()]),
-        Err(VaneError::Unsupported)
-    ));
-    assert!(matches!(col.compact(), Err(VaneError::Unsupported)));
+    // delete 空集合返回 0（非 Unsupported）。
+    assert_eq!(col.delete(&["x".into()]).unwrap(), 0);
+    // compact 空集合 Ok（无段可合并）。
+    assert!(col.compact().is_ok());
+    // reindex/export 仍占位。
     assert!(matches!(col.reindex(), Err(VaneError::Unsupported)));
     assert!(matches!(db.export("/tmp/x"), Err(VaneError::Unsupported)));
 }
