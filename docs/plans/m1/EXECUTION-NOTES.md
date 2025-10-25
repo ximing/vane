@@ -124,11 +124,11 @@ L4：10-ci-m1（收尾）
 ### 模块完成状态
 | 模块 | 状态 | 模型 | commits | 审查 |
 |---|---|---|---|---|
-| 00-text-persistence | ⏳ 派发中 | sonnet | — | — |
-| 01-hnsw | ⏸ 待 | opus | — | — |
-| 05-jieba-lite | ⏸ 待 | opus | — | — |
+| 00-text-persistence | ✅ 完成 | sonnet | 91c8d7d..97823d0 | APPROVED_WITH_MINOR |
+| 01-hnsw | ✅ 完成 | opus | aa252ca..919936f | APPROVED（fix 后） |
+| 05-jieba-lite | ✅ 完成 | opus | 12eb209..19c03d1 | APPROVED_WITH_MINOR |
 | 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
-| 02-tombstone-merge | ⏸ 待 | opus | — | — |
+| 02-tombstone-merge | ⏳ 实现中 | opus | — | — |
 | 07-dict-node | ⏸ 待 | sonnet | — | — |
 | 03-pre-filter | ⏸ 待 | sonnet | — | — |
 | 04-wal | ⏸ 待 | sonnet | — | — |
@@ -137,6 +137,30 @@ L4：10-ci-m1（收尾）
 | 11-cold-start | ⏸ 待 | sonnet | — | — |
 | 12-recall | ⏸ 待 | sonnet | — | — |
 | 10-ci-m1 | ⏸ 待 | sonnet | — | — |
+
+### 00-text-persistence 裁决（reviewer APPROVED_WITH_MINOR）
+- **R-00-1 text() 契约**：以实现为准——无原文返回 `Some("")`、docid 不存在返回 `None`（便于 06 reindex 始终拿 `&str`）。02/06 派发据此对齐（非 Produces 段的 None）。
+- **R-00-2 format_version 保持 1**：背书「M0 stored.bin = 未发布占位」定性（SPEC §6.2 始终要求原文+meta，M0 仅 meta 是占位不完整，00 补全非破坏，无发布产物）。**护栏**：仅因 M0 未发布才可；首个正式发布后 stored.bin v1 冻结，后续布局变更须 per-file format_version + bump + 迁移。遗留 M0 持久库须重建（可能 misparse）。
+
+### 并发纪律（worktree 不可用）
+同一工作目录，**同时只允许一个 implementer 写**。重叠仅限 implementer(写) || reviewer(只读)。故 05 实现期间不派 01；05 提交后，01 实现 与 05 审查 并行（01 建在 00+05 已提交状态，文件域隔离：01=hnsw/+api，05=tokenizer/）。
+
+### 01-hnsw 裁决（reviewer CHANGES_REQUESTED → fix 循环）
+- **R-hnsw-vec（阻塞，已派 fix）**：hnsw.bin 嵌入向量（write_hnsw 每节点追加 dim*4，HnswReader::open 读 Node.vector，search 用 self.nodes[e].vector）。违反 §6.2 + README graph-only；双存 10万≈321MB 逼近 500MB、50万≈1.6GB 违反 §3.3 不塌红线。**裁决方案 B（零冗余）**：hnsw.bin 改 graph-only，HnswReader::search 增 `vectors: &[f32]` 参数（api 传 reader.vectors()，与 SegmentReader 共享单一副本）。01-fix（opus）修复中。
+- **测试名实不符**：`api_hnsw_recall_vs_brute_at_least_95pct` 仅断言 10 条 → 改名（并入 fix）。
+- **ef_search 公式** `max(ef_construction, want*4)`：接受（recall 有利，12-regression 验证）。
+- 11 维度全 ✅（算法/filter/Q-5/串行/I-3/M0 签名/hnsw.bin 头/测试质量）。
+
+### Parked minors（后续 housekeeping pass 修）
+- 05: is_cjk 代码复制（jieba/mod.rs:113-127 复制 cjk_bigram.rs:97-111）→ 改 cjk_bigram is_cjk 为 `pub(crate)` 共享（~3 行）。
+- 05: UserTrie 重复词条 last-write-wins（seg.rs:46）vs §5.3「freq 高者优先」→ 改 `self.freqs[node].max(freq)`（~1 行）。不影响正确性（DAG DP 自然保证高频胜出）。
+- 00: R-00-1/R-00-2 见上（text() 契约 / format_version v1-keep 护栏）。
+
+### 10-ci-m1 必修（deny 门禁预存问题，非任何模块引入）
+- ci.yml `cargo deny check --workspace` 错误参数（cargo-deny 0.16.4 不接受 `--workspace`）→ 改 `cargo deny check`（M0 10-ci-gates 遗留，CI 从未真正跑 deny）。
+- deny.toml regex ban 须豁免 build-dep/proc-macro：regex 来自 napi-derive-backend（build-dep，编译期工具不进 core/wasm 运行时），非运行时依赖。ban 意图是 core/wasm 运行时，应 skip build-deps。
+- cargo-deny 0.16.4 不能解析 CVSS 4.0 advisory（RUSTSEC-2026-0073）→ 升级 cargo-deny 或 pin advisory-db。
+- 05 验收① 200 句 fixture 需在有 jieba-rs 环境离线生成 `tests/fixtures/jieba_200.txt`（jieba-rs 因 regex 黑名单不引入运行时/dev-dep）。
 
 ### 待 plan-splitter 修订项（两名 reviewer 收敛后一次性派发）
 - B1 原文持久化（新增计划任务或并入 02/06）+ corpus 兼容测试更新。
