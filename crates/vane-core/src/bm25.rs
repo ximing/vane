@@ -475,6 +475,23 @@ impl InvertedIndexReader {
         self.avg_field_length
     }
 
+    /// 段 docid 基址（合并 posting remap 用，B-1）。
+    pub fn docid_base(&self) -> u64 {
+        self.docid_base
+    }
+
+    /// 段内每文档字段长度（index = local docid，合并 remap 用，B-1）。
+    pub fn field_lengths(&self) -> &[u32] {
+        &self.field_lengths
+    }
+
+    /// 迭代全部 term 及其 TermEntry（词典序）。
+    /// 02-tombstone-merge 段合并 posting remap 用：读源段 postings 按新 docid 重写，
+    /// 不重新分词（B-1）。属 M1 扩展，非 M0 冻结 API 破坏。
+    pub fn iter_terms(&self) -> impl Iterator<Item = (&str, &TermEntry)> {
+        self.terms.iter().map(|(t, e)| (t.as_str(), e))
+    }
+
     /// 查找 term（二分，有序数组）。
     fn lookup(&self, term: &str) -> Option<&TermEntry> {
         self.terms
