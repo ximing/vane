@@ -3,6 +3,7 @@ pub mod api;
 pub mod bm25;
 pub mod fusion;
 pub mod hnsw;
+pub mod merge;
 pub mod persistence;
 pub mod segment;
 pub mod tokenizer;
