@@ -3,7 +3,7 @@ pub mod header;
 mod tests;
 pub mod ulid;
 
-use crate::types::{Result, Schema, TokenizerId, VaneError};
+use crate::types::{Result, ScalarKind, Schema, TokenizerId, VaneError};
 use crate::vfs::Vfs;
 use std::sync::Arc;
 
@@ -40,6 +40,12 @@ pub struct SegmentWriter {
     dim: u32,
     stored: Vec<StoredEntry>,   // (local docid, text, meta_json)
     id_map: Vec<(u64, String)>, // (local docid, external_id)
+    // 03-pre-filter：field_name -> (ScalarKind, Vec<Option<ScalarValue>>)，按 local docid 索引。
+    // set_scalar 在 add_doc 后调用；未调 set_scalar 的 docid 该字段为 None。
+    // finalize 写 scalars.col 列式块（SPEC §6.2）。
+    scalars: std::collections::HashMap<String, (ScalarKind, Vec<Option<crate::api::ScalarValue>>)>,
+    // 03-pre-filter：schema 快照（set_scalar 校验字段类型用；new 时 clone，不改 M0 签名）。
+    schema_snapshot: Option<Schema>,
 }
 
 impl SegmentWriter {
@@ -64,6 +70,8 @@ impl SegmentWriter {
             dim,
             stored: Vec::new(),
             id_map: Vec::new(),
+            scalars: std::collections::HashMap::new(),
+            schema_snapshot: Some(schema.clone()),
         })
     }
 
@@ -122,6 +130,64 @@ impl SegmentWriter {
         Ok(())
     }
 
+    /// 为最近一次 add_doc 的文档设置标量字段值（SPEC §3.1/§6.2，03-pre-filter）。
+    /// 在 add_doc 之后、finalize 之前调用；重复调用覆盖当前文档该字段值。
+    /// 字段必须存在于 schema 且为 Scalar 类型，且 value 的变体与 ScalarKind 匹配，
+    /// 否则 Err(Schema)。不调 set_scalar 的 docid 该字段为 None（filter 不命中）。
+    /// 不变量 I-1：仅修改写期 buffer，scalars.col 仍在 finalize 一次性写入。
+    pub fn set_scalar(&mut self, field: &str, value: crate::api::ScalarValue) -> Result<()> {
+        if self.next_docid == 0 {
+            return Err(VaneError::Schema("set_scalar called before add_doc".into()));
+        }
+        // 校验字段在 schema 且为 Scalar。
+        let kind = self
+            .schema_scalar_kind(field)
+            .ok_or_else(|| VaneError::Schema(format!("field '{}' not a scalar field", field)))?;
+        // 校验 value 变体与 ScalarKind 匹配。
+        let ok = matches!(
+            (&value, kind),
+            (crate::api::ScalarValue::Int(_), ScalarKind::Int)
+                | (crate::api::ScalarValue::Float(_), ScalarKind::Float)
+                | (crate::api::ScalarValue::Bool(_), ScalarKind::Bool)
+                | (crate::api::ScalarValue::Keyword(_), ScalarKind::Keyword)
+        );
+        if !ok {
+            return Err(VaneError::Schema(format!(
+                "scalar value kind mismatch for field '{}'",
+                field
+            )));
+        }
+        let local = (self.next_docid - 1) as usize;
+        let col = self
+            .scalars
+            .entry(field.to_string())
+            .or_insert_with(|| (kind, vec![None; self.next_docid as usize]));
+        let vec = &mut col.1;
+        // 补齐到当前 docid 长度（该字段首条 set_scalar 之前的 docid 为 None）。
+        if vec.len() <= local {
+            vec.resize(local + 1, None);
+        }
+        vec[local] = Some(value);
+        Ok(())
+    }
+
+    /// 查 schema 中标量字段的 ScalarKind（非 Scalar 返回 None）。
+    fn schema_scalar_kind(&self, field: &str) -> Option<ScalarKind> {
+        self.schema_snapshot.as_ref().and_then(|s| {
+            s.fields.iter().find_map(|(n, d)| {
+                if n == field {
+                    if let crate::types::FieldDef::Scalar { kind } = d {
+                        Some(*kind)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
     pub fn finalize(self) -> Result<SegmentMeta> {
         let seg_dir = format!("{}/seg_{}", self.segments_dir, self.ulid);
 
@@ -176,14 +242,40 @@ impl SegmentWriter {
         self.vfs.write_at(&ipath, &ibytes, 0)?;
         self.vfs.sync(&ipath)?;
 
-        // S2: 写 scalars.col（空 stub：magic+version+0 字段）。
-        // M0 filter 未实现，scalars 无消费方，写空保证段目录布局完整。
+        // 03-pre-filter：写 scalars.col 列式块（SPEC §6.2）。
+        // 格式：magic(4) | version(4 LE) | num_fields(4 LE) |
+        //   { name_len(4 LE) | name_bytes | kind(1) | count(4 LE) |
+        //     for each docid 0..count: present(1 byte) | [value if present] }
+        // count = 段内 doc_count（dense，per-docid 槽位）。present=0 表示该 docid 未设值。
         let colpath = format!("{}/scalars.col", seg_dir);
         self.vfs.create(&colpath)?;
         let mut scbytes = Vec::new();
         scbytes.extend_from_slice(crate::types::MAGIC);
         scbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
-        scbytes.extend_from_slice(&0u32.to_le_bytes()); // 0 个标量字段
+        // 收集已 set_scalar 的字段，按字段名排序保证写盘确定性。
+        let mut scalar_fields: Vec<String> = self.scalars.keys().cloned().collect();
+        scalar_fields.sort();
+        scbytes.extend_from_slice(&(scalar_fields.len() as u32).to_le_bytes());
+        let doc_count = self.next_docid as u32;
+        for name in &scalar_fields {
+            let (kind, vals) = &self.scalars[name];
+            let name_bytes = name.as_bytes();
+            scbytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            scbytes.extend_from_slice(name_bytes);
+            scbytes.push(scalar_kind_to_u8(*kind));
+            scbytes.extend_from_slice(&doc_count.to_le_bytes());
+            // 确保列长度对齐 doc_count（未补齐的尾部填 None）。
+            for i in 0..doc_count as usize {
+                let v = vals.get(i).and_then(|x| x.as_ref());
+                match v {
+                    None => scbytes.push(0u8),
+                    Some(sv) => {
+                        scbytes.push(1u8);
+                        write_scalar_value(sv, &mut scbytes);
+                    }
+                }
+            }
+        }
         self.vfs.write_at(&colpath, &scbytes, 0)?;
         self.vfs.sync(&colpath)?;
 
@@ -467,4 +559,290 @@ fn decode_stored(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredRead
         map.insert(docid, StoredReadEntry { text, meta_json });
     }
     Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// 03-pre-filter：scalars.col 读期（ScalarReader）+ 编解码辅助
+// ---------------------------------------------------------------------------
+
+/// 标量列式块读期数据（SPEC §6.2 scalars.col）。
+/// 偏离 README 契约：Vec 元素为 Option 以表达「该 docid 未设值」（filter 不命中）。
+/// 属新增类型，非 M0 冻结签名变更。
+pub enum ScalarColumn {
+    Int(Vec<Option<i64>>),
+    Float(Vec<Option<f64>>),
+    Bool(Vec<Option<bool>>),
+    Keyword(Vec<Option<String>>),
+}
+
+/// 标量列式块读期句柄（scalars.col，SPEC §6.2）。
+pub struct ScalarReader {
+    columns: std::collections::HashMap<String, ScalarColumn>,
+}
+
+impl ScalarReader {
+    /// 从段目录加载 scalars.col。无 scalars.col 文件或空段返回空 reader（无列）。
+    pub fn open(vfs: &Arc<dyn Vfs>, segment_dir: &str) -> Result<Self> {
+        let path = format!("{}/scalars.col", segment_dir);
+        let buf = match read_all_optional(vfs.as_ref(), &path) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return Ok(Self {
+                    columns: std::collections::HashMap::new(),
+                })
+            }
+            Err(e) => return Err(e),
+        };
+        decode_scalars(&buf)
+    }
+
+    /// 读取某文档某字段的标量值。local_docid 为段内局部 docid（0 起）。
+    /// 字段不存在或 docid 越界或该 docid 未设值返回 None。
+    pub fn get(&self, field: &str, local_docid: u32) -> Option<crate::api::ScalarValue> {
+        let col = self.columns.get(field)?;
+        let i = local_docid as usize;
+        match col {
+            ScalarColumn::Int(v) => v.get(i).and_then(|x| x.map(crate::api::ScalarValue::Int)),
+            ScalarColumn::Float(v) => v.get(i).and_then(|x| x.map(crate::api::ScalarValue::Float)),
+            ScalarColumn::Bool(v) => v.get(i).and_then(|x| x.map(crate::api::ScalarValue::Bool)),
+            ScalarColumn::Keyword(v) => v.get(i).and_then(|x| {
+                x.as_ref()
+                    .map(|s| crate::api::ScalarValue::Keyword(s.clone()))
+            }),
+        }
+    }
+
+    /// 字段是否存在（有列）。
+    pub fn has_field(&self, field: &str) -> bool {
+        self.columns.contains_key(field)
+    }
+}
+
+/// read_all 但文件不存在时返回 Ok(None)（scalars.col 可缺失，兼容 M0 空段）。
+fn read_all_optional(vfs: &dyn Vfs, path: &str) -> Result<Option<Vec<u8>>> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut off = 0u64;
+    let mut started = false;
+    loop {
+        let n = match vfs.read_at(path, &mut tmp, off) {
+            Ok(n) => n,
+            Err(crate::types::VaneError::Io(_)) if !started => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            break;
+        }
+        started = true;
+        buf.extend_from_slice(&tmp[..n]);
+        off += n as u64;
+    }
+    if !started {
+        // 文件存在但空 / 首读返回 0：视为不存在。
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
+/// 解码 scalars.col。
+fn decode_scalars(buf: &[u8]) -> Result<ScalarReader> {
+    if buf.len() < 12 {
+        return Ok(ScalarReader {
+            columns: std::collections::HashMap::new(),
+        });
+    }
+    if &buf[0..4] != crate::types::MAGIC {
+        return Err(VaneError::Corrupt("scalars.col bad magic".into()));
+    }
+    let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    if version != crate::types::FORMAT_VERSION {
+        return Err(VaneError::Version(format!(
+            "scalars.col unsupported format_version: {} (expected {})",
+            version,
+            crate::types::FORMAT_VERSION
+        )));
+    }
+    let num_fields = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+    let mut pos = 12;
+    let mut columns = std::collections::HashMap::with_capacity(num_fields);
+    for _ in 0..num_fields {
+        if pos + 4 > buf.len() {
+            return Err(VaneError::Corrupt("scalars.col name_len truncated".into()));
+        }
+        let name_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + name_len > buf.len() {
+            return Err(VaneError::Corrupt("scalars.col name truncated".into()));
+        }
+        let name = std::str::from_utf8(&buf[pos..pos + name_len])
+            .map_err(|e| VaneError::Corrupt(format!("scalars.col name utf8: {}", e)))?
+            .to_string();
+        pos += name_len;
+        if pos + 5 > buf.len() {
+            return Err(VaneError::Corrupt(
+                "scalars.col kind/count truncated".into(),
+            ));
+        }
+        let kind = scalar_kind_from_u8(buf[pos])?;
+        pos += 1;
+        let count = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let col = match kind {
+            ScalarKind::Int => {
+                let mut v: Vec<Option<i64>> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (present, val, np) = read_opt_i64(buf, pos)?;
+                    pos = np;
+                    v.push(if present { Some(val) } else { None });
+                }
+                ScalarColumn::Int(v)
+            }
+            ScalarKind::Float => {
+                let mut v: Vec<Option<f64>> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (present, val, np) = read_opt_f64(buf, pos)?;
+                    pos = np;
+                    v.push(if present { Some(val) } else { None });
+                }
+                ScalarColumn::Float(v)
+            }
+            ScalarKind::Bool => {
+                let mut v: Vec<Option<bool>> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if pos + 1 > buf.len() {
+                        return Err(VaneError::Corrupt("scalars.col bool truncated".into()));
+                    }
+                    let present = buf[pos];
+                    pos += 1;
+                    if present == 1 {
+                        if pos + 1 > buf.len() {
+                            return Err(VaneError::Corrupt(
+                                "scalars.col bool value truncated".into(),
+                            ));
+                        }
+                        v.push(Some(buf[pos] != 0));
+                        pos += 1;
+                    } else {
+                        v.push(None);
+                    }
+                }
+                ScalarColumn::Bool(v)
+            }
+            ScalarKind::Keyword => {
+                let mut v: Vec<Option<String>> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if pos + 1 > buf.len() {
+                        return Err(VaneError::Corrupt(
+                            "scalars.col keyword present truncated".into(),
+                        ));
+                    }
+                    let present = buf[pos];
+                    pos += 1;
+                    if present == 1 {
+                        if pos + 4 > buf.len() {
+                            return Err(VaneError::Corrupt(
+                                "scalars.col keyword len truncated".into(),
+                            ));
+                        }
+                        let len =
+                            u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+                        pos += 4;
+                        if pos + len > buf.len() {
+                            return Err(VaneError::Corrupt(
+                                "scalars.col keyword bytes truncated".into(),
+                            ));
+                        }
+                        let s = std::str::from_utf8(&buf[pos..pos + len])
+                            .map_err(|e| {
+                                VaneError::Corrupt(format!("scalars.col keyword utf8: {}", e))
+                            })?
+                            .to_string();
+                        pos += len;
+                        v.push(Some(s));
+                    } else {
+                        v.push(None);
+                    }
+                }
+                ScalarColumn::Keyword(v)
+            }
+        };
+        columns.insert(name, col);
+    }
+    Ok(ScalarReader { columns })
+}
+
+fn read_opt_i64(buf: &[u8], pos: usize) -> Result<(bool, i64, usize)> {
+    if pos + 1 > buf.len() {
+        return Err(VaneError::Corrupt(
+            "scalars.col int present truncated".into(),
+        ));
+    }
+    let present = buf[pos];
+    let pos = pos + 1;
+    if present == 1 {
+        if pos + 8 > buf.len() {
+            return Err(VaneError::Corrupt("scalars.col int value truncated".into()));
+        }
+        let val = i64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        Ok((true, val, pos + 8))
+    } else {
+        Ok((false, 0, pos))
+    }
+}
+
+fn read_opt_f64(buf: &[u8], pos: usize) -> Result<(bool, f64, usize)> {
+    if pos + 1 > buf.len() {
+        return Err(VaneError::Corrupt(
+            "scalars.col float present truncated".into(),
+        ));
+    }
+    let present = buf[pos];
+    let pos = pos + 1;
+    if present == 1 {
+        if pos + 8 > buf.len() {
+            return Err(VaneError::Corrupt(
+                "scalars.col float value truncated".into(),
+            ));
+        }
+        let val = f64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        Ok((true, val, pos + 8))
+    } else {
+        Ok((false, 0.0, pos))
+    }
+}
+
+fn scalar_kind_to_u8(k: ScalarKind) -> u8 {
+    match k {
+        ScalarKind::Int => 0,
+        ScalarKind::Float => 1,
+        ScalarKind::Bool => 2,
+        ScalarKind::Keyword => 3,
+    }
+}
+
+fn scalar_kind_from_u8(b: u8) -> Result<ScalarKind> {
+    match b {
+        0 => Ok(ScalarKind::Int),
+        1 => Ok(ScalarKind::Float),
+        2 => Ok(ScalarKind::Bool),
+        3 => Ok(ScalarKind::Keyword),
+        _ => Err(VaneError::Corrupt(format!(
+            "scalars.col unknown scalar kind byte: {}",
+            b
+        ))),
+    }
+}
+
+/// 写单个 ScalarValue 到 buf（不带 present 标记，调用方先写 present=1）。
+fn write_scalar_value(sv: &crate::api::ScalarValue, out: &mut Vec<u8>) {
+    match sv {
+        crate::api::ScalarValue::Int(i) => out.extend_from_slice(&i.to_le_bytes()),
+        crate::api::ScalarValue::Float(f) => out.extend_from_slice(&f.to_le_bytes()),
+        crate::api::ScalarValue::Bool(b) => out.push(if *b { 1 } else { 0 }),
+        crate::api::ScalarValue::Keyword(s) => {
+            let b = s.as_bytes();
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
+        }
+    }
 }
