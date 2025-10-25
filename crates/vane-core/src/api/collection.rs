@@ -36,7 +36,7 @@ impl Clone for Collection {
 pub(crate) struct CollectionInner {
     pub(crate) name: String,
     pub(crate) schema: Schema,
-    pub(crate) tokenizer: Box<dyn crate::tokenizer::Tokenizer>,
+    pub(crate) tokenizer: Arc<dyn crate::tokenizer::Tokenizer>,
     pub(crate) tokenizer_id: CoreTokenizerId,
     vfs: Arc<dyn Vfs>,
     db_path: String,
@@ -49,6 +49,12 @@ pub(crate) struct CollectionInner {
     inverted_readers: RwLock<Vec<Arc<InvertedIndexReader>>>,
     // 01-hnsw：HnswReader 随段快照缓存。Option 因 M0 段无 hnsw.bin（Q-5 → fallback brute）。
     hnsw_readers: RwLock<Vec<Option<Arc<HnswReader>>>>,
+    // 02-tombstone-merge：段 ULID → tombstone 位图（绝对 docid）。
+    // delete 期更新内存位图（不修改段文件 I-1）；持久化经 WAL（04 计划）。
+    // 查询期 search 把 tombstone 并入 filter 参数（02 手动并入；03 计划 compile_filter 统一）。
+    tombstones: RwLock<HashMap<String, roaring::RoaringBitmap>>,
+    // 02-tombstone-merge：compact 进行中标志（防重入；06 reindex 状态机复用）。
+    compacting: Mutex<bool>,
 }
 
 struct WriteState {
@@ -73,7 +79,11 @@ impl CollectionInner {
         meta: CollectionMeta,
         auto_commit: AutoCommitConfig,
     ) -> Result<Self> {
-        let tokenizer = build_tokenizer(meta.tokenizer_kind, &meta.user_dict)?;
+        let tokenizer: Arc<dyn crate::tokenizer::Tokenizer> =
+            Arc::<dyn crate::tokenizer::Tokenizer>::from(build_tokenizer(
+                meta.tokenizer_kind,
+                &meta.user_dict,
+            )?);
         let segments_dir = format!("{}/segments", db.db_path);
         Ok(Self {
             name: name.to_string(),
@@ -92,6 +102,8 @@ impl CollectionInner {
             seg_offsets: RwLock::new(HashMap::new()),
             inverted_readers: RwLock::new(Vec::new()),
             hnsw_readers: RwLock::new(Vec::new()),
+            tombstones: RwLock::new(HashMap::new()),
+            compacting: Mutex::new(false),
         })
     }
 
@@ -297,6 +309,133 @@ impl Collection {
             inv_readers.push(inv_reader);
             hnsw_readers.push(hnsw_reader);
         }
+        // 02 Task 6：段数超 SEGMENT_MAX 自动合并小段（SPEC §3.3）。
+        // 选最小两段合并（pick_merge_candidates 已按 doc_count 升序）。
+        if self.segment_count() > crate::types::SEGMENT_MAX {
+            // 自动合并失败不阻塞 flush 返回值（flush 已成功）；记录到 stderr。
+            if let Err(e) = self.auto_merge_two_smallest() {
+                eprintln!(
+                    "[vane] auto-merge after flush for collection '{}' failed: {}",
+                    self.inner.name, e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 当前段数（测试与诊断用）。
+    pub fn segment_count(&self) -> usize {
+        self.inner.snapshot.read().unwrap().len()
+    }
+
+    /// 选最小两段合并（auto-merge on exceeding SEGMENT_MAX，SPEC §3.3）。
+    fn auto_merge_two_smallest(&self) -> Result<()> {
+        let snap = self.inner.snapshot.read().unwrap().clone();
+        if snap.len() < 2 {
+            return Ok(());
+        }
+        let tombstones = self.inner.tombstones.read().unwrap().clone();
+        let ratios: Vec<(String, f32)> = snap
+            .iter()
+            .map(|r| {
+                let total = r.doc_count().max(1) as f32;
+                let t = tombstones
+                    .get(&r.meta().ulid)
+                    .map(|b| b.len() as f32)
+                    .unwrap_or(0.0);
+                (r.meta().ulid.clone(), t / total)
+            })
+            .collect();
+        let picked = crate::merge::pick_merge_candidates(&snap, &ratios);
+        if picked.len() < 2 {
+            return Ok(());
+        }
+        let merge_two: Vec<String> = picked.into_iter().take(2).collect();
+        self.merge_segments(merge_two)
+    }
+
+    /// 合并指定段 ULID 列表为单个新段，更新 manifest + 内存快照 + 删旧段。
+    fn merge_segments(&self, source_ulids: Vec<String>) -> Result<()> {
+        if source_ulids.is_empty() {
+            return Ok(());
+        }
+        let offsets = self.inner.seg_offsets.read().unwrap().clone();
+        let tombstones = self.inner.tombstones.read().unwrap().clone();
+        let tokenizer_arc = self.inner.tokenizer.clone();
+        // target_docid_base = 0（合并后新段从 0 起连续）。
+        let mut task = crate::merge::MergeTask::new(
+            source_ulids.clone(),
+            0,
+            self.inner.tokenizer_id.clone(),
+            self.inner.schema.clone(),
+            tokenizer_arc,
+        );
+        task.set_tombstones(tombstones);
+        let ctx = crate::merge::MergeContext {
+            vfs: &self.inner.vfs,
+            db_path: &self.inner.db_path,
+            segments_dir: &self.inner.segments_dir,
+        };
+        while !task.step(&ctx)? {}
+        let new_meta = crate::merge::finalize_merge(task, &ctx)?;
+        let new_seg_dir = format!("{}/seg_{}", self.inner.segments_dir, new_meta.ulid);
+
+        // 更新 manifest（I-6）。
+        let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
+        let mut manifest = manifest_store
+            .load()?
+            .unwrap_or_else(crate::persistence::Manifest::empty);
+        let col_meta = manifest
+            .collections
+            .get_mut(&self.inner.name)
+            .ok_or_else(|| {
+                VaneError::NotFound(format!("collection not in manifest: {}", self.inner.name))
+            })?;
+        col_meta.segment_ulids.retain(|u| !source_ulids.contains(u));
+        col_meta.segment_ulids.push(new_meta.ulid.clone());
+        manifest_store.save_atomic(&manifest)?;
+
+        // 更新内存快照。
+        let new_reader = Arc::new(SegmentReader::open(&self.inner.vfs, &new_seg_dir)?);
+        let new_inv = Arc::new(InvertedIndexReader::open(&self.inner.vfs, &new_seg_dir)?);
+        let new_hnsw = match HnswReader::open(&self.inner.vfs, &new_seg_dir) {
+            Ok(r) => Some(Arc::new(r)),
+            Err(_) => None,
+        };
+        {
+            let mut snap_w = self.inner.snapshot.write().unwrap();
+            let mut offsets_w = self.inner.seg_offsets.write().unwrap();
+            let mut inv_w = self.inner.inverted_readers.write().unwrap();
+            let mut hnsw_w = self.inner.hnsw_readers.write().unwrap();
+            let mut tomb_w = self.inner.tombstones.write().unwrap();
+            let old_snap = std::mem::take(&mut *snap_w);
+            let old_inv = std::mem::take(&mut *inv_w);
+            let old_hnsw = std::mem::take(&mut *hnsw_w);
+            for (i, r) in old_snap.iter().enumerate() {
+                if !source_ulids.contains(&r.meta().ulid) {
+                    snap_w.push(r.clone());
+                    offsets_w.insert(
+                        r.meta().ulid.clone(),
+                        offsets.get(&r.meta().ulid).copied().unwrap_or(0),
+                    );
+                    if let Some(inv) = old_inv.get(i) {
+                        inv_w.push(inv.clone());
+                    }
+                    if let Some(h) = old_hnsw.get(i) {
+                        hnsw_w.push(h.clone());
+                    }
+                } else {
+                    offsets_w.remove(&r.meta().ulid);
+                    tomb_w.remove(&r.meta().ulid);
+                    let old_seg_dir = format!("{}/seg_{}", self.inner.segments_dir, r.meta().ulid);
+                    let _ = crate::merge::delete_segment_dir(self.inner.vfs.as_ref(), &old_seg_dir);
+                }
+            }
+            offsets_w.insert(new_meta.ulid.clone(), new_meta.docid_base);
+            snap_w.push(new_reader);
+            inv_w.push(new_inv);
+            hnsw_w.push(new_hnsw);
+        }
         Ok(())
     }
 
@@ -309,6 +448,8 @@ impl Collection {
         }
         // 01-hnsw Task 5：filter 编译由 03-pre-filter 实装；本计划不再 reject，
         // 透传 None 占位（03 接入后补编译位图 + 自适应回退判定）。
+        // 02-tombstone-merge：tombstone 位图并入 filter（手动并入；03 计划 compile_filter 统一）。
+        // 此处 filter_bm 为用户 filter（02 恒 None），tombstone 在每段循环内并入 alive_bm。
         let filter_bm: Option<&roaring::RoaringBitmap> = None;
         // mode 推断（S8：Auto 内部用，绑定层不暴露 "auto" 字符串）
         let mode = match query.mode {
@@ -347,6 +488,8 @@ impl Collection {
         let inv_readers = self.inner.inverted_readers.read().unwrap();
         // 01-hnsw：HnswReader 缓存（Option：M0 段无 hnsw.bin → None → fallback brute）
         let hnsw_readers = self.inner.hnsw_readers.read().unwrap();
+        // 02-tombstone-merge：tombstone 位图（ulid → 绝对 docid），查询期并入 filter。
+        let tombstones = self.inner.tombstones.read().unwrap();
         let topk = query.top_k as usize;
         let cand = topk * query.candidate_multiplier as usize;
 
@@ -365,6 +508,35 @@ impl Collection {
             snap.iter().zip(inv_readers.iter()).zip(hnsw_readers.iter())
         {
             let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
+            // 02-tombstone-merge：构建本段 alive 位图 = [base, base+count) − tombstone。
+            // tombstone 为 EXCLUSION 语义，search 的 filter 为 INCLUSION，故转 alive 集。
+            // 03 计划正式 compile_filter 把用户 filter AND alive_bm 统一编译。
+            let alive_bm: Option<roaring::RoaringBitmap> = {
+                let seg_tombs = tombstones.get(&reader.meta().ulid);
+                if let Some(tombs) = seg_tombs {
+                    if tombs.is_empty() {
+                        None
+                    } else {
+                        let mut bm = roaring::RoaringBitmap::new();
+                        let start = base as u32;
+                        let end = base + reader.doc_count() as u64;
+                        if end <= u64::from(u32::MAX) {
+                            bm.insert_range(start..(end as u32));
+                            bm -= tombs;
+                        }
+                        Some(bm)
+                    }
+                } else {
+                    None
+                }
+            };
+            let alive_ref: Option<&roaring::RoaringBitmap> = alive_bm.as_ref();
+            // 合并用户 filter（02 恒 None）与 alive：03 会做 AND 编译；此处取 alive（None 时透传 filter_bm）。
+            let merged_filter: Option<&roaring::RoaringBitmap> = if alive_ref.is_some() {
+                alive_ref
+            } else {
+                filter_bm
+            };
             // vector 路
             if matches!(mode, SearchMode::Hybrid | SearchMode::Vector) {
                 if let (Some(qv), Some(metric)) = (&query.vector, vf) {
@@ -379,7 +551,7 @@ impl Collection {
                         if let Some(hr) = hnsw_reader {
                             let ef = hr.ef_construction().max(want as u32 * 4) as usize;
                             // R-hnsw-vec：向量不进 hnsw.bin，由 SegmentReader.vectors() 传入共享单一副本。
-                            hr.search(qv, want, ef, filter_bm, base, reader.vectors())
+                            hr.search(qv, want, ef, merged_filter, base, reader.vectors())
                         } else {
                             brute_search(
                                 reader.vectors(),
@@ -387,7 +559,7 @@ impl Collection {
                                 qv,
                                 metric,
                                 want,
-                                filter_bm,
+                                merged_filter,
                                 base,
                             )
                         }
@@ -398,7 +570,7 @@ impl Collection {
                             qv,
                             metric,
                             want,
-                            filter_bm,
+                            merged_filter,
                             base,
                         )
                     };
@@ -416,7 +588,7 @@ impl Collection {
                         } else {
                             topk
                         },
-                        None,
+                        merged_filter,
                     );
                     text_candidates.append(&mut hits);
                 }
@@ -537,13 +709,78 @@ impl Collection {
             .collect()
     }
 
-    // I1 裁决：M0 占位
-    pub fn delete(&self, _ids: &[String]) -> Result<u64> {
-        Err(VaneError::Unsupported)
+    /// M1 实装（02-tombstone-merge）：追加 tombstone（内存位图）。
+    /// 查询期 search 把 tombstone 并入 filter 过滤；持久化经 WAL（04 计划）。
+    /// 段不可变（I-1）：不修改段文件，仅更新内存位图。
+    pub fn delete(&self, ids: &[String]) -> Result<u64> {
+        let snap = self.inner.snapshot.read().unwrap();
+        let offsets = self.inner.seg_offsets.read().unwrap();
+        let mut tombstones = self.inner.tombstones.write().unwrap();
+        let mut count: u64 = 0;
+        // 构建 external_id → (ulid, abs_docid) 反查。doc 数通常不大；逐段 HashMap 查找。
+        for id in ids {
+            for reader in snap.iter() {
+                let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
+                // 段内 id_map 反查 local docid。
+                let local = reader.local_docid_by_external(id);
+                if let Some(l) = local {
+                    let abs = base + l;
+                    if abs > u32::MAX as u64 {
+                        // roaring 存 u32；超限记不进来（与 search 一致），跳过。
+                        continue;
+                    }
+                    let bm = tombstones.entry(reader.meta().ulid.clone()).or_default();
+                    if bm.insert(abs as u32) {
+                        count += 1;
+                    }
+                    break; // 一个 external_id 只可能存在于一个段
+                }
+            }
+        }
+        Ok(count)
     }
+
+    /// M1 实装（02-tombstone-merge）：手动触发段合并（compact）。
+    /// 物理清除 tombstone 文档，新段从零重建 HNSW 图（I-3）。
+    /// 全串行同步执行（R-4/R-6）；E_BUSY 若 compact 进行中（06 reindex 状态机复用）。
     pub fn compact(&self) -> Result<()> {
-        Err(VaneError::Unsupported)
+        // 重入保护。
+        {
+            let mut guard = self.inner.compacting.lock().unwrap();
+            if *guard {
+                return Err(VaneError::Busy);
+            }
+            *guard = true;
+        }
+        // 作用域结束释放 guard，确保 panic 时不死锁——改用显式 finally 模式。
+        let result = self.run_compact();
+        *self.inner.compacting.lock().unwrap() = false;
+        result
     }
+
+    fn run_compact(&self) -> Result<()> {
+        let snap = self.inner.snapshot.read().unwrap().clone();
+        // 0 段：直接返回。1 段且无 tombstone：无需重建。
+        if snap.is_empty() {
+            return Ok(());
+        }
+        if snap.len() == 1 {
+            let has_tomb = self
+                .inner
+                .tombstones
+                .read()
+                .unwrap()
+                .get(&snap[0].meta().ulid)
+                .map(|b| !b.is_empty())
+                .unwrap_or(false);
+            if !has_tomb {
+                return Ok(());
+            }
+        }
+        let source_ulids: Vec<String> = snap.iter().map(|r| r.meta().ulid.clone()).collect();
+        self.merge_segments(source_ulids)
+    }
+
     pub fn reindex(&self) -> Result<()> {
         Err(VaneError::Unsupported)
     }

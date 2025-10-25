@@ -53,8 +53,9 @@ fn full_cycle_memory_vfs() {
 }
 
 #[test]
-fn delete_rejects_unsupported() {
-    // M0 占位：core Collection::delete 返回 E_UNSUPPORTED（code -10）
+fn delete_returns_count_for_unknown_id() {
+    // 02-tombstone-merge 实装后：delete 不再返回 E_UNSUPPORTED，
+    // 对不存在的 id 返回 0（命中数）。
     let vfs = Arc::new(MemoryVfs::new());
     let db = Db::open(vfs, "mem2", OpenOptions::default()).unwrap();
     let schema = vane_core::types::Schema::new(vec![(
@@ -67,8 +68,8 @@ fn delete_rejects_unsupported() {
     .unwrap();
     let col = db.collection("c", schema, Default::default()).unwrap();
     let r = col.delete(&["x".into()]);
-    assert!(matches!(r, Err(vane_core::types::VaneError::Unsupported)));
-    assert_eq!(r.unwrap_err().code(), -10);
+    assert!(r.is_ok());
+    assert_eq!(r.unwrap(), 0);
 }
 
 #[test]
