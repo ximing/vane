@@ -330,6 +330,16 @@ impl SegmentReader {
     pub fn external_id(&self, docid: u64) -> Option<&str> {
         self.id_map.get(&docid).map(|s| s.as_str())
     }
+
+    /// 反查：external_id → 段内局部 docid（0 起）。
+    /// 02-tombstone-merge delete 用（定位待删文档在段内的 local docid）。
+    /// 属 M1 扩展，非 M0 冻结 API 破坏。
+    pub fn local_docid_by_external(&self, external_id: &str) -> Option<u64> {
+        self.id_map
+            .iter()
+            .find(|(_, eid)| eid.as_str() == external_id)
+            .map(|(local, _)| *local)
+    }
     /// 读取某文档的 stored.bin JSON（回填 Hit.fields，SPEC §6.2 stored.bin）。
     /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
     /// 语义不变：仍返回 meta JSON（原文经 text() 读出）。
