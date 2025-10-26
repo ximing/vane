@@ -128,14 +128,14 @@ L4：10-ci-m1（收尾）
 | 01-hnsw | ✅ 完成 | opus | aa252ca..919936f | APPROVED（fix 后） |
 | 05-jieba-lite | ✅ 完成 | opus | 12eb209..19c03d1 | APPROVED_WITH_MINOR |
 | 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
-| 02-tombstone-merge | ✅ 完成(排队 1 fix) | opus | 407bafb..e9e9016 | APPROVED_WITH_MINOR |
+| 02-tombstone-merge | ✅ 完成 | opus | 407bafb..72bb641 | APPROVED_WITH_MINOR（fix 后） |
 | 07-dict-node | ⏸ 待 | sonnet | — | — |
-| 03-pre-filter | ⏳ 审查中 | sonnet | 57785ce..5260c49 | — |
+| 03-pre-filter | ✅ 完成 | sonnet | 57785ce..5260c49 | APPROVED_WITH_MINOR |
 | 04-wal | ⏸ 待 | sonnet | — | — |
 | 06-userdict-reindex | ⏸ 待 | opus | — | — |
 | 08-dict-go | ⏸ 待 | sonnet | — | — |
 | 11-cold-start | ⏸ 待 | sonnet | — | — |
-| 12-recall | ⏸ 待 | sonnet | — | — |
+| 12-recall | ⏳ 实现中 | sonnet | — | — |
 | 10-ci-m1 | ⏸ 待 | sonnet | — | — |
 
 ### 00-text-persistence 裁决（reviewer APPROVED_WITH_MINOR）
