@@ -149,6 +149,37 @@ fn compact_physically_clears_tombstone() {
     assert_eq!(col.search(&text_query()).unwrap().len(), 1);
 }
 
+// 回归（02-review B-2）：partial auto-merge 的 target_docid_base 碰撞。
+// 构造大段（base=0, 5 docs）+ 10 个小段（各 1 doc）。auto_merge 选最小两段
+// （小段）合并，保留 base=0 大段。缺陷下新段 target_docid_base=0 → 与大段
+// [0,5) docid 重叠 → search 回填误命中大段、fusion 去重丢 2 条文档。
+// 修复后新段 base = max(保留段 base+count)，docid 不重叠 → 15 条全唯一。
+#[test]
+fn partial_auto_merge_does_not_overlap_docid_with_retained_segments() {
+    let vfs = Arc::new(MemoryVfs::new());
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col = setup_col(&db);
+    // 大段：5 docs，base=0（doc_count 大，不会被选入"最小两段"）。
+    col.add(&docs_batch(5)).unwrap();
+    col.flush().unwrap();
+    // 10 个小段：各 1 doc，使段数超 SEGMENT_MAX(10) 触发 auto_merge。
+    for i in 0..10 {
+        col.add(&[doc(&format!("s{}", i), "hello world")]).unwrap();
+        col.flush().unwrap();
+    }
+    assert!(col.segment_count() <= 10);
+    // 搜索全部 "hello"：5（大段）+ 10（小段）= 15 条不重复文档。
+    // 缺陷下新段 [0,2) 与大段 [0,5) 重叠 → fusion 去重后 unique 仅 13。
+    let hits = col.search(&text_query()).unwrap();
+    let unique: std::collections::HashSet<&String> = hits.iter().map(|h| &h.id).collect();
+    assert_eq!(
+        unique.len(),
+        15,
+        "all 15 docs must be distinct after partial auto-merge; got {:?}",
+        unique
+    );
+}
+
 // Task 6: 段数超 10 自动合并
 #[test]
 fn flush_auto_merges_when_exceeding_segment_max() {

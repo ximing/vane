@@ -389,11 +389,29 @@ impl Collection {
         }
         let offsets = self.inner.seg_offsets.read().unwrap().clone();
         let tombstones = self.inner.tombstones.read().unwrap().clone();
+        let snap = self.inner.snapshot.read().unwrap().clone();
+        // target_docid_base 选择（02-review B-2 修复）：
+        // - compact 全合并（source 覆盖全部段，无保留段）：0（从 0 起合理）。
+        // - partial auto-merge（合并 2/N 段）：max(保留段 base + count)，
+        //   新段 docid 从所有保留段的最大 docid 之后开始，避免与任何保留段
+        //   docid 空间重叠（否则 search 回填误命中、fusion 去重丢文档）。
+        let is_full_merge = snap.iter().all(|r| source_ulids.contains(&r.meta().ulid));
+        let target_docid_base = if is_full_merge {
+            0
+        } else {
+            snap.iter()
+                .filter(|r| !source_ulids.contains(&r.meta().ulid))
+                .map(|r| {
+                    let base = offsets.get(&r.meta().ulid).copied().unwrap_or(0);
+                    base + r.doc_count() as u64
+                })
+                .max()
+                .unwrap_or(0)
+        };
         let tokenizer_arc = self.inner.tokenizer.clone();
-        // target_docid_base = 0（合并后新段从 0 起连续）。
         let mut task = crate::merge::MergeTask::new(
             source_ulids.clone(),
-            0,
+            target_docid_base,
             self.inner.tokenizer_id.clone(),
             self.inner.schema.clone(),
             tokenizer_arc,
@@ -407,6 +425,17 @@ impl Collection {
         while !task.step(&ctx)? {}
         let new_meta = crate::merge::finalize_merge(task, &ctx)?;
         let new_seg_dir = format!("{}/seg_{}", self.inner.segments_dir, new_meta.ulid);
+
+        // partial merge 时推进 next_docid 到新段末尾之后，避免后续 flush 分配的
+        // docid 与新段 [target_docid_base, target_docid_base + new_count) 重叠。
+        // compact 全合并 base=0 不受影响（next_docid 保持 stale-high，详见 02-review 维度 8a）。
+        if !is_full_merge {
+            let new_end = target_docid_base + new_meta.doc_count as u64;
+            let mut state = self.inner.write_state.lock().unwrap();
+            if new_end > state.next_docid {
+                state.next_docid = new_end;
+            }
+        }
 
         // 更新 manifest（I-6）。
         let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);

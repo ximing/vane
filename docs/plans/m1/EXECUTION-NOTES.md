@@ -128,9 +128,9 @@ L4：10-ci-m1（收尾）
 | 01-hnsw | ✅ 完成 | opus | aa252ca..919936f | APPROVED（fix 后） |
 | 05-jieba-lite | ✅ 完成 | opus | 12eb209..19c03d1 | APPROVED_WITH_MINOR |
 | 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
-| 02-tombstone-merge | ⏳ 实现中 | opus | — | — |
+| 02-tombstone-merge | ✅ 完成(排队 1 fix) | opus | 407bafb..e9e9016 | APPROVED_WITH_MINOR |
 | 07-dict-node | ⏸ 待 | sonnet | — | — |
-| 03-pre-filter | ⏸ 待 | sonnet | — | — |
+| 03-pre-filter | ⏳ 审查中 | sonnet | 57785ce..5260c49 | — |
 | 04-wal | ⏸ 待 | sonnet | — | — |
 | 06-userdict-reindex | ⏸ 待 | opus | — | — |
 | 08-dict-go | ⏸ 待 | sonnet | — | — |
@@ -150,6 +150,12 @@ L4：10-ci-m1（收尾）
 - **测试名实不符**：`api_hnsw_recall_vs_brute_at_least_95pct` 仅断言 10 条 → 改名（并入 fix）。
 - **ef_search 公式** `max(ef_construction, want*4)`：接受（recall 有利，12-regression 验证）。
 - 11 维度全 ✅（算法/filter/Q-5/串行/I-3/M0 签名/hnsw.bin 头/测试质量）。
+
+### 02-tombstone-merge 裁决（reviewer APPROVED_WITH_MINOR）
+- **next_docid 重置**：无需修（stale-high 经 seg_offsets 按段映射无害；重置反与 buffer docid 碰撞）。
+- **partial auto-merge base=0 碰撞（真实缺陷，排队 02-fix）**：`merge_segments` 硬编码 base=0，auto_merge 合并 2/N 段时若非合并段含 base=0 段→docid 重叠→search 误命中/fusion 丢文档/污染 filter。**Option A 修复**：partial merge `target_docid_base=max(非合并段 base+count)`，compact 全合并保 0。**06 reindex 复用 MergeTask 前必须修**（03 后派 02-fix）。
+- M-minor-2：header.bin tombstone abs/local 语义 04 WAL 前明确。
+- M-minor-1：compacting 标志非 panic-safe，建议 Drop guard。
 
 ### Parked minors（后续 housekeeping pass 修）
 - 05: is_cjk 代码复制（jieba/mod.rs:113-127 复制 cjk_bigram.rs:97-111）→ 改 cjk_bigram is_cjk 为 `pub(crate)` 共享（~3 行）。
