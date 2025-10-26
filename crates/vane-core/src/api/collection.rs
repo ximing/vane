@@ -507,6 +507,25 @@ impl Collection {
     }
 
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<Hit>> {
+        self.run_search(query, true)
+    }
+
+    /// 12-recall-regression 测试/bench 辅助：暴力双路+RRF 基线（绕过 HNSW）。
+    ///
+    /// SPEC §13.2-1 基线口径 = `brute_search`（vector 路）+ `InvertedIndexReader::search`
+    /// （text 路）+ `rrf_fuse`（融合）。本方法复用 [`search`] 的 mode 推断 / dim 校验 /
+    /// filter 编译 / Hit 回填逻辑，**仅** vector 路强制走 `brute_search`（跳过 HnswReader），
+    /// 为 recall 回归提供 100% 召回的对照基线。非对外 IDL，标注 `#[doc(hidden)]`。
+    #[doc(hidden)]
+    pub fn search_brute_baseline(&self, query: &SearchQuery) -> Result<Vec<Hit>> {
+        self.run_search(query, false)
+    }
+
+    /// 搜索主逻辑（`search` 与 `search_brute_baseline` 共享）。
+    ///
+    /// `allow_hnsw=true`：vector 路有 HnswReader 则走 HNSW（自适应回退时仍走 brute）。
+    /// `allow_hnsw=false`：vector 路恒走 `brute_search`（基线口径，绕过 HNSW）。
+    fn run_search(&self, query: &SearchQuery, allow_hnsw: bool) -> Result<Vec<Hit>> {
         if query.top_k > TOPK_MAX {
             return Err(VaneError::InvalidArg(format!(
                 "topK {} exceeds max {}",
@@ -617,8 +636,10 @@ impl Collection {
                         topk
                     };
                     // 01-hnsw：有 HnswReader 且无需强制暴力 → HNSW 搜索；
-                    // 否则 fallback brute_search（M0 段无 hnsw.bin / 低选择率回退 / 写失败）
-                    let mut hits = if !force_brute {
+                    // 否则 fallback brute_search（M0 段无 hnsw.bin / 低选择率回退 / 写失败 /
+                    // search_brute_baseline 基线口径强制 brute）。
+                    let use_hnsw = allow_hnsw && !force_brute;
+                    let mut hits = if use_hnsw {
                         if let Some(hr) = hnsw_reader {
                             let ef = hr.ef_construction().max(want as u32 * 4) as usize;
                             // R-hnsw-vec：向量不进 hnsw.bin，由 SegmentReader.vectors() 传入共享单一副本。
