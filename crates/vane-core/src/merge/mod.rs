@@ -3,7 +3,8 @@
 //! 物理清除 tombstone 文档，新段从零重建 HNSW 图（I-3）。倒排用 posting remap
 //! 不重新分词（B-1）：从源段 InvertedIndexReader 读 term→postings，按新 docid
 //! 重映射，重组 InvertedData → write_inverted。原文从源段 SegmentReader::text
-//! 复用（00 前置）。标量重写（set_scalar）由 03 实装，02 后置。
+//! 复用（00 前置）。标量重写经 `set_scalar` 从源段 ScalarReader 读出按新 docid
+//! 重映射写入新段（Q-7，03-pre-filter 实装）。
 //!
 //! M1 全串行同步执行（R-4/R-6）：无 Executor/cfg，`step()` 处理一个源段全部数据。
 //! 切片粒度留 M2 细化。
@@ -15,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::bm25::{write_inverted, InvertedData, InvertedIndexReader, Posting, TermPostings};
 use crate::hnsw::{write_hnsw, HnswWriter};
-use crate::segment::{SegmentMeta, SegmentReader, SegmentWriter};
+use crate::segment::{ScalarReader, SegmentMeta, SegmentReader, SegmentWriter};
 use crate::tokenizer::Tokenizer;
 use crate::types::{Schema, TokenizerId};
 use crate::vfs::Vfs;
@@ -130,6 +131,21 @@ impl MergeTask {
         let seg_dir = format!("{}/seg_{}", ctx.segments_dir, ulid);
         let reader = SegmentReader::open(ctx.vfs, &seg_dir)?;
         let inv_reader = InvertedIndexReader::open(ctx.vfs, &seg_dir)?;
+        // Q-7：加载源段 ScalarReader，标量按新 docid 重映射写入新段。
+        let scalar_reader = ScalarReader::open(ctx.vfs, &seg_dir)?;
+        // 收集该段有列的标量字段名（供下方逐 docid 重写）。
+        let scalar_fields: Vec<String> = {
+            // 通过 schema 枚举标量字段，再查 ScalarReader 是否有列。
+            self.schema
+                .fields
+                .iter()
+                .filter_map(|(n, d)| match d {
+                    crate::types::FieldDef::Scalar { .. } => Some(n.clone()),
+                    _ => None,
+                })
+                .filter(|n| scalar_reader.has_field(n))
+                .collect()
+        };
 
         // 合并 tombstone：header.bin 的 + 内存注入的（取并集）。
         let mut tombs = reader.meta().tombstones.clone();
@@ -188,6 +204,12 @@ impl MergeTask {
             let new_local = writer.add_doc(external_id, vector, stored_json)?;
             let new_abs = self.target_docid_base + new_local;
             writer.set_text(reader.text(local).unwrap_or(""))?;
+            // Q-7：标量重写——从源段 ScalarReader 读 local 的值，按 new_local 写入新段。
+            for field in &scalar_fields {
+                if let Some(sv) = scalar_reader.get(field, local as u32) {
+                    writer.set_scalar(field, sv)?;
+                }
+            }
             if let Some(hw) = self.hnsw_writer.as_mut() {
                 if let Some(v) = vector {
                     hw.insert(new_local as u32, v);

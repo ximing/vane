@@ -49,6 +49,8 @@ pub(crate) struct CollectionInner {
     inverted_readers: RwLock<Vec<Arc<InvertedIndexReader>>>,
     // 01-hnsw：HnswReader 随段快照缓存。Option 因 M0 段无 hnsw.bin（Q-5 → fallback brute）。
     hnsw_readers: RwLock<Vec<Option<Arc<HnswReader>>>>,
+    // 03-pre-filter：ScalarReader 随段快照缓存（scalars.col），compile_filter 用。
+    scalar_readers: RwLock<Vec<Arc<crate::segment::ScalarReader>>>,
     // 02-tombstone-merge：段 ULID → tombstone 位图（绝对 docid）。
     // delete 期更新内存位图（不修改段文件 I-1）；持久化经 WAL（04 计划）。
     // 查询期 search 把 tombstone 并入 filter 参数（02 手动并入；03 计划 compile_filter 统一）。
@@ -102,6 +104,7 @@ impl CollectionInner {
             seg_offsets: RwLock::new(HashMap::new()),
             inverted_readers: RwLock::new(Vec::new()),
             hnsw_readers: RwLock::new(Vec::new()),
+            scalar_readers: RwLock::new(Vec::new()),
             tombstones: RwLock::new(HashMap::new()),
             compacting: Mutex::new(false),
         })
@@ -118,6 +121,7 @@ impl CollectionInner {
         let mut offsets = HashMap::new();
         let mut inv_readers = Vec::new();
         let mut hnsw_readers = Vec::new();
+        let mut scalar_readers = Vec::new();
         // 读取每段 header.bin 已持久化的 docid_base（而非累加 doc_count 推断），
         // 更稳健：段顺序/非连续场景（M1 compaction）也能正确还原 offset。
         let mut max_end = 0u64;
@@ -131,6 +135,8 @@ impl CollectionInner {
                 Ok(r) => Some(Arc::new(r)),
                 Err(_) => None,
             };
+            // 03-pre-filter：加载 ScalarReader（scalars.col）。
+            let scalar_reader = Arc::new(crate::segment::ScalarReader::open(&db.vfs, &seg_dir)?);
             let base = reader.meta().docid_base;
             let count = reader.doc_count() as u64;
             offsets.insert(ulid.clone(), base);
@@ -138,12 +144,14 @@ impl CollectionInner {
             readers.push(reader);
             inv_readers.push(inv_reader);
             hnsw_readers.push(hnsw_reader);
+            scalar_readers.push(scalar_reader);
         }
         inner.write_state.lock().unwrap().next_docid = max_end;
         *inner.snapshot.write().unwrap() = readers;
         *inner.seg_offsets.write().unwrap() = offsets;
         *inner.inverted_readers.write().unwrap() = inv_readers;
         *inner.hnsw_readers.write().unwrap() = hnsw_readers;
+        *inner.scalar_readers.write().unwrap() = scalar_readers;
         Ok(inner)
     }
 }
@@ -241,6 +249,19 @@ impl Collection {
             // 06-userdict-reindex 经 SegmentReader::text 读原文用新分词器重建倒排；
             // 02-tombstone-merge 经此读原文写入新段。
             writer.set_text(doc.text.as_deref().unwrap_or(""))?;
+            // 03-pre-filter：把 doc.meta 中的标量字段经 set_scalar 写入 scalars.col。
+            // 仅写 schema 中声明为 Scalar 的字段；其余 meta 仍走 stored_json。
+            if let Some(meta) = &doc.meta {
+                for (field, val) in meta {
+                    // schema 标量字段才写列式块（set_scalar 内部校验 kind）。
+                    let is_scalar = self.inner.schema.fields.iter().any(|(n, d)| {
+                        n == field && matches!(d, crate::types::FieldDef::Scalar { .. })
+                    });
+                    if is_scalar {
+                        writer.set_scalar(field, val.clone())?;
+                    }
+                }
+            }
             let global_docid = base_docid + local_docid;
             let tokens = doc
                 .text
@@ -299,15 +320,22 @@ impl Collection {
         // 更新段快照（Arc swap 语义：写锁替换 Vec）
         // I7：open 一次 InvertedIndexReader 并缓存
         let inv_reader = Arc::new(InvertedIndexReader::open(&self.inner.vfs, &seg_dir)?);
+        // 03-pre-filter：缓存 ScalarReader。
+        let scalar_reader = Arc::new(crate::segment::ScalarReader::open(
+            &self.inner.vfs,
+            &seg_dir,
+        )?);
         {
             let mut snap = self.inner.snapshot.write().unwrap();
             let mut offsets = self.inner.seg_offsets.write().unwrap();
             let mut inv_readers = self.inner.inverted_readers.write().unwrap();
             let mut hnsw_readers = self.inner.hnsw_readers.write().unwrap();
+            let mut scalar_readers = self.inner.scalar_readers.write().unwrap();
             offsets.insert(meta.ulid.clone(), base_docid);
             snap.push(reader);
             inv_readers.push(inv_reader);
             hnsw_readers.push(hnsw_reader);
+            scalar_readers.push(scalar_reader);
         }
         // 02 Task 6：段数超 SEGMENT_MAX 自动合并小段（SPEC §3.3）。
         // 选最小两段合并（pick_merge_candidates 已按 doc_count 升序）。
@@ -402,15 +430,21 @@ impl Collection {
             Ok(r) => Some(Arc::new(r)),
             Err(_) => None,
         };
+        let new_scalar = Arc::new(crate::segment::ScalarReader::open(
+            &self.inner.vfs,
+            &new_seg_dir,
+        )?);
         {
             let mut snap_w = self.inner.snapshot.write().unwrap();
             let mut offsets_w = self.inner.seg_offsets.write().unwrap();
             let mut inv_w = self.inner.inverted_readers.write().unwrap();
             let mut hnsw_w = self.inner.hnsw_readers.write().unwrap();
+            let mut scalar_w = self.inner.scalar_readers.write().unwrap();
             let mut tomb_w = self.inner.tombstones.write().unwrap();
             let old_snap = std::mem::take(&mut *snap_w);
             let old_inv = std::mem::take(&mut *inv_w);
             let old_hnsw = std::mem::take(&mut *hnsw_w);
+            let old_scalar = std::mem::take(&mut *scalar_w);
             for (i, r) in old_snap.iter().enumerate() {
                 if !source_ulids.contains(&r.meta().ulid) {
                     snap_w.push(r.clone());
@@ -424,6 +458,9 @@ impl Collection {
                     if let Some(h) = old_hnsw.get(i) {
                         hnsw_w.push(h.clone());
                     }
+                    if let Some(sr) = old_scalar.get(i) {
+                        scalar_w.push(sr.clone());
+                    }
                 } else {
                     offsets_w.remove(&r.meta().ulid);
                     tomb_w.remove(&r.meta().ulid);
@@ -435,6 +472,7 @@ impl Collection {
             snap_w.push(new_reader);
             inv_w.push(new_inv);
             hnsw_w.push(new_hnsw);
+            scalar_w.push(new_scalar);
         }
         Ok(())
     }
@@ -446,12 +484,11 @@ impl Collection {
                 query.top_k, TOPK_MAX
             )));
         }
-        // 01-hnsw Task 5：filter 编译由 03-pre-filter 实装；本计划不再 reject，
-        // 透传 None 占位（03 接入后补编译位图 + 自适应回退判定）。
-        // 02-tombstone-merge：tombstone 位图并入 filter（手动并入；03 计划 compile_filter 统一）。
-        // 此处 filter_bm 为用户 filter（02 恒 None），tombstone 在每段循环内并入 alive_bm。
-        let filter_bm: Option<&roaring::RoaringBitmap> = None;
-        // mode 推断（S8：Auto 内部用，绑定层不暴露 "auto" 字符串）
+        // 03-pre-filter：编译用户 filter 为 roaring 位图（SPEC §8.3）。
+        // 无 filter 时若有 tombstone，构造 alive 位图统一排除（Task 5）。
+        // 位图存绝对 docid，传给各段 search（HnswReader/brute/InvertedIndexReader 均
+        // 接受 filter 参数，内部按 docid_base 转换）。tombstone 在 compile_filter 末尾
+        // and_not 排除（Task 5），统一替换 02 的手动 alive_bm 并入。
         let mode = match query.mode {
             SearchMode::Hybrid => SearchMode::Hybrid,
             SearchMode::Vector => SearchMode::Vector,
@@ -488,18 +525,50 @@ impl Collection {
         let inv_readers = self.inner.inverted_readers.read().unwrap();
         // 01-hnsw：HnswReader 缓存（Option：M0 段无 hnsw.bin → None → fallback brute）
         let hnsw_readers = self.inner.hnsw_readers.read().unwrap();
-        // 02-tombstone-merge：tombstone 位图（ulid → 绝对 docid），查询期并入 filter。
+        // 03-pre-filter：ScalarReader 缓存（scalars.col），compile_filter 用。
+        let scalar_readers = self.inner.scalar_readers.read().unwrap();
+        // 02-tombstone-merge：tombstone 位图（ulid → 绝对 docid），compile_filter 末尾排除。
         let tombstones = self.inner.tombstones.read().unwrap();
         let topk = query.top_k as usize;
         let cand = topk * query.candidate_multiplier as usize;
+
+        // 03-pre-filter：编译全局 filter 位图（绝对 docid 空间）。
+        // - 有用户 filter → compile_filter（含 tombstone 排除）。
+        // - 无 filter 但有 tombstone → alive_bitmap（全量减 tombstone）。
+        // - 无 filter 无 tombstone → None（M0 行为，最高效）。
+        let has_tombstones = tombstones.values().any(|b| !b.is_empty());
+        let filter_bm_owned: Option<roaring::RoaringBitmap> = if let Some(f) = &query.filter {
+            // 构建按段对齐的 tombstone Arc 列表（compile_filter 契约要求）。
+            let tb_arcs: Vec<Arc<roaring::RoaringBitmap>> = snap
+                .iter()
+                .map(|r| tombstones.get(&r.meta().ulid).cloned().unwrap_or_default())
+                .map(Arc::new)
+                .collect();
+            Some(crate::filter::compile_filter(
+                f,
+                &self.inner.schema,
+                &snap,
+                &scalar_readers,
+                &tb_arcs,
+            )?)
+        } else if has_tombstones {
+            let tb_arcs: Vec<Arc<roaring::RoaringBitmap>> = snap
+                .iter()
+                .map(|r| tombstones.get(&r.meta().ulid).cloned().unwrap_or_default())
+                .map(Arc::new)
+                .collect();
+            Some(crate::filter::alive_bitmap(&snap, &tb_arcs)?)
+        } else {
+            None
+        };
+        let filter_bm: Option<&roaring::RoaringBitmap> = filter_bm_owned.as_ref();
 
         let mut vec_candidates: Vec<crate::types::ScoredDoc> = Vec::new();
         let mut text_candidates: Vec<crate::types::ScoredDoc> = Vec::new();
 
         // 自适应回退（SPEC §8.1）：filter 位图基数 < 2*topk → 暴力精确扫描。
-        // M1 filter_bm=None（03 接入后补），此分支在 03 前不会触发。
         let force_brute = match filter_bm {
-            Some(bm) => (bm.len() as usize) < 2 * topk,
+            Some(bm) => crate::filter::should_fallback_brute(bm, topk),
             None => false,
         };
 
@@ -508,35 +577,8 @@ impl Collection {
             snap.iter().zip(inv_readers.iter()).zip(hnsw_readers.iter())
         {
             let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
-            // 02-tombstone-merge：构建本段 alive 位图 = [base, base+count) − tombstone。
-            // tombstone 为 EXCLUSION 语义，search 的 filter 为 INCLUSION，故转 alive 集。
-            // 03 计划正式 compile_filter 把用户 filter AND alive_bm 统一编译。
-            let alive_bm: Option<roaring::RoaringBitmap> = {
-                let seg_tombs = tombstones.get(&reader.meta().ulid);
-                if let Some(tombs) = seg_tombs {
-                    if tombs.is_empty() {
-                        None
-                    } else {
-                        let mut bm = roaring::RoaringBitmap::new();
-                        let start = base as u32;
-                        let end = base + reader.doc_count() as u64;
-                        if end <= u64::from(u32::MAX) {
-                            bm.insert_range(start..(end as u32));
-                            bm -= tombs;
-                        }
-                        Some(bm)
-                    }
-                } else {
-                    None
-                }
-            };
-            let alive_ref: Option<&roaring::RoaringBitmap> = alive_bm.as_ref();
-            // 合并用户 filter（02 恒 None）与 alive：03 会做 AND 编译；此处取 alive（None 时透传 filter_bm）。
-            let merged_filter: Option<&roaring::RoaringBitmap> = if alive_ref.is_some() {
-                alive_ref
-            } else {
-                filter_bm
-            };
+            // 03-pre-filter：filter_bm 已含 tombstone 排除，直接透传各段 search。
+            let merged_filter: Option<&roaring::RoaringBitmap> = filter_bm;
             // vector 路
             if matches!(mode, SearchMode::Hybrid | SearchMode::Vector) {
                 if let (Some(qv), Some(metric)) = (&query.vector, vf) {
