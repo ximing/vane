@@ -74,7 +74,7 @@ impl Db {
                     )));
                 }
                 let tok_id = compute_tokenizer_id(opts.tokenizer, &opts.user_dict);
-                if existing.tokenizer_id != tok_id {
+                if *existing.tokenizer_id.read().unwrap() != tok_id {
                     return Err(VaneError::Schema(format!(
                         "collection '{}' exists with different tokenizer",
                         name

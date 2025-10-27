@@ -94,7 +94,7 @@ pub fn parse_collection_opts(v: &Value) -> NapiResult<CollectionOptions> {
     })
 }
 
-fn parse_dict_entry(v: &Value) -> NapiResult<UserDictEntry> {
+pub fn parse_dict_entry(v: &Value) -> NapiResult<UserDictEntry> {
     match v {
         Value::String(s) => Ok(UserDictEntry::Word(s.clone())),
         o => Ok(UserDictEntry::WordWithFreq {

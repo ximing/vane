@@ -117,3 +117,15 @@ pub struct Doc {
     pub vector: Option<Vec<f32>>,
     pub meta: Option<std::collections::HashMap<String, ScalarValue>>,
 }
+
+/// §7.4 词表状态机。
+/// Stable → setUserDict → PendingReindex → reindex → Rebuilding → Stable。
+/// - Stable：正常读写。
+/// - PendingReindex：setUserDict 后；新写入仍用旧分词身份（I-4）。
+/// - Rebuilding：reindex 进行中；旧段只读服务；写路径 E_BUSY（Q-6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictState {
+    Stable,
+    PendingReindex,
+    Rebuilding,
+}

@@ -6,8 +6,11 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use vane_core::api::{AddReport, Collection};
+use vane_core::tokenizer::UserDictEntry;
 
-use crate::convert::{add_report_to_json, hits_to_json, parse_docs, parse_search_query, Json};
+use crate::convert::{
+    add_report_to_json, hits_to_json, parse_dict_entry, parse_docs, parse_search_query, Json,
+};
 use crate::error::{to_napi_error, NapiResult};
 
 #[napi]
@@ -96,7 +99,7 @@ impl Task for DeleteTask {
     }
 }
 
-// ---- Reindex（I1：M0 占位 reject E_UNSUPPORTED） ----
+// ---- Reindex（06-userdict-reindex：返回 ReindexHandle） ----
 
 pub struct ReindexTask {
     col: Collection,
@@ -104,13 +107,77 @@ pub struct ReindexTask {
 
 #[napi]
 impl Task for ReindexTask {
-    type Output = ();
-    type JsValue = ();
+    type Output = vane_core::api::ReindexHandle;
+    type JsValue = VaneReindexHandle;
     fn compute(&mut self) -> NapiResult<Self::Output> {
         self.col.reindex().map_err(to_napi_error)
     }
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
+        Ok(VaneReindexHandle { inner: output })
+    }
+}
+
+/// SPEC §4.1 ReindexHandle napi 包装（progress/wait）。
+#[napi]
+pub struct VaneReindexHandle {
+    pub(crate) inner: vane_core::api::ReindexHandle,
+}
+
+#[napi]
+impl VaneReindexHandle {
+    #[napi]
+    pub fn progress(&self) -> f32 {
+        self.inner.progress()
+    }
+
+    #[napi]
+    pub fn wait(&self) -> Result<()> {
+        self.inner.wait().map_err(to_napi_error)
+    }
+}
+
+// ---- setUserDict / dictState（06-userdict-reindex） ----
+
+pub struct SetUserDictTask {
+    col: Collection,
+    dict: serde_json::Value,
+}
+
+#[napi]
+impl Task for SetUserDictTask {
+    type Output = ();
+    type JsValue = ();
+    fn compute(&mut self) -> NapiResult<Self::Output> {
+        let entries: Vec<UserDictEntry> = self
+            .dict
+            .as_array()
+            .map(|a| a.iter().map(parse_dict_entry).collect::<Result<_, _>>())
+            .transpose()?
+            .unwrap_or_default();
+        self.col.set_user_dict(&entries).map_err(to_napi_error)
+    }
     fn resolve(&mut self, _env: Env, _: ()) -> NapiResult<Self::JsValue> {
         Ok(())
+    }
+}
+
+pub struct DictStateTask {
+    col: Collection,
+}
+
+#[napi]
+impl Task for DictStateTask {
+    type Output = String;
+    type JsValue = String;
+    fn compute(&mut self) -> NapiResult<Self::Output> {
+        Ok(match self.col.dict_state() {
+            vane_core::api::DictState::Stable => "stable".to_string(),
+            vane_core::api::DictState::PendingReindex => "pendingReindex".to_string(),
+            vane_core::api::DictState::Rebuilding => "rebuilding".to_string(),
+        })
+    }
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
+        Ok(output)
     }
 }
 
@@ -150,6 +217,21 @@ impl VaneCollection {
     #[napi]
     pub fn reindex(&self) -> AsyncTask<ReindexTask> {
         AsyncTask::new(ReindexTask {
+            col: self.inner.clone(),
+        })
+    }
+
+    #[napi]
+    pub fn set_user_dict(&self, dict: serde_json::Value) -> AsyncTask<SetUserDictTask> {
+        AsyncTask::new(SetUserDictTask {
+            col: self.inner.clone(),
+            dict,
+        })
+    }
+
+    #[napi]
+    pub fn dict_state(&self) -> AsyncTask<DictStateTask> {
+        AsyncTask::new(DictStateTask {
             col: self.inner.clone(),
         })
     }

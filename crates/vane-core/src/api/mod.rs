@@ -5,6 +5,11 @@ pub mod db;
 pub use db::*;
 pub mod collection;
 pub use collection::*;
+pub mod reindex;
+pub use reindex::*;
+
+#[cfg(test)]
+mod reindex_tests;
 
 #[cfg(test)]
 mod tests;
