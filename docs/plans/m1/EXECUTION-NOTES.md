@@ -135,7 +135,8 @@ L4：10-ci-m1（收尾）
 | 06-userdict-reindex | ⏸ 待 | opus | — | — |
 | 08-dict-go | ⏸ 待 | sonnet | — | — |
 | 11-cold-start | ⏸ 待 | sonnet | — | — |
-| 12-recall | ⏳ 实现中 | sonnet | — | — |
+| 12-recall | ✅ 完成 | sonnet | 013926a..7d5722a | APPROVED_WITH_MINOR |
+| 06-userdict-reindex | ⏳ 实现中 | opus | — | — |
 | 10-ci-m1 | ⏸ 待 | sonnet | — | — |
 
 ### 00-text-persistence 裁决（reviewer APPROVED_WITH_MINOR）
