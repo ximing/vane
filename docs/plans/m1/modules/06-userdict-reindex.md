@@ -65,7 +65,7 @@ pub struct CollectionMeta { pub tokenizer_id: TokenizerId, pub user_dict: Vec<Us
 
 ```rust
 pub fn build_jieba_tokenizer(dict: Arc<JiebaDict>, user_dict: &[UserDictEntry]) -> Result<Box<dyn Tokenizer>>;
-// JiebaTokenizer::id() 含词典版本 + sha256_prefix
+// JiebaTokenizer::id() 直接用 compute_tokenizer_id，不含词典版本（R-3）
 ```
 
 ### Consumes from 02-tombstone-merge

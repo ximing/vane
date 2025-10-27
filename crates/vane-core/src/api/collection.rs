@@ -8,13 +8,14 @@
 //! flush 后向量与 BM25 在同一段快照同时可见（不变量 I-2）。
 
 use crate::api::db::DbInner;
+use crate::api::reindex::ReindexHandle;
 use crate::api::types::*;
 use crate::bm25::{write_inverted, InvertedIndexBuilder, InvertedIndexReader};
 use crate::fusion::{linear_fuse, minmax_normalize, rrf_fuse, FusionCandidate};
 use crate::hnsw::{write_hnsw, HnswReader, HnswWriter};
 use crate::persistence::{AutoCommitConfig, AutoCommitter, CollectionMeta, ManifestStore};
 use crate::segment::{SegmentReader, SegmentWriter};
-use crate::tokenizer::build_tokenizer;
+use crate::tokenizer::{build_tokenizer, compute_tokenizer_id, BuiltinTokenizer, UserDictEntry};
 use crate::types::{Result, Schema, TokenizerId as CoreTokenizerId, VaneError, RRF_K, TOPK_MAX};
 use crate::vector::brute_search;
 use crate::vfs::Vfs;
@@ -36,8 +37,11 @@ impl Clone for Collection {
 pub(crate) struct CollectionInner {
     pub(crate) name: String,
     pub(crate) schema: Schema,
-    pub(crate) tokenizer: Arc<dyn crate::tokenizer::Tokenizer>,
-    pub(crate) tokenizer_id: CoreTokenizerId,
+    // 06：reindex 需原子替换 tokenizer/tokenizer_id，包 RwLock 提供 interior mutability。
+    pub(crate) tokenizer: RwLock<Arc<dyn crate::tokenizer::Tokenizer>>,
+    pub(crate) tokenizer_id: RwLock<CoreTokenizerId>,
+    /// 分词器种类（SPEC §5.1）。reindex 用此 + pending_dict 重建新分词器。
+    pub(crate) tokenizer_kind: BuiltinTokenizer,
     vfs: Arc<dyn Vfs>,
     db_path: String,
     segments_dir: String,
@@ -57,6 +61,10 @@ pub(crate) struct CollectionInner {
     tombstones: RwLock<HashMap<String, roaring::RoaringBitmap>>,
     // 02-tombstone-merge：compact 进行中标志（防重入；06 reindex 状态机复用）。
     compacting: Mutex<bool>,
+    // 06-userdict-reindex：§7.4 词表状态机。
+    dict_state: RwLock<DictState>,
+    // 06-userdict-reindex：暂存新词表（setUserDict 后；reindex 时消费）。
+    pending_dict: RwLock<Vec<UserDictEntry>>,
 }
 
 struct WriteState {
@@ -90,8 +98,9 @@ impl CollectionInner {
         Ok(Self {
             name: name.to_string(),
             schema: meta.schema,
-            tokenizer,
-            tokenizer_id: meta.tokenizer_id,
+            tokenizer: RwLock::new(tokenizer),
+            tokenizer_id: RwLock::new(meta.tokenizer_id),
+            tokenizer_kind: meta.tokenizer_kind,
             vfs: db.vfs.clone(),
             db_path: db.db_path.clone(),
             segments_dir,
@@ -107,6 +116,8 @@ impl CollectionInner {
             scalar_readers: RwLock::new(Vec::new()),
             tombstones: RwLock::new(HashMap::new()),
             compacting: Mutex::new(false),
+            dict_state: RwLock::new(DictState::Stable),
+            pending_dict: RwLock::new(Vec::new()),
         })
     }
 
@@ -158,6 +169,10 @@ impl CollectionInner {
 
 impl Collection {
     pub fn add(&self, docs: &[Doc]) -> Result<AddReport> {
+        // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
+        if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
+            return Err(VaneError::Busy);
+        }
         let mut state = self.inner.write_state.lock().unwrap();
         let schema_dim = self.inner.schema.vector_field().map(|(_, d, _)| d).ok();
         let mut count = 0u64;
@@ -204,6 +219,10 @@ impl Collection {
     }
 
     pub fn flush(&self) -> Result<()> {
+        // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
+        if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
+            return Err(VaneError::Busy);
+        }
         let mut state = self.inner.write_state.lock().unwrap();
         if state.buffer.is_empty() {
             state.auto_committer.reset();
@@ -215,11 +234,12 @@ impl Collection {
         drop(state);
 
         // 构建 SegmentWriter（I4/FF2 裁决：传入真实全局 docid 基址）
+        let tok_id = self.inner.tokenizer_id.read().unwrap().clone();
         let mut writer = SegmentWriter::new(
             self.inner.vfs.clone(),
             &self.inner.segments_dir,
             &self.inner.schema,
-            &self.inner.tokenizer_id,
+            &tok_id,
             base_docid,
         )?;
         let mut inv_builder = InvertedIndexBuilder::new(docs.len());
@@ -263,11 +283,13 @@ impl Collection {
                 }
             }
             let global_docid = base_docid + local_docid;
+            let tok = self.inner.tokenizer.read().unwrap();
             let tokens = doc
                 .text
                 .as_ref()
-                .map(|t| self.inner.tokenizer.tokenize(t))
+                .map(|t| tok.tokenize(t))
                 .unwrap_or_default();
+            drop(tok);
             let field_len = tokens.len() as u32;
             inv_builder.add_document(global_docid, &tokens, field_len);
         }
@@ -408,11 +430,12 @@ impl Collection {
                 .max()
                 .unwrap_or(0)
         };
-        let tokenizer_arc = self.inner.tokenizer.clone();
+        let tokenizer_arc = self.inner.tokenizer.read().unwrap().clone();
+        let tok_id = self.inner.tokenizer_id.read().unwrap().clone();
         let mut task = crate::merge::MergeTask::new(
             source_ulids.clone(),
             target_docid_base,
-            self.inner.tokenizer_id.clone(),
+            tok_id,
             self.inner.schema.clone(),
             tokenizer_arc,
         );
@@ -672,7 +695,7 @@ impl Collection {
             // text 路
             if matches!(mode, SearchMode::Hybrid | SearchMode::Text) {
                 if let Some(qt) = &query.text {
-                    let tokens = self.inner.tokenizer.tokenize(qt);
+                    let tokens = self.inner.tokenizer.read().unwrap().tokenize(qt);
                     let mut hits = inv_reader.search(
                         &tokens,
                         if matches!(mode, SearchMode::Hybrid) {
@@ -801,10 +824,25 @@ impl Collection {
             .collect()
     }
 
+    /// 当前段快照 reader 列表（测试用；I-4 验证段头 tokenizer_id）。
+    pub fn snapshot_readers(&self) -> Vec<Arc<SegmentReader>> {
+        self.inner.snapshot.read().unwrap().clone()
+    }
+
+    /// 测试辅助：手动设置 dict_state（模拟 Rebuilding 窗口，M1 同步执行下窗口短）。
+    #[doc(hidden)]
+    pub fn set_state_for_test(&self, state: DictState) {
+        *self.inner.dict_state.write().unwrap() = state;
+    }
+
     /// M1 实装（02-tombstone-merge）：追加 tombstone（内存位图）。
     /// 查询期 search 把 tombstone 并入 filter 过滤；持久化经 WAL（04 计划）。
     /// 段不可变（I-1）：不修改段文件，仅更新内存位图。
     pub fn delete(&self, ids: &[String]) -> Result<u64> {
+        // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
+        if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
+            return Err(VaneError::Busy);
+        }
         let snap = self.inner.snapshot.read().unwrap();
         let offsets = self.inner.seg_offsets.read().unwrap();
         let mut tombstones = self.inner.tombstones.write().unwrap();
@@ -836,6 +874,10 @@ impl Collection {
     /// 物理清除 tombstone 文档，新段从零重建 HNSW 图（I-3）。
     /// 全串行同步执行（R-4/R-6）；E_BUSY 若 compact 进行中（06 reindex 状态机复用）。
     pub fn compact(&self) -> Result<()> {
+        // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
+        if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
+            return Err(VaneError::Busy);
+        }
         // 重入保护。
         {
             let mut guard = self.inner.compacting.lock().unwrap();
@@ -873,7 +915,194 @@ impl Collection {
         self.merge_segments(source_ulids)
     }
 
-    pub fn reindex(&self) -> Result<()> {
-        Err(VaneError::Unsupported)
+    /// §7.4：暂存新词表，进入 PendingReindex。新写入仍用旧分词身份（I-4）。
+    ///
+    /// - Rebuilding 期调用返回 E_BUSY（Q-6）。
+    /// - 词表上限 10 万词条（§5.3），超限返回 DictTooLarge。
+    /// - 多次调用覆盖暂存词表（放弃旧暂存，SPEC §7.4 状态机「放弃」路径）。
+    pub fn set_user_dict(&self, dict: &[UserDictEntry]) -> Result<()> {
+        if dict.len() > crate::tokenizer::MAX_USER_DICT_ENTRIES {
+            return Err(VaneError::DictTooLarge);
+        }
+        let mut state = self.inner.dict_state.write().unwrap();
+        if *state == DictState::Rebuilding {
+            return Err(VaneError::Busy);
+        }
+        *self.inner.pending_dict.write().unwrap() = dict.to_vec();
+        *state = DictState::PendingReindex;
+        Ok(())
+    }
+
+    /// 查询当前词表状态（绑定层暴露 needsReindex）。
+    pub fn dict_state(&self) -> DictState {
+        *self.inner.dict_state.read().unwrap()
+    }
+
+    /// 当前生效的 TokenizerId（reindex 完成前为旧身份，完成后为新身份）。
+    pub fn tokenizer_id(&self) -> CoreTokenizerId {
+        self.inner.tokenizer_id.read().unwrap().clone()
+    }
+
+    /// §7.4：触发全量重建。从旧段 `SegmentReader::text` 读原文，用**新分词器**
+    /// 重新 tokenize 重建倒排（vectors/hnsw 重写不变，段新 ULID）。旧段只读服务，
+    /// 完成后原子切换。
+    ///
+    /// **签名变更**（R-2）：M0 为 `Result<()>`（占位），M1 落实为 SPEC §4.1
+    /// `Result<ReindexHandle>`。M1 同步执行（R-4/R-6）：重建在调用内同步完成，
+    /// 返回已完成的 handle（progress=1.0, wait 立即返回）。后台化留 M2 Executor。
+    ///
+    /// - 非 PendingReindex 状态：返回 InvalidArg（Stable 无待重建词表）。
+    /// - compact 进行中：返回 E_BUSY。
+    pub fn reindex(&self) -> Result<ReindexHandle> {
+        // 互斥：compact 进行中 → E_BUSY。
+        {
+            let mut guard = self.inner.compacting.lock().unwrap();
+            if *guard {
+                return Err(VaneError::Busy);
+            }
+            *guard = true;
+        }
+        // 校验状态：必须 PendingReindex。
+        {
+            let state = self.inner.dict_state.read().unwrap();
+            if *state != DictState::PendingReindex {
+                *self.inner.compacting.lock().unwrap() = false;
+                return Err(VaneError::InvalidArg(
+                    "reindex requires PendingReindex state; call set_user_dict first".into(),
+                ));
+            }
+        }
+        // state → Rebuilding。
+        *self.inner.dict_state.write().unwrap() = DictState::Rebuilding;
+        // 执行重建；无论成败，恢复 compacting 标志。
+        let result = self.run_reindex();
+        *self.inner.compacting.lock().unwrap() = false;
+        match result {
+            Ok(handle) => Ok(handle),
+            Err(e) => {
+                // 重建失败：回退状态为 PendingReindex（词表仍在 pending_dict），
+                // 允许调用方修正后重试。旧段未被删除（reindex 先建新段再删旧）。
+                *self.inner.dict_state.write().unwrap() = DictState::PendingReindex;
+                Err(e)
+            }
+        }
+    }
+
+    fn run_reindex(&self) -> Result<ReindexHandle> {
+        // 构建新分词器 + 新 TokenizerId。
+        let pending = self.inner.pending_dict.read().unwrap().clone();
+        let new_tokenizer: Arc<dyn crate::tokenizer::Tokenizer> =
+            Arc::<dyn crate::tokenizer::Tokenizer>::from(build_tokenizer(
+                self.inner.tokenizer_kind,
+                &pending,
+            )?);
+        let new_tokenizer_id = compute_tokenizer_id(self.inner.tokenizer_kind, &pending);
+
+        // 收集旧段 ULID + tombstones + offsets（快照，避免长锁）。
+        let old_ulids = self.segment_ulids();
+        let tombstones = self.inner.tombstones.read().unwrap().clone();
+        let offsets_snap = self.inner.seg_offsets.read().unwrap().clone();
+
+        // 逐段重建（M1 同步串行，R-4/R-6）。
+        let mut new_segments: Vec<crate::api::reindex::ReindexedSegment> = Vec::new();
+        for ulid in &old_ulids {
+            let reindexed = crate::api::reindex::reindex_segment(
+                &self.inner.vfs,
+                &self.inner.segments_dir,
+                ulid,
+                &self.inner.schema,
+                &new_tokenizer_id,
+                &new_tokenizer,
+            )?;
+            new_segments.push(reindexed);
+        }
+
+        // 原子切换 manifest（I-6）：ULID 替换 + tokenizer_id/user_dict 更新。
+        let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
+        let new_ulids: Vec<String> = new_segments.iter().map(|s| s.ulid.clone()).collect();
+        let new_col_meta = CollectionMeta {
+            schema: self.inner.schema.clone(),
+            tokenizer_kind: self.inner.tokenizer_kind,
+            tokenizer_id: new_tokenizer_id.clone(),
+            user_dict: pending.clone(),
+            segment_ulids: new_ulids.clone(),
+        };
+        crate::api::reindex::update_manifest_after_reindex(
+            &manifest_store,
+            &self.inner.name,
+            &old_ulids,
+            new_ulids.clone(),
+            new_col_meta,
+        )?;
+
+        // 更新内存快照：旧段移除 → 新段插入。tombstone 按 ULID re-key
+        // （docid 顺序不变，位图原值有效）。
+        {
+            let mut snap_w = self.inner.snapshot.write().unwrap();
+            let mut offsets_w = self.inner.seg_offsets.write().unwrap();
+            let mut inv_w = self.inner.inverted_readers.write().unwrap();
+            let mut hnsw_w = self.inner.hnsw_readers.write().unwrap();
+            let mut scalar_w = self.inner.scalar_readers.write().unwrap();
+            let mut tomb_w = self.inner.tombstones.write().unwrap();
+            // 移除旧段（保留顺序，逐项过滤）。
+            let old_snap = std::mem::take(&mut *snap_w);
+            let old_inv = std::mem::take(&mut *inv_w);
+            let old_hnsw = std::mem::take(&mut *hnsw_w);
+            let old_scalar = std::mem::take(&mut *scalar_w);
+            for (i, r) in old_snap.iter().enumerate() {
+                if !old_ulids.contains(&r.meta().ulid) {
+                    snap_w.push(r.clone());
+                    offsets_w.insert(
+                        r.meta().ulid.clone(),
+                        offsets_snap.get(&r.meta().ulid).copied().unwrap_or(0),
+                    );
+                    if let Some(inv) = old_inv.get(i) {
+                        inv_w.push(inv.clone());
+                    }
+                    if let Some(h) = old_hnsw.get(i) {
+                        hnsw_w.push(h.clone());
+                    }
+                    if let Some(sr) = old_scalar.get(i) {
+                        scalar_w.push(sr.clone());
+                    }
+                } else {
+                    offsets_w.remove(&r.meta().ulid);
+                    tomb_w.remove(&r.meta().ulid);
+                }
+            }
+            // 插入新段。
+            for s in &new_segments {
+                offsets_w.insert(s.ulid.clone(), s.docid_base);
+                snap_w.push(s.reader.clone());
+                inv_w.push(s.inv_reader.clone());
+                hnsw_w.push(s.hnsw_reader.clone());
+                scalar_w.push(s.scalar_reader.clone());
+                // tombstone re-key：旧 ULID 的位图迁移到新 ULID（按顺序对应）。
+            }
+            // tombstone re-key：old_ulids[i] → new_ulids[i]。
+            for (i, old_u) in old_ulids.iter().enumerate() {
+                if let Some(bm) = tombstones.get(old_u) {
+                    if let Some(new_u) = new_ulids.get(i) {
+                        if !bm.is_empty() {
+                            tomb_w.insert(new_u.clone(), bm.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 删除旧段目录。
+        for ulid in &old_ulids {
+            let old_seg_dir = format!("{}/seg_{}", self.inner.segments_dir, ulid);
+            let _ = crate::merge::delete_segment_dir(self.inner.vfs.as_ref(), &old_seg_dir);
+        }
+
+        // 更新 tokenizer / tokenizer_id 为新身份（原子替换，I-4）。
+        *self.inner.tokenizer.write().unwrap() = new_tokenizer;
+        *self.inner.tokenizer_id.write().unwrap() = new_tokenizer_id;
+
+        // state → Stable。
+        *self.inner.dict_state.write().unwrap() = DictState::Stable;
+        Ok(ReindexHandle::completed())
     }
 }

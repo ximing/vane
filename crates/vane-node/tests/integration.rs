@@ -82,7 +82,8 @@ fn export_rejects_unsupported() {
 }
 
 #[test]
-fn reindex_rejects_unsupported() {
+fn reindex_requires_pending_reindex() {
+    // 06-userdict-reindex：reindex 在 Stable 状态下返回 InvalidArg（需先 set_user_dict）。
     let vfs = Arc::new(MemoryVfs::new());
     let db = Db::open(vfs, "mem4", OpenOptions::default()).unwrap();
     let schema = vane_core::types::Schema::new(vec![(
@@ -95,5 +96,5 @@ fn reindex_rejects_unsupported() {
     .unwrap();
     let col = db.collection("c", schema, Default::default()).unwrap();
     let r = col.reindex();
-    assert!(matches!(r, Err(vane_core::types::VaneError::Unsupported)));
+    assert!(matches!(r, Err(vane_core::types::VaneError::InvalidArg(_))));
 }

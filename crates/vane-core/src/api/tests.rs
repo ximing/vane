@@ -613,9 +613,10 @@ fn i2_dual_index_atomic_visibility() {
 }
 
 #[test]
-fn delete_compact_implemented_reindex_export_still_unsupported() {
+fn delete_compact_implemented_reindex_requires_pending_export_unsupported() {
     // 02-tombstone-merge 实装后：delete/compact 已落地（不再 E_UNSUPPORTED）。
-    // reindex（06）/export（M2）仍占位。
+    // 06-userdict-reindex 实装后：reindex 需 PendingReindex 状态，否则 InvalidArg。
+    // export（M2）仍占位。
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
     let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let schema = Schema::new(vec![(
@@ -633,8 +634,9 @@ fn delete_compact_implemented_reindex_export_still_unsupported() {
     assert_eq!(col.delete(&["x".into()]).unwrap(), 0);
     // compact 空集合 Ok（无段可合并）。
     assert!(col.compact().is_ok());
-    // reindex/export 仍占位。
-    assert!(matches!(col.reindex(), Err(VaneError::Unsupported)));
+    // reindex 在 Stable 状态下返回 InvalidArg（需先 set_user_dict）。
+    assert!(matches!(col.reindex(), Err(VaneError::InvalidArg(_))));
+    // export 仍占位。
     assert!(matches!(db.export("/tmp/x"), Err(VaneError::Unsupported)));
 }
 
