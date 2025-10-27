@@ -40,16 +40,18 @@ jobs:
         run: cargo test --workspace --all-features
 
   recall:
-    # I8 裁决：M0 暴力口径 recall 门禁 trivially 满足
-    # （hybrid=暴力双路+RRF 基线，recall=1.0）。
-    # M1 HNSW 落地后补真实回归 job。
+    # SPEC §13.2-1 真实回归门禁：HNSW vs 暴力双路+RRF 基线，
+    # 五档选择率（0.1%/1%/10%/50%/99%）× 三模式（vector/text/hybrid）recall@10 ≥0.95。
+    # M0 recall.rs 保留作冒烟（trivially 1.0）；recall_regression 为 M1 硬门禁。
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run recall gate
+      - name: Run recall smoke (M0)
         run: cargo test --test recall -p vane-core
+      - name: Run recall regression gate (M1, §13.2-1)
+        run: cargo test --test recall_regression -p vane-core
 
   wasm32-check:
     # SPEC §13.3：core 出现 std::fs 即失败（M0 第一天硬门禁）。
