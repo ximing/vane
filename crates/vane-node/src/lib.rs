@@ -6,4 +6,8 @@
 mod collection;
 mod convert;
 mod db;
+mod dict;
 mod error;
+
+#[cfg(test)]
+mod dict_tests;

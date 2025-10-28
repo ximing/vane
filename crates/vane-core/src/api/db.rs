@@ -23,6 +23,12 @@ pub(crate) struct DbInner {
     // 此字段保留供未来 reopen/动态配置场景，故 allow dead_code）
     #[allow(dead_code)]
     pub(crate) auto_commit: AutoCommitConfig,
+    // 07-dict-distribution-node：Db 级 jieba 词典（dict-zh feature 启用时 Db::open 加载）。
+    // collection 创建时若 tokenizer=Jieba 且此字段 Some → build_jieba_tokenizer；
+    // 否则 build_tokenizer(Jieba) 返回 DictUnavailable，绑定层降级 CjkBigram（Task 3）。
+    // pub(crate) 扩展，非 M0 冻结破坏（DbInner 内部结构，不暴露 pub API）。
+    #[cfg(feature = "jieba")]
+    pub(crate) jieba_dict: Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>,
 }
 
 impl Db {
@@ -30,12 +36,18 @@ impl Db {
         let manifest_store = ManifestStore::new(vfs.clone(), path);
         let manifest = manifest_store.load()?.unwrap_or_else(Manifest::empty);
         let collections = RwLock::new(HashMap::new());
+        // 07：dict-zh feature 启用时 Db::open 自动加载预编译 dict.bin（冷加载 <150ms，§13.1）。
+        // 加载失败不抛错（SPEC §13.2-2 ④）：jieba_dict=None → collection 创建时降级 CjkBigram。
+        #[cfg(feature = "jieba")]
+        let jieba_dict = load_default_jieba_dict();
         let inner = Arc::new(DbInner {
             vfs: vfs.clone(),
             db_path: path.to_string(),
             manifest_store,
             collections,
             auto_commit: opts.auto_commit.clone(),
+            #[cfg(feature = "jieba")]
+            jieba_dict,
         });
         let db = Db {
             inner: inner.clone(),
@@ -140,6 +152,13 @@ impl Db {
         // M0：无后台线程需 join；flush 由调用方显式调
         Ok(())
     }
+
+    /// jieba 词典是否可用（Db::open 时加载，dict-zh feature 启用）。
+    /// 绑定层（vane-node）用此判断 collection 创建时是否需降级 CjkBigram（Task 3）。
+    #[cfg(feature = "jieba")]
+    pub fn jieba_dict_available(&self) -> bool {
+        self.inner.jieba_dict.is_some()
+    }
 }
 
 impl Clone for Db {
@@ -152,3 +171,28 @@ impl Clone for Db {
 
 // S9 裁决：不写 unsafe impl Send/Sync——DbInner 字段全部自动 Send+Sync
 // （Arc<dyn Vfs> 是 Send+Sync，RwLock<HashMap<...>> 是 Send+Sync）。
+
+// ---- 07：dict-zh feature 启用时 Db::open 加载预编译 jieba 词典 ----
+
+#[cfg(feature = "jieba")]
+fn load_default_jieba_dict() -> Option<Arc<crate::tokenizer::jieba::JiebaDict>> {
+    #[cfg(feature = "dict-zh")]
+    {
+        use crate::tokenizer::jieba::JiebaDict;
+        match JiebaDict::load_zstd(vane_dict_zh::DICT_BIN) {
+            Ok(d) => Some(Arc::new(d)),
+            Err(e) => {
+                // SPEC §13.2-2 ④：加载失败不抛错，降级 CjkBigram + warn。
+                eprintln!(
+                    "[vane] failed to load bundled jieba dict (vane-dict-zh): {} \
+                     — jieba tokenizer will fall back to cjk_bigram",
+                    e
+                );
+                None
+            }
+        }
+    }
+    // jieba feature on 但 dict-zh off：无捆绑词典，返回 None（绑定层降级）。
+    #[cfg(not(feature = "dict-zh"))]
+    None
+}

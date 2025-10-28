@@ -54,7 +54,20 @@ impl Task for CollectionTask {
     type JsValue = VaneCollection;
     fn compute(&mut self) -> NapiResult<Self::Output> {
         let schema = parse_schema(&self.schema)?;
-        let opts = parse_collection_opts(&self.opts)?;
+        let mut opts = parse_collection_opts(&self.opts)?;
+        // 07 Task 3：tokenizer=jieba 且 Db 内词典不可用 → 降级 CjkBigram + warn（不抛错）。
+        // SPEC §13.2-2 ④：词典缺失/损坏不应阻塞 collection 创建。
+        if matches!(
+            opts.tokenizer,
+            vane_core::tokenizer::BuiltinTokenizer::Jieba
+        ) && !self.db.jieba_dict_available()
+        {
+            eprintln!(
+                "[vane] jieba dict unavailable for collection '{}', falling back to cjk_bigram",
+                self.name
+            );
+            opts.tokenizer = vane_core::tokenizer::BuiltinTokenizer::CjkBigram;
+        }
         self.db
             .collection(&self.name, schema, opts)
             .map_err(to_napi_error)

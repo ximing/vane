@@ -13,7 +13,11 @@ crate-type = ["cdylib"]
 napi = { version = "=2.16.13", features = ["napi8", "serde-json"] }
 napi-derive = "=2.16.13"
 serde_json = "1"
-vane-core = { workspace = true }
+# 07：启用 dict-zh feature → Db::open 自动加载 vane-dict-zh 词典；
+# jieba 分词器在 collection 创建时自动注入词典（Task 2）。
+vane-core = { workspace = true, features = ["dict-zh"] }
+# 07：loadDict() napi 导出读 DICT_BIN（Buffer）返回给 JS 侧。
+vane-dict-zh = { path = "../vane-dict-zh" }
 
 [build-dependencies]
 napi-build = "2"
