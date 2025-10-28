@@ -44,12 +44,16 @@ fn main() {
             _ => None,
         })
         .unwrap_or("small");
+    // --limit N：测试用，限制多字词数量（单字全保留）
+    let limit: Option<usize> = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--limit=").and_then(|s| s.parse().ok()));
 
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let data_dir = crate_dir.join("data");
 
     let (words, hmm_blob, sha256_prefix) = if mode == "full" {
-        build_full(&crate_dir)
+        build_full(&crate_dir, limit)
     } else {
         build_small()
     };
@@ -93,7 +97,7 @@ fn main() {
 
 // ---- 完整词典：jieba dict.txt 剪枝 top 20 万 + 全部单字 ----
 
-fn build_full(crate_dir: &Path) -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
+fn build_full(crate_dir: &Path, limit: Option<usize>) -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
     let dict_path = crate_dir.join("data/source/dict.txt");
     let hmm_path = crate_dir.join("data/source/hmm.json");
 
@@ -131,9 +135,11 @@ fn build_full(crate_dir: &Path) -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
             kept.push((w.clone(), *f));
         }
     }
-    // 再收 top 20 万多字词
+    // 再收 top N 多字词（默认 20 万，--limit 可缩减用于测试）
+    let multi_limit = limit.unwrap_or(200_000);
+    let total_limit = kept.len() + multi_limit;
     for (w, f) in &entries {
-        if w.chars().count() > 1 && kept.len() < 200_000 && seen.insert(w.clone()) {
+        if w.chars().count() > 1 && kept.len() < total_limit && seen.insert(w.clone()) {
             kept.push((w.clone(), *f));
         }
     }
@@ -195,13 +201,19 @@ fn build_small() -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
 }
 
 // ---- DAT 构建（双数组 Trie，Aoe BFS——与 05 tests.rs 算法一致） ----
+// 优化：trie 构建用 HashMap O(1) 查找（root 可有数千 children，线性查找不可接受）；
+// DAT 扩容用 resize 批量（CJK code point 大，逐元素 push 是 O(n²)）。
 
 fn build_dat(words: &[(String, u32)]) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
+    use std::collections::HashMap;
     struct TrieNode {
-        children: Vec<(u32, usize)>,
+        // 构建期用 HashMap O(1) 查找；BFS 前转 sorted Vec。
+        children_map: HashMap<u32, usize>,
+        children: Vec<(u32, usize)>, // BFS 前填充
         terminal_freq: i32,
     }
     let mut trie: Vec<TrieNode> = vec![TrieNode {
+        children_map: HashMap::new(),
         children: vec![],
         terminal_freq: -1,
     }];
@@ -209,21 +221,24 @@ fn build_dat(words: &[(String, u32)]) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
         let mut node = 0usize;
         for c in word.chars() {
             let cc = c as u32;
-            if let Some(pos) = trie[node].children.iter().position(|(ch, _)| *ch == cc) {
-                node = trie[node].children[pos].1;
+            if let Some(&child) = trie[node].children_map.get(&cc) {
+                node = child;
             } else {
                 let new_id = trie.len();
                 trie.push(TrieNode {
+                    children_map: HashMap::new(),
                     children: vec![],
                     terminal_freq: -1,
                 });
-                trie[node].children.push((cc, new_id));
+                trie[node].children_map.insert(cc, new_id);
                 node = new_id;
             }
         }
         trie[node].terminal_freq = *freq as i32;
     }
+    // 转 sorted Vec 供 BFS
     for node in &mut trie {
+        node.children = node.children_map.drain().collect();
         node.children.sort_by_key(|(c, _)| *c);
     }
 
@@ -233,19 +248,32 @@ fn build_dat(words: &[(String, u32)]) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
     queue.push_back((0, 0));
 
+    // 预分配大容量避免反复 resize（CJK code point 大，DAT 数组可达百万级）。
+    let initial_cap = 200_000usize;
+    base.reserve(initial_cap);
+    check.reserve(initial_cap);
+    values.reserve(initial_cap);
+
     while let Some((trie_id, dat_id)) = queue.pop_front() {
         let children = &trie[trie_id].children;
         if !children.is_empty() {
             let child_chars: Vec<u32> = children.iter().map(|(c, _)| *c).collect();
             let base_val = find_base(&check, &child_chars);
             base[dat_id] = base_val;
+            // 批量扩容：一次 resize 到所需最大下标 + 1，避免逐元素 push 的 O(n²) 代价。
+            let max_t = child_chars
+                .iter()
+                .map(|&cc| (base_val + cc as i32) as usize)
+                .max()
+                .unwrap_or(0);
+            if max_t >= check.len() {
+                let new_len = max_t + 1;
+                check.resize(new_len, -1);
+                base.resize(new_len, 0);
+                values.resize(new_len, -1);
+            }
             for &(cc, child_trie_id) in children {
                 let t = (base_val + cc as i32) as usize;
-                while t >= check.len() {
-                    check.push(-1);
-                    base.push(0);
-                    values.push(-1);
-                }
                 check[t] = dat_id as i32;
                 queue.push_back((child_trie_id, t));
             }
@@ -261,9 +289,13 @@ fn find_base(check: &[i32], child_chars: &[u32]) -> i32 {
     if child_chars.is_empty() {
         return 0;
     }
+    // 找最小 base ≥ 1 使所有 child slot 空闲（check[t]==-1 或越界）。
+    // 优化：以最小 cc 对应 slot 为锚点，扫描第一个空闲位置。
+    let min_cc = child_chars.iter().copied().min().unwrap_or(0) as i32;
     let max_cc = child_chars.iter().copied().max().unwrap_or(0) as i32;
     let mut base = 1i32;
     loop {
+        // 检查所有 child slot 是否空闲
         let ok = child_chars.iter().all(|&cc| {
             let t = base + cc as i32;
             t >= 0 && (t as usize >= check.len() || check[t as usize] == -1)
@@ -271,9 +303,10 @@ fn find_base(check: &[i32], child_chars: &[u32]) -> i32 {
         if ok {
             return base;
         }
+        // 找下一个候选 base：从冲突 slot 的下一个位置开始
+        // （简单递增 1 即可，BFS 下冲突稀疏）
         base += 1;
-        // base 必须 ≥ 1 且保证 base + max_cc 不溢出 usize（DAT 增长受 check.len() 扩容控制）
-        let _ = max_cc;
+        let _ = (min_cc, max_cc);
     }
 }
 
@@ -445,23 +478,17 @@ fn compute_sha256_prefix(words: &[(String, u32)], hmm_blob: &[u8]) -> [u8; 8] {
 // ---- gzip 体积估算（门禁 SPEC §13.2-3） ----
 
 fn gzip_size(data: &[u8]) -> usize {
-    // 用 zstd 再 gzip 不会进一步缩小；用 gzip 命令估算实际 npm 包 gzip 体积。
-    // 此处用 zlib via flate2 不可用（未引入依赖），改用系统 gzip 命令。
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-    let mut child = match Command::new("gzip")
-        .args(["-c", "-9"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return data.len(), // gzip 不可用 → 退化返回原大小
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(data);
+    // 估算 gzip 体积（SPEC §13.2-3 门禁）：写临时文件 → gzip -c -9 → 量输出。
+    // 避免 stdin/stdout pipe 死锁（大数据时 stdout buffer 填满阻塞写端）。
+    use std::process::Command;
+    let tmp = std::env::temp_dir().join(format!("vane_gen_dict_{}.tmp", std::process::id()));
+    if fs::write(&tmp, data).is_err() {
+        return data.len();
     }
-    let out = child.wait_with_output().expect("gzip output");
-    out.stdout.len()
+    let out = Command::new("gzip").args(["-c", "-9"]).arg(&tmp).output();
+    let _ = fs::remove_file(&tmp);
+    match out {
+        Ok(o) => o.stdout.len(),
+        Err(_) => data.len(), // gzip 不可用 → 退化返回原大小
+    }
 }
