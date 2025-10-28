@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vane-core", "crates/vane-ffi", "crates/vane-node"]
+members = ["crates/vane-core", "crates/vane-ffi", "crates/vane-node", "crates/vane-dict-zh"]
 resolver = "2"
 
 [workspace.package]
