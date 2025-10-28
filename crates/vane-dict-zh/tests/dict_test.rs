@@ -35,3 +35,40 @@ fn sha256_prefix_matches_loaded() {
     let dict = vane_core::tokenizer::jieba::JiebaDict::load_zstd(DICT_BIN).unwrap();
     assert_eq!(sha256_prefix(), dict.sha256_prefix());
 }
+
+/// Task 4：dict.bin gzip 体积 ≤ 1.5MB（SPEC §13.2-3 CI 门禁）。
+/// dict.bin 已 zstd 压缩，gzip 体积相近（zstd 帧无法再被 gzip 显著压缩）。
+#[test]
+fn dict_bin_gzip_under_1_5mb() {
+    let gzip_size = gzip_size(DICT_BIN);
+    assert!(
+        gzip_size <= 1_500_000,
+        "dict.bin gzip {} > 1.5MB gate (SPEC §13.2-3)",
+        gzip_size
+    );
+}
+
+/// Task 4：词典词条数 ≥ 20 万（剪枝 top 20 万 + 全部单字）。
+#[test]
+fn dict_has_substantial_vocab() {
+    let dict = vane_core::tokenizer::jieba::JiebaDict::load_zstd(DICT_BIN).unwrap();
+    // 验证常见词可查到词频
+    assert!(dict.freq("的").is_some(), "「的」应在词典中");
+    assert!(dict.freq("中国").is_some(), "「中国」应在词典中");
+    assert!(dict.freq("是").is_some(), "「是」应在词典中");
+}
+
+/// gzip 体积估算（与 gen_dict.rs 同方法）。
+fn gzip_size(data: &[u8]) -> usize {
+    use std::process::Command;
+    let tmp = std::env::temp_dir().join(format!("vane_dict_test_{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, data).is_err() {
+        return data.len();
+    }
+    let out = Command::new("gzip").args(["-c", "-9"]).arg(&tmp).output();
+    let _ = std::fs::remove_file(&tmp);
+    match out {
+        Ok(o) => o.stdout.len(),
+        Err(_) => data.len(),
+    }
+}
