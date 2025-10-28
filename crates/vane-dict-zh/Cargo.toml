@@ -1,0 +1,30 @@
+[package]
+name = "vane-dict-zh"
+version = "2026.8.0"
+edition.workspace = true
+license.workspace = true
+description = "Vane 中文 jieba 词典数据包（预编译 dict.bin，zstd 压缩 DAT + HMM）"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# 运行期零依赖：仅 include_bytes! 暴露预编译 dict.bin。
+# 词典加载逻辑在 vane-core（feature jieba），本 crate 只提供数据。
+[dependencies]
+
+# 生成脚本 + 测试需要 vane-core 验证 dict.bin 可加载；criterion 供冷加载 bench。
+[dev-dependencies]
+vane-core = { workspace = true, features = ["jieba"] }
+serde_json = { workspace = true }
+zstd = "0.13"
+criterion = "0.5"
+
+# 词典冷加载 bench（Task 5，SPEC §13.1 <150ms）。
+[[bench]]
+name = "dict_load"
+harness = false
+
+# 词典生成工具：cargo run --release -p vane-dict-zh --example gen_dict -- [--small|--full]
+[[example]]
+name = "gen_dict"
