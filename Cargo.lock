@@ -806,6 +806,7 @@ dependencies = [
  "sha2",
  "ulid",
  "unicode-segmentation",
+ "vane-dict-zh",
 ]
 
 [[package]]
@@ -834,6 +835,7 @@ dependencies = [
  "napi-derive",
  "serde_json",
  "vane-core",
+ "vane-dict-zh",
 ]
 
 [[package]]

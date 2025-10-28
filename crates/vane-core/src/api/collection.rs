@@ -65,6 +65,10 @@ pub(crate) struct CollectionInner {
     dict_state: RwLock<DictState>,
     // 06-userdict-reindex：暂存新词表（setUserDict 后；reindex 时消费）。
     pending_dict: RwLock<Vec<UserDictEntry>>,
+    // 07-dict-distribution-node：collection 级 jieba 词典副本（从 DbInner 克隆 Arc）。
+    // reindex 重建分词器时用（run_reindex 不持有 DbInner）。
+    #[cfg(feature = "jieba")]
+    jieba_dict: Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>,
 }
 
 struct WriteState {
@@ -81,6 +85,45 @@ struct BufferedDoc {
     meta: Option<HashMap<String, ScalarValue>>,
 }
 
+/// 构建 collection 分词器（07-dict-distribution-node）。
+///
+/// - `Standard` / `CjkBigram`：直接 `build_tokenizer`。
+/// - `Jieba`：若 `jieba_dict` 可用（dict-zh feature 启用且 Db::open 加载成功）
+///   → `build_jieba_tokenizer(dict, user_dict)`；否则 `build_tokenizer(Jieba)` 返回
+///   `DictUnavailable`，由调用方（绑定层 convert.rs）降级 CjkBigram（Task 3）。
+///
+/// `jieba_dict` 参数类型在 jieba feature 关闭时退化为 `()`（JiebaDict 类型不存在），
+/// 保证 wasm32 构建不引入 jieba 模块依赖。
+#[cfg(feature = "jieba")]
+fn build_collection_tokenizer(
+    jieba_dict: Option<&std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>,
+    kind: BuiltinTokenizer,
+    user_dict: &[UserDictEntry],
+) -> Result<Arc<dyn crate::tokenizer::Tokenizer>> {
+    if matches!(kind, BuiltinTokenizer::Jieba) {
+        if let Some(dict) = jieba_dict {
+            return Ok(Arc::<dyn crate::tokenizer::Tokenizer>::from(
+                crate::tokenizer::build_jieba_tokenizer(dict.clone(), user_dict)?,
+            ));
+        }
+    }
+    Ok(Arc::<dyn crate::tokenizer::Tokenizer>::from(
+        build_tokenizer(kind, user_dict)?,
+    ))
+}
+
+/// 非 jieba feature 构建路径（wasm32 等）：直接 build_tokenizer（Jieba → DictUnavailable）。
+#[cfg(not(feature = "jieba"))]
+fn build_collection_tokenizer(
+    _jieba_dict: Option<&()>,
+    kind: BuiltinTokenizer,
+    user_dict: &[UserDictEntry],
+) -> Result<Arc<dyn crate::tokenizer::Tokenizer>> {
+    Ok(Arc::<dyn crate::tokenizer::Tokenizer>::from(
+        build_tokenizer(kind, user_dict)?,
+    ))
+}
+
 impl CollectionInner {
     // I3 裁决：create_new 接收 auto_commit 参数（collection 级配置，SPEC §7.1）
     pub(crate) fn create_new(
@@ -89,11 +132,20 @@ impl CollectionInner {
         meta: CollectionMeta,
         auto_commit: AutoCommitConfig,
     ) -> Result<Self> {
-        let tokenizer: Arc<dyn crate::tokenizer::Tokenizer> =
-            Arc::<dyn crate::tokenizer::Tokenizer>::from(build_tokenizer(
-                meta.tokenizer_kind,
-                &meta.user_dict,
-            )?);
+        let tokenizer: Arc<dyn crate::tokenizer::Tokenizer> = {
+            #[cfg(feature = "jieba")]
+            {
+                build_collection_tokenizer(
+                    db.jieba_dict.as_ref(),
+                    meta.tokenizer_kind,
+                    &meta.user_dict,
+                )?
+            }
+            #[cfg(not(feature = "jieba"))]
+            {
+                build_collection_tokenizer(None, meta.tokenizer_kind, &meta.user_dict)?
+            }
+        };
         let segments_dir = format!("{}/segments", db.db_path);
         Ok(Self {
             name: name.to_string(),
@@ -118,6 +170,8 @@ impl CollectionInner {
             compacting: Mutex::new(false),
             dict_state: RwLock::new(DictState::Stable),
             pending_dict: RwLock::new(Vec::new()),
+            #[cfg(feature = "jieba")]
+            jieba_dict: db.jieba_dict.clone(),
         })
     }
 
@@ -991,11 +1045,20 @@ impl Collection {
     fn run_reindex(&self) -> Result<ReindexHandle> {
         // 构建新分词器 + 新 TokenizerId。
         let pending = self.inner.pending_dict.read().unwrap().clone();
-        let new_tokenizer: Arc<dyn crate::tokenizer::Tokenizer> =
-            Arc::<dyn crate::tokenizer::Tokenizer>::from(build_tokenizer(
-                self.inner.tokenizer_kind,
-                &pending,
-            )?);
+        let new_tokenizer: Arc<dyn crate::tokenizer::Tokenizer> = {
+            #[cfg(feature = "jieba")]
+            {
+                build_collection_tokenizer(
+                    self.inner.jieba_dict.as_ref(),
+                    self.inner.tokenizer_kind,
+                    &pending,
+                )?
+            }
+            #[cfg(not(feature = "jieba"))]
+            {
+                build_collection_tokenizer(None, self.inner.tokenizer_kind, &pending)?
+            }
+        };
         let new_tokenizer_id = compute_tokenizer_id(self.inner.tokenizer_kind, &pending);
 
         // 收集旧段 ULID + tombstones + offsets（快照，避免长锁）。
