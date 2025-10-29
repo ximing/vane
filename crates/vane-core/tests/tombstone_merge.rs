@@ -224,10 +224,10 @@ fn graph_rebuilt_only_during_merge() {
     assert!(file_size(&vfs, &hnsw_path).is_none());
 }
 
-// Task 2 跳过说明：tombstone 持久化经 WAL 由 04 实装；02 reopen 后 tombstone 丢失（预期）。
+// 04-wal 接入后：tombstone 经 WAL 持久化，reopen 后保留（02 期的「丢失」预期已被 04 修复）。
 #[test]
 fn tombstone_not_persisted_without_wal() {
-    // 02 范围：tombstone 仅内存，reopen 后丢失（04 WAL 补持久化）。
+    // 04 范围：tombstone 经 WAL（delete 即时 append AddTombstone），reopen 重放恢复。
     let vfs = Arc::new(MemoryVfs::new());
     {
         let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
@@ -239,8 +239,8 @@ fn tombstone_not_persisted_without_wal() {
     }
     let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let col2 = setup_col(&db2);
-    // reopen 后 tombstone 丢失（无 WAL）：d0 复活（02 预期行为，04 修复）。
-    assert_eq!(col2.search(&text_query()).unwrap().len(), 2);
+    // 04：reopen 后 tombstone 经 WAL 重放恢复，d0 仍被排除。
+    assert_eq!(col2.search(&text_query()).unwrap().len(), 1);
 }
 
 fn file_size(vfs: &Arc<MemoryVfs>, path: &str) -> Option<usize> {
