@@ -11,3 +11,4 @@ pub mod tokenizer;
 pub mod types;
 pub mod vector;
 pub mod vfs;
+pub mod wal;
