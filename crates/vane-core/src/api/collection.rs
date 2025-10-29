@@ -1100,6 +1100,11 @@ impl Collection {
 
         // 更新内存快照：旧段移除 → 新段插入。tombstone 按 ULID re-key
         // （docid 顺序不变，位图原值有效）。
+        // I-4 原子性（06-review #1）：tokenizer/tokenizer_id 必须与 snapshot 段列表
+        // 在同一写锁块内切换，杜绝「snapshot 已切到新段（新 TokenizerId）但
+        // tokenizer 仍旧」的混排窗口。锁顺序与 search 读侧一致：
+        // snapshot → offsets → inv → hnsw → scalar → tomb → tokenizer →
+        // tokenizer_id，同序无死锁。
         {
             let mut snap_w = self.inner.snapshot.write().unwrap();
             let mut offsets_w = self.inner.seg_offsets.write().unwrap();
@@ -1107,6 +1112,8 @@ impl Collection {
             let mut hnsw_w = self.inner.hnsw_readers.write().unwrap();
             let mut scalar_w = self.inner.scalar_readers.write().unwrap();
             let mut tomb_w = self.inner.tombstones.write().unwrap();
+            let mut tok_w = self.inner.tokenizer.write().unwrap();
+            let mut tok_id_w = self.inner.tokenizer_id.write().unwrap();
             // 移除旧段（保留顺序，逐项过滤）。
             let old_snap = std::mem::take(&mut *snap_w);
             let old_inv = std::mem::take(&mut *inv_w);
@@ -1152,6 +1159,10 @@ impl Collection {
                     }
                 }
             }
+            // I-4：tokenizer/tokenizer_id 与 snapshot 段列表原子切换（同写锁块）。
+            // 释放此块后，search 见到的 snapshot 与 tokenizer 必为同一身份。
+            *tok_w = new_tokenizer;
+            *tok_id_w = new_tokenizer_id;
         }
 
         // 删除旧段目录。
@@ -1159,10 +1170,6 @@ impl Collection {
             let old_seg_dir = format!("{}/seg_{}", self.inner.segments_dir, ulid);
             let _ = crate::merge::delete_segment_dir(self.inner.vfs.as_ref(), &old_seg_dir);
         }
-
-        // 更新 tokenizer / tokenizer_id 为新身份（原子替换，I-4）。
-        *self.inner.tokenizer.write().unwrap() = new_tokenizer;
-        *self.inner.tokenizer_id.write().unwrap() = new_tokenizer_id;
 
         // state → Stable。
         *self.inner.dict_state.write().unwrap() = DictState::Stable;
