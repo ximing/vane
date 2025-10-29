@@ -119,4 +119,4 @@ fix(reindex): atomic tokenizer/snapshot switch to close I-4 mixed-identity windo
 
 ```
 
-提交 hash：`b862ef7d0155d17b67de7113dc8d6d5a75431910`
+提交 hash：`578dfc4c3e96c82ee3d7b970a6a1840f47aa498a`（HEAD，`git log -1`）

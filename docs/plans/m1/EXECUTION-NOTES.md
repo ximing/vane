@@ -131,7 +131,7 @@ L4：10-ci-m1（收尾）
 | 03-pre-filter | ✅ 完成 | sonnet | 57785ce..5260c49 | APPROVED_WITH_MINOR |
 | 12-recall | ✅ 完成 | sonnet | 013926a..7d5722a | APPROVED_WITH_MINOR |
 | 06-userdict-reindex | ✅ 完成(排队 1 fix) | opus | 1d02c86..b28b1f4 | APPROVED_WITH_MINOR |
-| 07-dict-node | ⏳ 审查中 | sonnet | 11b477c..5e58823 | — |
+| 07-dict-node | ✅ 完成(排队 SHA-256 fix) | sonnet | 11b477c..5e58823 | APPROVED_WITH_MINOR |
 | 06-fix(I-4 原子性) | ⏳ fix 中 | sonnet | — | — |
 | 04-wal | ⏸ 待 | sonnet | — | — |
 | 11-cold-start | ⏸ 待 | sonnet | — | — |
