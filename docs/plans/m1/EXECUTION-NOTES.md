@@ -127,17 +127,17 @@ L4：10-ci-m1（收尾）
 | 00-text-persistence | ✅ 完成 | sonnet | 91c8d7d..97823d0 | APPROVED_WITH_MINOR |
 | 01-hnsw | ✅ 完成 | opus | aa252ca..919936f | APPROVED（fix 后） |
 | 05-jieba-lite | ✅ 完成 | opus | 12eb209..19c03d1 | APPROVED_WITH_MINOR |
-| 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
 | 02-tombstone-merge | ✅ 完成 | opus | 407bafb..72bb641 | APPROVED_WITH_MINOR（fix 后） |
-| 07-dict-node | ⏸ 待 | sonnet | — | — |
 | 03-pre-filter | ✅ 完成 | sonnet | 57785ce..5260c49 | APPROVED_WITH_MINOR |
-| 04-wal | ⏸ 待 | sonnet | — | — |
-| 06-userdict-reindex | ⏸ 待 | opus | — | — |
-| 08-dict-go | ⏸ 待 | sonnet | — | — |
-| 11-cold-start | ⏸ 待 | sonnet | — | — |
 | 12-recall | ✅ 完成 | sonnet | 013926a..7d5722a | APPROVED_WITH_MINOR |
-| 06-userdict-reindex | ⏳ 实现中 | opus | — | — |
+| 06-userdict-reindex | ✅ 完成(排队 1 fix) | opus | 1d02c86..b28b1f4 | APPROVED_WITH_MINOR |
+| 07-dict-node | ⏳ 审查中 | sonnet | 11b477c..5e58823 | — |
+| 06-fix(I-4 原子性) | ⏳ fix 中 | sonnet | — | — |
+| 04-wal | ⏸ 待 | sonnet | — | — |
+| 11-cold-start | ⏸ 待 | sonnet | — | — |
 | 10-ci-m1 | ⏸ 待 | sonnet | — | — |
+| 08-dict-go | ⏸ 待(需 09) | sonnet | — | — |
+| 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
 
 ### 00-text-persistence 裁决（reviewer APPROVED_WITH_MINOR）
 - **R-00-1 text() 契约**：以实现为准——无原文返回 `Some("")`、docid 不存在返回 `None`（便于 06 reindex 始终拿 `&str`）。02/06 派发据此对齐（非 Produces 段的 None）。
@@ -151,6 +151,12 @@ L4：10-ci-m1（收尾）
 - **测试名实不符**：`api_hnsw_recall_vs_brute_at_least_95pct` 仅断言 10 条 → 改名（并入 fix）。
 - **ef_search 公式** `max(ef_construction, want*4)`：接受（recall 有利，12-regression 验证）。
 - 11 维度全 ✅（算法/filter/Q-5/串行/I-3/M0 签名/hnsw.bin 头/测试质量）。
+
+### 06-userdict-reindex 裁决（reviewer APPROVED_WITH_MINOR）
+- **I-4 混排窗口（M1 必修，排队 06-fix）**：`run_reindex`（collection.rs:1003-1075）先释放 snapshot 写锁后才更新 tokenizer/tokenizer_id → 窗口内并发 search 命中新段（新 id）用旧分词器 → I-4 混排（§7.4 禁止）。M1 测试用 standard 未捕获；jieba 场景 recall 回退。**修复**：tokenizer/tokenizer_id 写锁移入 snapshot 写锁块同步更新（search 锁顺序 snapshot.read→tokenizer.read 一致，无死锁）。07 完成后派 06-fix。
+- reindex 路径正确：倒排新分词器重新 tokenize 原文（非 posting remap，B-1）；vectors/hnsw 重写（功能等价，M2 可文件级复制）；scalars/stored/idmap 复用。
+- Node 同步✅（VaneReindexHandle + set_user_dict/dict_state napi）；FFI 留 09（可后移）。
+- reindex 失败孤儿段→04 recover 覆盖（边界清晰）。
 
 ### 02-tombstone-merge 裁决（reviewer APPROVED_WITH_MINOR）
 - **next_docid 重置**：无需修（stale-high 经 seg_offsets 按段映射无害；重置反与 buffer docid 碰撞）。
