@@ -52,6 +52,10 @@ impl Db {
         let db = Db {
             inner: inner.clone(),
         };
+        // 04-wal：崩溃恢复——重放 WAL tombstone + 清理半成品段（SPEC §6.4）。
+        // 在 restore 之前调用 recover：半成品段（ULID 不在 manifest）目录被清理，
+        // 避免后续操作误触；tombstone 聚合后注入各 CollectionInner。
+        let recovered_tombstones = crate::wal::recover(&vfs, path, &manifest)?;
         for (name, meta) in &manifest.collections {
             // I3：restore 时用 OpenOptions.auto_commit 作为 collection 级配置
             let col_inner = CollectionInner::restore_from_manifest(
@@ -60,6 +64,19 @@ impl Db {
                 meta.clone(),
                 opts.auto_commit.clone(),
             )?;
+            // 04-wal：注入恢复的 tombstone（绝对 docid，M-minor-2）。
+            // recover 已按 manifest 过滤 ULID，此处双重保险再校验一次。
+            if let Some(ulid_map) = recovered_tombstones.get(name) {
+                let mut tomb_w = col_inner.tombstones.write().unwrap();
+                for (ulid, bm) in ulid_map {
+                    if meta.segment_ulids.contains(ulid) && !bm.is_empty() {
+                        let existing = tomb_w.entry(ulid.clone()).or_default();
+                        for v in bm.iter() {
+                            existing.insert(v);
+                        }
+                    }
+                }
+            }
             db.inner
                 .collections
                 .write()

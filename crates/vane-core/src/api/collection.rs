@@ -58,7 +58,8 @@ pub(crate) struct CollectionInner {
     // 02-tombstone-merge：段 ULID → tombstone 位图（绝对 docid）。
     // delete 期更新内存位图（不修改段文件 I-1）；持久化经 WAL（04 计划）。
     // 查询期 search 把 tombstone 并入 filter 参数（02 手动并入；03 计划 compile_filter 统一）。
-    tombstones: RwLock<HashMap<String, roaring::RoaringBitmap>>,
+    // 04-wal：pub(crate) 供 Db::open 注入 recover 重放的 tombstone。
+    pub(crate) tombstones: RwLock<HashMap<String, roaring::RoaringBitmap>>,
     // 02-tombstone-merge：compact 进行中标志（防重入；06 reindex 状态机复用）。
     compacting: Mutex<bool>,
     // 06-userdict-reindex：§7.4 词表状态机。
@@ -389,6 +390,14 @@ impl Collection {
             }
         };
 
+        // 04-wal：段文件集（header/vectors/inverted/hnsw/scalars）已全部 sync →
+        // append AddSegment（SPEC §6.4：WAL → manifest rename）。B-2：flush 不 truncate。
+        let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
+        wal.append(&crate::wal::WalRecord::AddSegment {
+            collection: self.inner.name.clone(),
+            ulid: meta.ulid.clone(),
+        })?;
+
         // 更新 manifest（I-6 原子切换）
         let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
         manifest_store.add_segment(&self.inner.name, &meta.ulid)?;
@@ -527,6 +536,21 @@ impl Collection {
             })?;
         col_meta.segment_ulids.retain(|u| !source_ulids.contains(u));
         col_meta.segment_ulids.push(new_meta.ulid.clone());
+        // 04-wal：manifest 切换前 append 段增删记录（SPEC §6.4）：
+        // DeleteSegment(旧) + AddSegment(新)。crash 在 manifest 切换前 →
+        // AddSegment(new) 不在 manifest → 孤儿清理；DeleteSegment(old) → 旧段保留。
+        // B-2：truncate 仅 compact 调（此处 merge_segments 不 truncate）。
+        let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
+        for u in &source_ulids {
+            wal.append(&crate::wal::WalRecord::DeleteSegment {
+                collection: self.inner.name.clone(),
+                ulid: u.clone(),
+            })?;
+        }
+        wal.append(&crate::wal::WalRecord::AddSegment {
+            collection: self.inner.name.clone(),
+            ulid: new_meta.ulid.clone(),
+        })?;
         manifest_store.save_atomic(&manifest)?;
 
         // 更新内存快照。
@@ -899,9 +923,10 @@ impl Collection {
         }
         let snap = self.inner.snapshot.read().unwrap();
         let offsets = self.inner.seg_offsets.read().unwrap();
-        let mut tombstones = self.inner.tombstones.write().unwrap();
-        let mut count: u64 = 0;
-        // 构建 external_id → (ulid, abs_docid) 反查。doc 数通常不大；逐段 HashMap 查找。
+        // 04-wal：先计算 (ulid, abs_docid) 对，append AddTombstone（SPEC §7.2 即时进 WAL），
+        // 再更新内存位图。crash 在 WAL 后位图前 → reopen 时 recover 重放注入；
+        // crash 在 WAL 前 → 位图也未改，一致。
+        let mut by_ulid: HashMap<String, Vec<u64>> = HashMap::new();
         for id in ids {
             for reader in snap.iter() {
                 let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
@@ -913,11 +938,32 @@ impl Collection {
                         // roaring 存 u32；超限记不进来（与 search 一致），跳过。
                         continue;
                     }
-                    let bm = tombstones.entry(reader.meta().ulid.clone()).or_default();
-                    if bm.insert(abs as u32) {
-                        count += 1;
-                    }
+                    by_ulid
+                        .entry(reader.meta().ulid.clone())
+                        .or_default()
+                        .push(abs);
                     break; // 一个 external_id 只可能存在于一个段
+                }
+            }
+        }
+        drop(offsets);
+        drop(snap);
+        let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
+        for (ulid, docids) in &by_ulid {
+            wal.append(&crate::wal::WalRecord::AddTombstone {
+                collection: self.inner.name.clone(),
+                ulid: ulid.clone(),
+                docids: docids.clone(),
+            })?;
+        }
+        // 更新内存位图（count 仅记 newly inserted，与原 02 语义一致）。
+        let mut tombstones = self.inner.tombstones.write().unwrap();
+        let mut count: u64 = 0;
+        for (ulid, docids) in by_ulid {
+            let bm = tombstones.entry(ulid).or_default();
+            for d in docids {
+                if bm.insert(d as u32) {
+                    count += 1;
                 }
             }
         }
@@ -966,7 +1012,13 @@ impl Collection {
             }
         }
         let source_ulids: Vec<String> = snap.iter().map(|r| r.meta().ulid.clone()).collect();
-        self.merge_segments(source_ulids)
+        self.merge_segments(source_ulids)?;
+        // 04-wal：compact 是唯一 truncate 调用点（B-2）。merge_segments 已 append
+        // DeleteSegment(旧) + AddSegment(新) 并切换 manifest；此时所有旧段物理清除
+        // （tombstone 随之清除），WAL 可一次性清空。
+        let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
+        wal.truncate()?;
+        Ok(())
     }
 
     /// §7.4：暂存新词表，进入 PendingReindex。新写入仍用旧分词身份（I-4）。
