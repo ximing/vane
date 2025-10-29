@@ -814,7 +814,9 @@ name = "vane-dict-zh"
 version = "2026.8.0"
 dependencies = [
  "criterion",
+ "ruzstd",
  "serde_json",
+ "sha2",
  "vane-core",
  "zstd",
 ]

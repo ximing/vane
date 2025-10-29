@@ -52,7 +52,7 @@ fn main() {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let data_dir = crate_dir.join("data");
 
-    let (words, hmm_blob, sha256_prefix) = if mode == "full" {
+    let (words, hmm_blob) = if mode == "full" {
         build_full(&crate_dir, limit)
     } else {
         build_small()
@@ -61,15 +61,13 @@ fn main() {
     let (base, check, values) = build_dat(&words);
     let total_freq: u64 = words.iter().map(|(_, f)| *f as u64).sum();
 
-    let uncompressed = serialize_dict_bin(
-        "2026.08",
-        &sha256_prefix,
-        total_freq,
-        &base,
-        &check,
-        &values,
-        &hmm_blob,
+    // 先用占位 sha256_prefix 序列化，再对 payload（去掉头部 16 字节）算真 SHA-256 取前 8 字节，
+    // 写回头部 sha256_prefix 字段（SPEC §5.2/§12.3 三渠道一致性）。
+    let mut uncompressed = serialize_dict_bin(
+        "2026.08", &[0u8; 8], total_freq, &base, &check, &values, &hmm_blob,
     );
+    let sha256_prefix = compute_sha256_prefix(&uncompressed);
+    uncompressed[8..16].copy_from_slice(&sha256_prefix);
 
     // zstd 压缩（level 19，最大压缩比以满足 ≤1.5MB 门禁）。
     let compressed = zstd::encode_all(&uncompressed[..], 19).expect("zstd compress");
@@ -97,7 +95,7 @@ fn main() {
 
 // ---- 完整词典：jieba dict.txt 剪枝 top 20 万 + 全部单字 ----
 
-fn build_full(crate_dir: &Path, limit: Option<usize>) -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
+fn build_full(crate_dir: &Path, limit: Option<usize>) -> (Vec<(String, u32)>, Vec<u8>) {
     let dict_path = crate_dir.join("data/source/dict.txt");
     let hmm_path = crate_dir.join("data/source/hmm.json");
 
@@ -156,15 +154,12 @@ fn build_full(crate_dir: &Path, limit: Option<usize>) -> (Vec<(String, u32)>, Ve
             .expect("parse hmm.json");
     let hmm_blob = build_hmm_blob_from_json(&hmm_json);
 
-    // 4. sha256 prefix（词典内容 hash——此处对未压缩 dict.bin 内容算 sha256 前 8 字节）
-    let sha256_prefix = compute_sha256_prefix(&kept, &hmm_blob);
-
-    (kept, hmm_blob, sha256_prefix)
+    (kept, hmm_blob)
 }
 
 // ---- 小规模 fixture（测试用） ----
 
-fn build_small() -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
+fn build_small() -> (Vec<(String, u32)>, Vec<u8>) {
     let words: Vec<(String, u32)> = vec![
         ("测试", 100),
         ("我", 100),
@@ -196,8 +191,7 @@ fn build_small() -> (Vec<(String, u32)>, Vec<u8>, [u8; 8]) {
         }
     }
     let hmm_blob = build_hmm_blob_simple(&s_emit);
-    let sha256_prefix = [0u8; 8]; // fixture 无需真实哈希
-    (words, hmm_blob, sha256_prefix)
+    (words, hmm_blob)
 }
 
 // ---- DAT 构建（双数组 Trie，Aoe BFS——与 05 tests.rs 算法一致） ----
@@ -458,21 +452,20 @@ fn serialize_dict_bin(
     buf
 }
 
-// ---- sha256 prefix（词典内容指纹，SPEC §12.3 三渠道一致性） ----
+// ---- sha256 prefix（词典内容指纹，SPEC §5.2/§12.3 三渠道一致性） ----
 
-fn compute_sha256_prefix(words: &[(String, u32)], hmm_blob: &[u8]) -> [u8; 8] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // SPEC §12.3 sha256 prefix——此处用 SipHash（DefaultHasher）作内容指纹前 8 字节。
-    // 完整 sha256 需 sha2 crate；此处前 8 字节足以做一致性校验（三渠道比对）。
-    // 若需严格 sha256，可加 sha2 dev-dep；当前实现保证「相同输入→相同前缀」。
-    let mut h = DefaultHasher::new();
-    for (w, f) in words {
-        w.hash(&mut h);
-        f.hash(&mut h);
-    }
-    hmm_blob.hash(&mut h);
-    h.finish().to_le_bytes()
+/// 计算解压后 dict.bin 的 payload（`[16..]`，即去掉 magic+format_version+sha256_prefix
+/// 共 16 字节头后的内容）的真 SHA-256 前 8 字节。
+///
+/// 三渠道（Node/Go/WASM）一致性校验：各端只需解压 dict.bin → 跳过前 16 字节 →
+/// `crypto/sha256` / `SubtleCrypto.digest("SHA-256")` → 取前 8 字节比对。
+fn compute_sha256_prefix(dict_bin_uncompressed: &[u8]) -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let payload = &dict_bin_uncompressed[16..];
+    let digest = Sha256::digest(payload);
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&digest[..8]);
+    out
 }
 
 // ---- gzip 体积估算（门禁 SPEC §13.2-3） ----

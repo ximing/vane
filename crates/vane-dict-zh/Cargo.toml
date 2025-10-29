@@ -14,9 +14,12 @@ path = "src/lib.rs"
 [dependencies]
 
 # 生成脚本 + 测试需要 vane-core 验证 dict.bin 可加载；criterion 供冷加载 bench。
+# sha2 + ruzstd：gen_dict 计算 dict.bin payload 真 SHA-256 前缀 + 测试独立校验一致性。
 [dev-dependencies]
 vane-core = { workspace = true, features = ["jieba"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+ruzstd = "0.5"
 zstd = "0.13"
 criterion = "0.5"
 

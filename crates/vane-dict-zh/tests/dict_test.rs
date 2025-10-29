@@ -48,6 +48,45 @@ fn dict_bin_gzip_under_1_5mb() {
     );
 }
 
+/// SPEC §5.2/§12.3 三渠道一致性：sha256_prefix 必须是解压后 dict.bin payload
+/// （去掉头部 16 字节 magic+format_version+sha256_prefix）的真 SHA-256 前 8 字节。
+/// Go（crypto/sha256）/ WASM（SubtleCrypto）独立计算须与本值匹配。
+#[test]
+fn sha256_prefix_is_real_sha256_of_payload() {
+    use sha2::{Digest, Sha256};
+
+    // 解压 DICT_BIN（zstd 压缩）得到原始 dict.bin 字节。
+    let mut decoder =
+        ruzstd::streaming_decoder::StreamingDecoder::new(DICT_BIN).expect("decode dict.bin zstd");
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(DICT_BIN.len() * 4);
+    decoder
+        .read_to_end(&mut buf)
+        .expect("read dict.bin decompressed");
+
+    // 头部 16 字节 = magic(4) + format_version(4) + sha256_prefix(8)；payload = [16..]。
+    assert!(buf.len() > 16, "decompressed dict.bin too short");
+    let payload = &buf[16..];
+    let digest = Sha256::digest(payload);
+    let mut expected = [0u8; 8];
+    expected.copy_from_slice(&digest[..8]);
+
+    assert_eq!(
+        sha256_prefix(),
+        expected,
+        "sha256_prefix must equal real SHA-256([16..]) prefix (SPEC §5.2/§12.3)"
+    );
+
+    // 同时校验 dict.bin 头部内嵌的 sha256_prefix 与 include_bytes 暴露值一致。
+    let mut embedded = [0u8; 8];
+    embedded.copy_from_slice(&buf[8..16]);
+    assert_eq!(
+        sha256_prefix(),
+        embedded,
+        "embedded header sha256_prefix mismatch"
+    );
+}
+
 /// Task 4：词典词条数 ≥ 20 万（剪枝 top 20 万 + 全部单字）。
 #[test]
 fn dict_has_substantial_vocab() {
