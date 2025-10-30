@@ -258,3 +258,50 @@ fn compact_then_reopen_no_tombstone_needed() {
     assert!(hits.iter().any(|h| h.id == "d1"));
     assert!(!hits.iter().any(|h| h.id == "d0"));
 }
+
+// 06 遗留 #1：reindex 接 WAL — reindex 后 crash，tombstone 经 re-keyed AddTombstone
+// 存活；旧段为孤儿被清理。
+#[test]
+fn reindex_crash_keeps_tombstone_and_cleans_old_segments() {
+    use vane_core::tokenizer::UserDictEntry;
+    let vfs = Arc::new(MemoryVfs::new());
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let col = setup_col(&db);
+        col.add(&docs_batch(0)).unwrap(); // d0, d1
+        col.flush().unwrap();
+        col.delete(&["d0".into()]).unwrap();
+        // reindex：新词表触发重建。tombstone re-key 到新 ULID 并写 WAL。
+        col.set_user_dict(&[UserDictEntry::WordWithFreq {
+            term: "自定义词".into(),
+            freq: 100,
+        }])
+        .unwrap();
+        col.reindex().unwrap().wait().unwrap();
+        // 不 close（模拟崩溃）。
+    }
+    let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    // reopen 时传与 reindex 后一致的 user_dict（manifest 已持久化新身份）。
+    let col2 = db2
+        .collection(
+            "c",
+            schema(),
+            CollectionOptions {
+                tokenizer: vane_core::tokenizer::BuiltinTokenizer::Standard,
+                user_dict: vec![vane_core::tokenizer::UserDictEntry::WordWithFreq {
+                    term: "自定义词".into(),
+                    freq: 100,
+                }],
+                auto_commit: Default::default(),
+            },
+        )
+        .unwrap();
+    let hits = col2.search(&text_query()).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.id == "d0"),
+        "reindex 后 tombstone 必须存活（re-keyed AddTombstone）"
+    );
+    assert!(hits.iter().any(|h| h.id == "d1"));
+    // 仅 1 个段（旧段孤儿清理后只剩 reindex 的新段）。
+    assert_eq!(col2.segment_count(), 1);
+}
