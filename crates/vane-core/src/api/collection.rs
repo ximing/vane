@@ -1135,6 +1135,40 @@ impl Collection {
         // 原子切换 manifest（I-6）：ULID 替换 + tokenizer_id/user_dict 更新。
         let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
         let new_ulids: Vec<String> = new_segments.iter().map(|s| s.ulid.clone()).collect();
+        // 04-wal（06 遗留 #1）：manifest 切换前 append 段增删 + re-keyed tombstone 记录。
+        // - AddSegment(新段)：crash 在 manifest 前 → 孤儿清理。
+        // - DeleteSegment(旧段)：信息记录（recover 不动作）。
+        // - AddTombstone(新 ULID, 绝对 docid)：reindex 保留 tombstone（re-key 到新 ULID），
+        //   需重新记录到 WAL，否则 crash 后新 ULID 在 manifest 但 tombstone 仅内存 → 丢失。
+        //   docid 顺序不变 → 位图原值（绝对 docid）对新段同样有效。
+        // reindex **不** truncate：tombstone 未物理清除（与 compact 区分），WAL 累积到下次 compact。
+        let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
+        for new_u in &new_ulids {
+            wal.append(&crate::wal::WalRecord::AddSegment {
+                collection: self.inner.name.clone(),
+                ulid: new_u.clone(),
+            })?;
+        }
+        for old_u in &old_ulids {
+            wal.append(&crate::wal::WalRecord::DeleteSegment {
+                collection: self.inner.name.clone(),
+                ulid: old_u.clone(),
+            })?;
+        }
+        for (i, old_u) in old_ulids.iter().enumerate() {
+            if let Some(bm) = tombstones.get(old_u) {
+                if !bm.is_empty() {
+                    if let Some(new_u) = new_ulids.get(i) {
+                        let docids: Vec<u64> = bm.iter().map(|d| d as u64).collect();
+                        wal.append(&crate::wal::WalRecord::AddTombstone {
+                            collection: self.inner.name.clone(),
+                            ulid: new_u.clone(),
+                            docids,
+                        })?;
+                    }
+                }
+            }
+        }
         let new_col_meta = CollectionMeta {
             schema: self.inner.schema.clone(),
             tokenizer_kind: self.inner.tokenizer_kind,
