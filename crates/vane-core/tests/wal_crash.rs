@@ -82,7 +82,9 @@ fn crash_recovery_replays_tombstone() {
     }
     // 会话 2：reopen，WAL 重放恢复 tombstone。
     let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
-    let col2 = db2.collection("c", schema(), CollectionOptions::default()).unwrap();
+    let col2 = db2
+        .collection("c", schema(), CollectionOptions::default())
+        .unwrap();
     let hits = col2.search(&text_query()).unwrap();
     assert!(
         !hits.iter().any(|h| h.id == "d1"),
@@ -192,8 +194,8 @@ fn crash_after_flush_delete_flush_keeps_tombstone() {
         col.delete(&["d0".into()]).unwrap(); // AddTombstone(seg_a, d0)
         col.add(&docs_batch(1)).unwrap();
         col.flush().unwrap(); // flush2: AddSegment(seg_b)
-        // 不 close（模拟崩溃）。flush 不 truncate → WAL 含
-        // [AddSegment(a), AddTombstone(a,d0), AddSegment(b)]。
+                              // 不 close（模拟崩溃）。flush 不 truncate → WAL 含
+                              // [AddSegment(a), AddTombstone(a,d0), AddSegment(b)]。
     }
     let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let col2 = db2
@@ -218,11 +220,11 @@ fn manifest_consistent_after_crash_mid_flush() {
         let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
         let col = setup_col(&db);
         col.add(&docs()).unwrap();
-        // 手动写半成品段 + WAL，不切 manifest。
+        // 手动写半成品段 + WAL，不切 manifest。ULID 为原始值（段目录 = seg_<ULID>）。
         let wal = Wal::open(vfs.clone(), "db").unwrap();
         wal.append(&WalRecord::AddSegment {
             collection: "c".into(),
-            ulid: "seg_HALF".into(),
+            ulid: "HALF".into(),
         })
         .unwrap();
         vfs.create("db/segments/seg_HALF/header.bin").unwrap();
