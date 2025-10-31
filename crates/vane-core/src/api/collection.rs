@@ -86,6 +86,22 @@ struct BufferedDoc {
     meta: Option<HashMap<String, ScalarValue>>,
 }
 
+/// M-minor-1（02 遗留）：compacting 标志 panic-safe Drop guard。
+///
+/// compact/reindex 期置 `compacting=true` 防重入；操作返回（含 panic）时 Drop 复位 false，
+/// 避免一次 panic 致永久 E_BUSY。guard 不持有锁——仅在 drop 时重新获取锁复位（与原
+/// 显式 finally 模式等价，但 panic-safe）。
+struct CompactingGuard<'a> {
+    flag: &'a Mutex<bool>,
+}
+impl Drop for CompactingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.flag.lock() {
+            *g = false;
+        }
+    }
+}
+
 /// 构建 collection 分词器（07-dict-distribution-node）。
 ///
 /// - `Standard` / `CjkBigram`：直接 `build_tokenizer`。
@@ -978,7 +994,7 @@ impl Collection {
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
             return Err(VaneError::Busy);
         }
-        // 重入保护。
+        // 重入保护。M-minor-1：CompactingGuard 保证 panic 时复位标志。
         {
             let mut guard = self.inner.compacting.lock().unwrap();
             if *guard {
@@ -986,10 +1002,10 @@ impl Collection {
             }
             *guard = true;
         }
-        // 作用域结束释放 guard，确保 panic 时不死锁——改用显式 finally 模式。
-        let result = self.run_compact();
-        *self.inner.compacting.lock().unwrap() = false;
-        result
+        let _cg = CompactingGuard {
+            flag: &self.inner.compacting,
+        };
+        self.run_compact()
     }
 
     fn run_compact(&self) -> Result<()> {
@@ -1068,11 +1084,15 @@ impl Collection {
             }
             *guard = true;
         }
+        // M-minor-1：CompactingGuard 保证 panic 时复位标志。提前返回（状态校验失败）
+        // 时 guard drop 复位；成功路径 run_reindex 返回后 guard drop 复位。
+        let _cg = CompactingGuard {
+            flag: &self.inner.compacting,
+        };
         // 校验状态：必须 PendingReindex。
         {
             let state = self.inner.dict_state.read().unwrap();
             if *state != DictState::PendingReindex {
-                *self.inner.compacting.lock().unwrap() = false;
                 return Err(VaneError::InvalidArg(
                     "reindex requires PendingReindex state; call set_user_dict first".into(),
                 ));
@@ -1080,9 +1100,7 @@ impl Collection {
         }
         // state → Rebuilding。
         *self.inner.dict_state.write().unwrap() = DictState::Rebuilding;
-        // 执行重建；无论成败，恢复 compacting 标志。
         let result = self.run_reindex();
-        *self.inner.compacting.lock().unwrap() = false;
         match result {
             Ok(handle) => Ok(handle),
             Err(e) => {
