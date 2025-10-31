@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "batch_add"
 harness = false
+
+[[bench]]
+name = "cold_start"
+harness = false
