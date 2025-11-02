@@ -30,11 +30,12 @@ jobs:
         run: |
           git fetch origin main:main
           git checkout main
-          cargo bench --workspace -- --save-baseline main
+          # 排除 cold_start bench（fixture 生成慢，避免拖垮常规 bench job；R-11-3）
+          cargo bench --workspace -- --save-baseline main --skip cold_start
       - name: Checkout trigger branch and run current bench
         run: |
           git checkout "${{ steps.ref.outputs.branch }}"
-          cargo bench --workspace -- --save-baseline current
+          cargo bench --workspace -- --save-baseline current --skip cold_start
       - name: Compare and fail on >10% regression
         run: |
           # critcmp 退出码在 baseline 缺失等情况下不可靠，故 || true 兜底；

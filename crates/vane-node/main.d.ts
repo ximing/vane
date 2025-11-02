@@ -13,3 +13,9 @@ export declare class VaneError extends Error {
 
 /** 顶层便捷函数：打开 Db（StdFsVfs）。返回 Promise<VaneDb>。 */
 export declare function open(path: string, opts?: Record<string, unknown>): Promise<VaneDb>;
+
+/** 返回预编译 dict.bin（zstd 压缩）的 Buffer 副本。SPEC §12.3 词典诊断/分发。 */
+export declare function loadDict(): Buffer;
+
+/** 返回词典日历版本（YYYY.MM，如 "2026.08"）。SPEC §12.3。 */
+export declare function dictVersion(): string;
