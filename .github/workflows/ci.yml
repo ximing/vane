@@ -71,15 +71,19 @@ jobs:
   deny:
     # SPEC §13.3 cargo-deny + 依赖黑名单
     # （regex / tokio / prost / tonic / openssl / lindera / ndarray / wee_alloc / dashmap / parking_lot）
+    # regex 仅允许 build-dep（napi-derive-backend）与 dev-dep（criterion）经 wrappers 引入，
+    # core/wasm 运行时路径引入 regex 仍被 ban（wasm32-check + check-no-std-fs.sh 双保险）。
     needs: wasm32-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked --version ^0.16
+        # cargo-deny 0.18.6+ 支持 CVSS 4.0 advisory（RUSTSEC-2026-0073 等），
+        # 0.16.4 解析 CVSS 4.0 会崩。锁 ^0.19 取最新 0.19.x。
+        run: cargo install cargo-deny --locked --version ^0.19
       - name: cargo deny check
-        run: cargo deny check --workspace
+        run: cargo deny check
 
   corpus-compat:
     # SPEC §13.3 corpus 格式兼容测试：旧版本写出的库必须被新版本打开。
