@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+# cdylib 产出 .wasm 供 wasm32 体积门禁测量（SPEC §13.2-3）；
+# rlib 供 native 测试/bench/下游 crate 使用。native cdylib 副产物无害。
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 roaring = { workspace = true }
 sha2 = { workspace = true }
