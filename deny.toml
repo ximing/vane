@@ -8,7 +8,12 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 deny = [
-    { name = "regex" },
+    # regex 黑名单只针对 core/wasm 运行时。wasm32-check + check-no-std-fs.sh
+    # 双保险守 runtime。regex 实际只经 build-dep（napi-derive-backend,
+    # proc-macro，编译期工具不进运行时）与 dev-dep（criterion benchmark）引入。
+    # wrappers 限定只有这两个非运行时 crate 可直接依赖 regex；若 regex 将来
+    # 经运行时 crate 引入（vane-core/vane-ffi/vane-node 运行时路径），仍被 ban。
+    { name = "regex", wrappers = ["napi-derive-backend", "criterion"] },
     { name = "tokio" },
     { name = "prost" },
     { name = "tonic" },
@@ -29,10 +34,14 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
 ]
 confidence-threshold = 0.8
+# cargo-deny 0.18+ 对 allow 列表中未匹配的 license 报 warning（默认 Warn，
+# 但 exit code 非 0）。保留前瞻性 allow（未来依赖可能命中），降级为 allow 不阻断。
+unused-allowed-license = "allow"
 
 [sources]
 unknown-registry = "deny"
