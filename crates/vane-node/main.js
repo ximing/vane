@@ -50,4 +50,7 @@ module.exports = {
   open: (path, opts = {}) => wrapErr(VaneDb.open(path, opts)),
   VaneDb,
   VaneCollection,
+  // 词典诊断 API（SPEC §12.3）：loadDict 返回 dict.bin Buffer，dictVersion 返回日历版本。
+  loadDict: native.loadDict,
+  dictVersion: native.dictVersion,
 };
