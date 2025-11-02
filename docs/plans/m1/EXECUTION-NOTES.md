@@ -135,8 +135,8 @@ L4：10-ci-m1（收尾）
 | 06-fix(I-4 原子性) | ✅ 完成 | sonnet | 578dfc4 | APPROVED |
 | 07-fix(SHA-256) | ✅ 完成 | sonnet | 3bc094f | 自证（sha256 一致性测试） |
 | 04-wal | ✅ 完成 | sonnet | 5e34ab4..0650e6f | APPROVED_WITH_MINOR |
-| 11-cold-start | ⏳ 实现中 | sonnet | — | — |
-| 10-ci-m1 | ⏸ 待 | sonnet | — | — |
+| 11-cold-start | ✅ 完成 | sonnet | 7908c5e..1a259f1 | 自证（冷启动 1573ms 实测背书） |
+| 10-ci-m1 | ⏳ 实现中 | sonnet | — | — |
 | 08-dict-go | ⏸ 待(需 09) | sonnet | — | — |
 | 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
 
