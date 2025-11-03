@@ -17,7 +17,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use vane_core::api::{Collection, CollectionOptions, Db, Doc, OpenOptions, SearchMode, SearchQuery};
+use vane_core::api::{
+    Collection, CollectionOptions, Db, Doc, OpenOptions, SearchMode, SearchQuery,
+};
 use vane_core::tokenizer::BuiltinTokenizer;
 use vane_core::types::{FieldDef, Metric, ScalarKind, Schema};
 use vane_core::vfs::memory::MemoryVfs;
@@ -130,8 +132,7 @@ fn build_corpus() -> Vec<(String, String, String, Vec<f32>)> {
             let body = format!(
                 "{}是重要的技术方向。本文探讨{}的{}和{}。\
                  在{}领域，{}不断发展。相关的{}研究也在推进。",
-                name, name, w1, w2,
-                name, w1, noise
+                name, name, w1, w2, name, w1, noise
             );
             let vec = deterministic_vector(doc_idx as u32 * 31);
             docs.push((format!("d{}", doc_idx), body, format!("t{}", ti), vec));
@@ -243,7 +244,9 @@ fn jieba_lite_ndcg_improvement_over_bigram() {
 
     eprintln!(
         "nDCG@10 (合成语料降级): jieba-lite = {:.4}, bigram = {:.4}, 提升 = {:.1}%",
-        ndcg_jieba, ndcg_bigram, improvement * 100.0
+        ndcg_jieba,
+        ndcg_bigram,
+        improvement * 100.0
     );
 
     // SPEC §13.2-2 ②：jieba-lite 相对 bigram nDCG@10 提升 ≥15%
