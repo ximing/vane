@@ -6,36 +6,64 @@ function tmp(suffix) {
   return `${os.tmpdir()}/vane-err-${Date.now()}-${suffix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-test('delete rejects E_UNSUPPORTED (code -10)', async (t) => {
+// M1 实装：delete 返回 tombstone 计数（BigInt），不再 reject E_UNSUPPORTED。
+test('delete returns tombstone count (M1 实装)', async (t) => {
   const db = await open(tmp('del'), {});
   const col = await db.collection(
     'c',
     { fields: [{ name: 'v', type: 'vector', dim: 2 }] },
     {}
   );
-  await t.throwsAsync(col.delete(['x']), {
-    instanceOf: VaneError,
-    code: -10,
-    name: 'E_UNSUPPORTED',
-  });
+  await col.add([{ id: 'x', vector: [1, 0] }]);
+  await col.flush();
+
+  // 删除已存在文档 → 返回新置入 tombstone 数（BigInt 1）。
+  const n = await col.delete(['x']);
+  t.is(typeof n, 'bigint');
+  t.is(n, 1n);
+
+  // 重复删除同一 id → 已在 tombstone 位图，不再计数（返回 0）。
+  const n2 = await col.delete(['x']);
+  t.is(n2, 0n);
+
   await db.close();
 });
 
-test('reindex rejects E_UNSUPPORTED (code -10)', async (t) => {
+// M1 实装（06-userdict-reindex）：reindex 在 set_user_dict 后返回 VaneReindexHandle，
+// progress/wait 可调（M1 同步执行：progress=1.0, wait 立即返回）。
+// 未先调 set_user_dict 时（Stable 状态）reject E_INVALID_ARG。
+test('reindex returns VaneReindexHandle (M1 实装)', async (t) => {
   const db = await open(tmp('ri'), {});
   const col = await db.collection(
     'c',
     { fields: [{ name: 'v', type: 'vector', dim: 2 }] },
     {}
   );
+  await col.add([{ id: 'x', vector: [1, 0] }]);
+  await col.flush();
+
+  // Stable 状态下 reindex → E_INVALID_ARG（无待重建词表）。
   await t.throwsAsync(col.reindex(), {
     instanceOf: VaneError,
-    code: -10,
-    name: 'E_UNSUPPORTED',
+    code: -11,
   });
+
+  // 注入用户词表 → PendingReindex，reindex 同步完成返回 handle。
+  await col.setUserDict(['生造词甲']);
+  t.is(await col.dictState(), 'pendingReindex');
+
+  const handle = await col.reindex();
+  t.is(typeof handle.progress, 'function');
+  t.is(typeof handle.wait, 'function');
+  // M1 同步执行：reindex 完成后返回已完成的 handle（progress=1.0）。
+  t.is(handle.progress(), 1.0);
+  // wait 同步返回（M1 立即完成）。
+  handle.wait();
+
   await db.close();
 });
 
+// export 仍为 M2 占位（reject E_UNSUPPORTED，code -10）。
 test('export rejects E_UNSUPPORTED (code -10)', async (t) => {
   const db = await open(tmp('exp'), {});
   await t.throwsAsync(db.export('/tmp/vane-export-dest'), {
