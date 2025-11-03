@@ -162,13 +162,23 @@ fn build_corpus() -> Vec<(String, String, String, Vec<f32>)> {
         for j in 0..REL_PER_TOPIC {
             let body = relevant_body(w, domain, j);
             let vec = deterministic_vector(idx.wrapping_mul(31));
-            docs.push((format!("r{}", ti * REL_PER_TOPIC + j), body, format!("t{}", ti), vec));
+            docs.push((
+                format!("r{}", ti * REL_PER_TOPIC + j),
+                body,
+                format!("t{}", ti),
+                vec,
+            ));
             idx += 1;
         }
         for j in 0..TRAP_PER_TOPIC {
             let body = trap_body(t, j);
             let vec = deterministic_vector(idx.wrapping_mul(31));
-            docs.push((format!("x{}", ti * TRAP_PER_TOPIC + j), body, format!("t{}", ti), vec));
+            docs.push((
+                format!("x{}", ti * TRAP_PER_TOPIC + j),
+                body,
+                format!("t{}", ti),
+                vec,
+            ));
             idx += 1;
         }
     }
