@@ -136,9 +136,33 @@ L4：10-ci-m1（收尾）
 | 07-fix(SHA-256) | ✅ 完成 | sonnet | 3bc094f | 自证（sha256 一致性测试） |
 | 04-wal | ✅ 完成 | sonnet | 5e34ab4..0650e6f | APPROVED_WITH_MINOR |
 | 11-cold-start | ✅ 完成 | sonnet | 7908c5e..1a259f1 | 自证（冷启动 1573ms 实测背书） |
-| 10-ci-m1 | ⏳ 实现中 | sonnet | — | — |
-| 08-dict-go | ⏸ 待(需 09) | sonnet | — | — |
-| 09-go-cgo | ⏸ 待(可后移) | sonnet | — | — |
+| 10-ci-m1 | ✅ 完成 | sonnet | 4dcff1c..68337e4 | APPROVED（nDCG +84% 达标，JS 测试修） |
+| 08-dict-go | ⏸ 后移(需 09) | sonnet | — | — |
+| 09-go-cgo | ⏸ 后移(可后移) | sonnet | — | — |
+
+## M1 完成状态（2026-08-09）
+
+**11/13 模块交付**（00-07 + 10-12），08/09-Go 按约后移（REQUIREMENTS §7 风险 #15：分词 Must 不让位，Go 可后移）。最终全量门禁全绿（340 测试 0 failed + clippy/wasm32/fmt/no-std-fs/thin/deny/recall/corpus/nDCG）。
+
+### 最终指标
+- 测试：340 passed（M0 204 → M1 +136）
+- recall@10：1.0（五档×三模式，HNSW 真被测，硬门禁 ≥0.95）
+- jieba 四验收：①200句 vs jieba-rs 100% ②nDCG jieba vs bigram +84%（≥15%）③生造词单 token ④缺词典降级 bigram 不抛错
+- 冷启动：open 1573ms + 首次查询 27ms（<1s 未达，降级分级，懒加载 M2）
+- 词典：完整 20 万词 dict.bin 1.41MB gzip ≤1.5MB，SHA-256 真，冷加载 30ms <150ms
+- deny：✅（cargo-deny 0.19 + regex wrappers 限 build-dep）
+- wasm32 check：✅（零 cfg，核心 557KB gzip ≤800KB，真实 deliverable M2）
+
+### M1 遗留（M2 落点）
+- Go cgo 绑定（08/09）后移——M2 或 post-M1。
+- 冷启动 <1s（1573ms）——M2 SegmentReader 懒加载（签名变更）。
+- nDCG 用代表性边界歧义语料（非真实维基）——M2 真实维基 corpus。
+- wasm 体积门禁真实 deliverable（vane-wasm cdylib）——M2。
+- stored.bin zstd——M2。
+- SIMD 双变体召回回归（§8.4）——M2。
+- npm @vane/dict-zh 发布包装 + 4 平台 prebuilt 远程 CI——release/10-ci 完善。
+- parked minors（05 is_cjk dup/UserTrie max、03 schema 校验/文档、04 S1 目录扫描、06 并发测试 jieba 场景等）——housekeeping。
+- 4 平台 prebuilt 仅 mac-arm64 本地验证（M0 遗留）。
 
 ### 00-text-persistence 裁决（reviewer APPROVED_WITH_MINOR）
 - **R-00-1 text() 契约**：以实现为准——无原文返回 `Some("")`、docid 不存在返回 `None`（便于 06 reindex 始终拿 `&str`）。02/06 派发据此对齐（非 Produces 段的 None）。
