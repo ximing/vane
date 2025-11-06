@@ -442,7 +442,50 @@ fn search_topk_over_1000_rejected() {
 
 #[test]
 fn search_filter_compiled_returns_empty_when_no_match() {
-    // 03-pre-filter：filter 经 compile_filter 编译为位图。空集合或字段不匹配 → 空结果。
+    // 03-pre-filter：filter 经 compile_filter 编译为位图。无匹配文档 → 空结果。
+    // 2.1.3：filter 字段必须在 schema 且为 Scalar（lang 已在 schema 中）。
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let schema = Schema::new(vec![
+        (
+            "lang".into(),
+            FieldDef::Scalar {
+                kind: crate::types::ScalarKind::Keyword,
+            },
+        ),
+        (
+            "v".into(),
+            FieldDef::Vector {
+                dim: 2,
+                metric: Metric::Cosine,
+            },
+        ),
+    ])
+    .unwrap();
+    let col = db
+        .collection("docs", schema, CollectionOptions::default())
+        .unwrap();
+    let r = col.search(&SearchQuery {
+        text: None,
+        vector: Some(vec![1.0, 0.0]),
+        top_k: 10,
+        mode: SearchMode::Vector,
+        fusion: FusionSpec::Rrf,
+        filter: Some(Filter {
+            fields: vec![(
+                "lang".into(),
+                FilterCond::Eq(ScalarValue::Keyword("zh".into())),
+            )],
+        }),
+        candidate_multiplier: 3,
+    });
+    // 无文档 + filter 字段在 schema → compile_filter 产空位图 → 返回空 Vec。
+    assert!(matches!(r, Ok(hits) if hits.is_empty()));
+}
+
+// 2.1.3: filter 字段不在 schema → search 返回 Err(InvalidArg)
+#[test]
+fn search_filter_field_not_in_schema_errors() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
     let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let schema = Schema::new(vec![(
@@ -470,8 +513,11 @@ fn search_filter_compiled_returns_empty_when_no_match() {
         }),
         candidate_multiplier: 3,
     });
-    // 无文档 + filter 字段不在 schema → compile_filter 产空位图 → 返回空 Vec。
-    assert!(matches!(r, Ok(hits) if hits.is_empty()));
+    assert!(
+        matches!(r, Err(VaneError::InvalidArg(_))),
+        "filter 字段不在 schema 应返回 InvalidArg，实际: {:?}",
+        r
+    );
 }
 
 #[test]
