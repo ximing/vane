@@ -6,7 +6,9 @@
 use rust_stemmers::{Algorithm, Stemmer};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::tokenizer::{compute_tokenizer_id, BuiltinTokenizer, Token, Tokenizer, UserDictEntry};
+use crate::tokenizer::{
+    compute_tokenizer_id, is_cjk, BuiltinTokenizer, Token, Tokenizer, UserDictEntry,
+};
 use crate::types::TokenizerId;
 
 pub(crate) struct CjkBigramTokenizer {
@@ -91,23 +93,6 @@ fn emit_cjk_run(run: &str, tokens: &mut Vec<Token>, position: &mut u32) {
         });
         *position += 1;
     }
-}
-
-/// 判断一个字符是否属于 CJK 表意文字/假名范围（用于 run 切分）。
-fn is_cjk(c: char) -> bool {
-    let cp = c as u32;
-    matches!(cp,
-        0x3000..=0x303F   // CJK 符号和标点
-        | 0x3040..=0x309F // 平假名
-        | 0x30A0..=0x30FF // 片假名
-        | 0x3400..=0x4DBF // CJK Ext A
-        | 0x4E00..=0x9FFF // CJK 统一表意文字
-        | 0xF900..=0xFAFF // CJK 兼容表意文字
-        | 0x20000..=0x2A6DF // CJK Ext B
-        | 0x2A700..=0x2B73F // CJK Ext C
-        | 0x2B740..=0x2B81F // CJK Ext D
-        | 0x2B820..=0x2CEAF // CJK Ext E
-    )
 }
 
 #[cfg(test)]
@@ -206,11 +191,12 @@ mod tests {
 
     #[test]
     fn is_cjk_covers_common_ranges() {
-        assert!(is_cjk('汉')); // U+6C49 CJK 统一
-        assert!(is_cjk('あ')); // U+3042 平假名
-        assert!(is_cjk('カ')); // U+30AB 片假名
-        assert!(!is_cjk('a'));
-        assert!(!is_cjk(' '));
-        assert!(!is_cjk('1'));
+        // 2.1.1：is_cjk 已提取为 crate::tokenizer::is_cjk（pub(crate) 共享）。
+        assert!(super::is_cjk('汉')); // U+6C49 CJK 统一
+        assert!(super::is_cjk('あ')); // U+3042 平假名
+        assert!(super::is_cjk('カ')); // U+30AB 片假名
+        assert!(!super::is_cjk('a'));
+        assert!(!super::is_cjk(' '));
+        assert!(!super::is_cjk('1'));
     }
 }
