@@ -12,7 +12,7 @@ mod tests;
 
 use crate::api::{Filter, FilterCond, ScalarValue};
 use crate::segment::ScalarReader;
-use crate::types::{Result, Schema, VaneError};
+use crate::types::{FieldDef, Result, Schema, VaneError};
 use crate::vfs::Vfs;
 use roaring::RoaringBitmap;
 use std::sync::Arc;
@@ -22,11 +22,16 @@ use std::sync::Arc;
 /// `segments` / `scalars` / `tombstones` 三者按段对齐（同一下标的元素属同一段）。
 /// 返回位图存绝对 docid（u32 空间）。多字段 AND；末尾对每段 `and_not` 排除 tombstone。
 ///
+/// **schema 校验（M2 parked minor 2.1.3）**：入口校验每个 filter 字段在 `schema`
+/// 中存在且为 `FieldDef::Scalar`；字段不存在或为 Text/Vector → `Err(InvalidArg)`
+/// （SPEC §10 E_INVALID_ARG：filter 作用于非标量字段）。此前字段不存在时静默产
+/// 空位图（不报错），现改为显式报错——调用方须确保 filter 字段在 schema 中。
+///
 /// 无 filter 字段时返回全量 alive 位图（所有段全部 docid 减 tombstone），
 /// 供无 filter 的 search 路径统一走 filter 通道排除 tombstone（Task 5）。
 pub fn compile_filter(
     filter: &Filter,
-    _schema: &Schema,
+    schema: &Schema,
     segments: &[Arc<crate::segment::SegmentReader>],
     scalars: &[Arc<ScalarReader>],
     tombstones: &[Arc<RoaringBitmap>],
@@ -39,6 +44,27 @@ pub fn compile_filter(
             scalars.len(),
             tombstones.len()
         )));
+    }
+
+    // 2.1.3：schema 校验——每个 filter 字段必须存在于 schema 且为 Scalar。
+    // 字段不存在或为 Text/Vector → Err(InvalidArg)（SPEC §10 E_INVALID_ARG）。
+    // 此前字段不存在时静默 continue（位图空），现改为显式报错。
+    for (field, _) in &filter.fields {
+        match schema.fields.iter().find(|(name, _)| name == field) {
+            None => {
+                return Err(VaneError::InvalidArg(format!(
+                    "compile_filter: field '{}' not in schema",
+                    field
+                )));
+            }
+            Some((_, def)) if !matches!(def, FieldDef::Scalar { .. }) => {
+                return Err(VaneError::InvalidArg(format!(
+                    "compile_filter: field '{}' is not a scalar field (got {:?})",
+                    field, def
+                )));
+            }
+            _ => {}
+        }
     }
 
     let mut acc: Option<RoaringBitmap> = None;

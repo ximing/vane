@@ -331,15 +331,39 @@ fn compile_filter_and_yields_empty() {
     assert!(bm.is_empty());
 }
 
-// Task 2: 字段在该段无列 → 无命中
+// Task 2: 字段不在 schema → Err(InvalidArg)（2.1.3 schema 校验）
 #[test]
-fn compile_filter_field_missing_in_segment() {
+fn compile_filter_field_not_in_schema_errors() {
     let (s, segments, scalars, tombstones) = setup_filter_corpus();
     let filter = Filter {
         fields: vec![("nonexistent".into(), FilterCond::Eq(ScalarValue::Int(1)))],
     };
-    let bm = compile_filter(&filter, &s, &segments, &scalars, &tombstones).unwrap();
-    assert!(bm.is_empty());
+    let err = compile_filter(&filter, &s, &segments, &scalars, &tombstones)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, crate::types::VaneError::InvalidArg(_)),
+        "字段不存在应返回 InvalidArg，实际: {:?}",
+        err
+    );
+}
+
+// 2.1.3: filter 字段为非标量（Text/Vector）→ Err(InvalidArg)
+#[test]
+fn compile_filter_non_scalar_field_errors() {
+    let (s, segments, scalars, tombstones) = setup_filter_corpus();
+    // schema 中 "v" 是 Vector 字段（setup_filter_corpus 的 schema 含 v:Vector）。
+    let filter = Filter {
+        fields: vec![("v".into(), FilterCond::Eq(ScalarValue::Int(1)))],
+    };
+    let err = compile_filter(&filter, &s, &segments, &scalars, &tombstones)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, crate::types::VaneError::InvalidArg(_)),
+        "非标量字段应返回 InvalidArg，实际: {:?}",
+        err
+    );
 }
 
 // Task 2: tombstone 排除
