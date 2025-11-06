@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.1）
+# Vane 技术规范（SPEC v1.2）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -208,10 +208,12 @@ trait Vfs: Send + Sync {
         ├── hnsw.bin         // 段内 HNSW 图（自研格式，fork instant-distance 演进）[M1]
         ├── inverted.bin     // 倒排：词典块 + posting 块（§6.3）
         ├── scalars.col      // 列式标量块，按字段分区
-        └── stored.bin       // 原文/JSON meta（zstd 块压缩）
+        └── stored.bin       // 原文/JSON meta；format_version v1=裸 JSON（M0/M1 产物，双模读取保留），v2=zstd 块压缩（M2 起，native/node 写，wasm 读）
+        // 懒加载语义（M2）：SegmentReader::open 仅读 header.bin + idmap.bin + manifest；
+        // vectors.bin / stored.bin / hnsw.bin 首次访问时按需加载（OnceLock，core 内部，不改 §4 IDL 签名）。冷启动承诺见 §13.1。
 ```
 
-所有文件以 4 字节 `magic` + 4 字节 `format_version` 开头。格式变更必须：① version 递增；② 提供迁移器或双模读取；③ 冻结 corpus 兼容测试通过（§13.3）。
+所有文件以 4 字节 `magic` + 4 字节 `format_version` 开头，**每文件独立 version 递增**（per-file format_version，非全库共用常量）。格式变更必须：① version 递增；② 提供迁移器或双模读取；③ 冻结 corpus 兼容测试通过（§13.3）。stored.bin v1→v2 采用双模读取（不做原地迁移），旧 v1 段只读服务至段合并自然清除。
 
 ### 6.3 倒排布局
 
@@ -406,7 +408,7 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 | hybrid topK=10 P99 | < 50ms（HNSW [M1]）/ < 150ms（暴力 [M0]） |
 | 批量 add | ≥ 5k docs/s（含索引构建） |
 | 内存（全加载） | < 500MB；SQ8 后 < 200MB [M2] |
-| 冷启动（打开 10 万库） | < 1s（M1 实测背书；>2s 则降级为分级指标：元数据 <1s、首次查询 <3s） |
+| 冷启动（打开 10 万库） | 元数据 open < 1s（vectors/stored 懒加载，M2 实测背书）；首次向量查询触发 vectors 加载，<3s（降级分级保留为 fallback） |
 | 词典冷加载 | < 150ms（预编译 dict.bin 零拷贝反序列化）[M1] |
 | WASM 端 | 上述延迟放宽 3~5 倍（暂估值，M2 前出实测预算表）[M2] |
 
@@ -433,6 +435,7 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 - **I-3 图不原地删**：HNSW 图节点删除只经 tombstone；图重建仅发生在段合并。
 - **I-4 单一分词身份**：任意时刻一 collection 一套 TokenizerId；新写入在 reindex 完成前必须用旧身份。
 - **I-5 核心零平台分支**：core 算法代码无 `cfg(target)`；平台差异仅在 VFS/Executor 实现。
+  - 注：`cfg(feature)` 用于存储编解码能力开关（如 zstd-encode）允许出现在 segment 编解码处；`cfg(target)` 平台分支仍仅限 VFS/Executor 实现。
 - **I-6 manifest 原子性**：任何崩溃后 manifest 指向完整状态；孤儿段文件可安全清理。
 - **I-7 FFI 内存铁律**：谁分配谁释放，跨边界只借不还；句柄注销后使用 = 明确错误而非 UB。
 - **I-8 binding 薄壳**：三侧绑定无检索逻辑；行为差异视为 bug。
@@ -453,3 +456,4 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 
 - **v1.0**（2026-08-09）：自 REQUIREMENTS v1.1 形式化，含第三轮复议结论（默认中文分词 + 自定义词表 + 词表暂存/reindex 语义仲裁）。
 - **v1.1**（2026-08-09）：M1 计划审查闭环后三处修订。S1 §5.4 澄清 `builtin_dict_version` = 编译期词典格式 spec 版本常量（非日历内容版本），词典内容升级不改变 TokenizerId（满足 REQUIREMENTS §3.3「仅警告不强制重建」）。S2 §9.1 FFI 句柄注册表 `DashMap` → `std::sync::RwLock<HashMap>`（消除与依赖黑名单冲突）。S3 §9.2 补列 `vane_reindex_progress` / `vane_reindex_wait`（ReindexHandle IDL 落实）+ `vane_load_dict` / `vane_dict_version`（M1 词典分发扩展）。
+- **v1.2**（2026-08-09）：M2 scoping 检查点后三处修订（用户批准）。S1 §13.1 冷启动承诺改为「元数据 open <1s（vectors/stored 懒加载，M2 实测背书）；首次向量查询触发 vectors 加载 <3s」，消解 M1 实测 1573ms 未达 <1s 的遗留（SegmentReader OnceLock 懒加载，不改 §4 IDL 签名）。S2 §6.2 stored.bin 引入 per-file format_version（每文件独立递增，替代全局共用常量）+ v1(裸JSON)/v2(zstd) 双模读取（不做原地迁移）；补懒加载语义注释。S3 §14 I-5 释义澄清：`cfg(feature)` 能力开关（如 zstd-encode）允许出现在 segment 编解码处，`cfg(target)` 平台分支仍仅限 VFS/Executor。
