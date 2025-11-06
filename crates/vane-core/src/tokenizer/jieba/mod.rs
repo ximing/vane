@@ -19,7 +19,8 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::tokenizer::{
-    compute_tokenizer_id, BuiltinTokenizer, Token, Tokenizer, UserDictEntry, MAX_USER_DICT_ENTRIES,
+    compute_tokenizer_id, is_cjk, BuiltinTokenizer, Token, Tokenizer, UserDictEntry,
+    MAX_USER_DICT_ENTRIES,
 };
 use crate::types::{Result as VaneResult, TokenizerId, VaneError};
 
@@ -107,23 +108,6 @@ impl Tokenizer for JiebaTokenizer {
     fn id(&self) -> &TokenizerId {
         &self.id
     }
-}
-
-/// 判断字符是否属于 CJK 表意文字/假名范围（与 `cjk_bigram::is_cjk` 一致，复用 run 切分）。
-fn is_cjk(c: char) -> bool {
-    let cp = c as u32;
-    matches!(cp,
-        0x3000..=0x303F   // CJK 符号和标点
-        | 0x3040..=0x309F // 平假名
-        | 0x30A0..=0x30FF // 片假名
-        | 0x3400..=0x4DBF // CJK Ext A
-        | 0x4E00..=0x9FFF // CJK 统一表意文字
-        | 0xF900..=0xFAFF // CJK 兼容表意文字
-        | 0x20000..=0x2A6DF // CJK Ext B
-        | 0x2A700..=0x2B73F // CJK Ext C
-        | 0x2B740..=0x2B81F // CJK Ext D
-        | 0x2B820..=0x2CEAF // CJK Ext E
-    )
 }
 
 #[cfg(all(test, feature = "jieba"))]

@@ -45,6 +45,26 @@ pub enum UserDictEntry {
 /// 用户词表上限（SPEC §5.3：10 万词条）。
 pub const MAX_USER_DICT_ENTRIES: usize = 100_000;
 
+/// 判断一个字符是否属于 CJK 表意文字/假名范围（用于 run 切分）。
+///
+/// M2 parked minor 2.1.1：从 `cjk_bigram.rs` 与 `jieba/mod.rs` 各一份逐字相同的
+/// `fn is_cjk` 提取为共享 `pub(crate)`。两处改调用本函数，消除代码复制。
+pub(crate) fn is_cjk(c: char) -> bool {
+    let cp = c as u32;
+    matches!(cp,
+        0x3000..=0x303F   // CJK 符号和标点
+        | 0x3040..=0x309F // 平假名
+        | 0x30A0..=0x30FF // 片假名
+        | 0x3400..=0x4DBF // CJK Ext A
+        | 0x4E00..=0x9FFF // CJK 统一表意文字
+        | 0xF900..=0xFAFF // CJK 兼容表意文字
+        | 0x20000..=0x2A6DF // CJK Ext B
+        | 0x2A700..=0x2B73F // CJK Ext C
+        | 0x2B740..=0x2B81F // CJK Ext D
+        | 0x2B820..=0x2CEAF // CJK Ext E
+    )
+}
+
 /// 工厂：构建内置分词器（SPEC §5.1 / §5.3 / §10）。
 ///
 /// - `Standard` / `CjkBigram`：M0 完整实现。
@@ -89,6 +109,17 @@ pub fn build_jieba_tokenizer(
 mod factory_tests {
     use super::*;
     use crate::types::VaneError;
+
+    // 2.1.1：共享 is_cjk 单测（覆盖常见 CJK 命中与非 CJK 不命中）。
+    #[test]
+    fn is_cjk_covers_common_ranges() {
+        assert!(is_cjk('汉')); // U+6C49 CJK 统一
+        assert!(is_cjk('あ')); // U+3042 平假名
+        assert!(is_cjk('カ')); // U+30AB 片假名
+        assert!(!is_cjk('a'));
+        assert!(!is_cjk(' '));
+        assert!(!is_cjk('1'));
+    }
 
     #[test]
     fn build_standard_ok_and_id_matches() {
