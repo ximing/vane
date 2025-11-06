@@ -34,10 +34,15 @@ pub struct JiebaTokenizer {
 
 impl JiebaTokenizer {
     /// 从已加载词典 + 用户词表构建。校验用户词表上限（SPEC §5.3）。
+    ///
+    /// 缺省 freq（`UserDictEntry::Word(term)`）= `dict.max_freq()`（词典最高频值），
+    /// 与 jieba-rs 原版一致——保证用户词在 DAG 最大概率路径中优先命中（覆盖内置
+    /// 同词的低 freq 切分路径，SPEC §5.3：缺省 freq = 内置词典最高频值）。
     pub fn new(dict: Arc<JiebaDict>, user_dict: &[UserDictEntry]) -> VaneResult<Self> {
         if user_dict.len() > MAX_USER_DICT_ENTRIES {
             return Err(VaneError::DictTooLarge);
         }
+        // max_freq = 词典最高频值；UserDictEntry::Word 缺省 freq 用此值（SPEC §5.3）。
         let max_freq = dict.max_freq();
         let mut user = UserTrie::new();
         for entry in user_dict {

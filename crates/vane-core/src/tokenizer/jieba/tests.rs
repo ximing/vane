@@ -387,6 +387,40 @@ fn user_dict_new_word_single_token() {
     );
 }
 
+// 2.1.2：UserDictEntry::Word 缺省 freq = dict.max_freq()，在 DAG 中优先命中
+// （覆盖内置同词的低 freq 切分路径）。SPEC §5.3。
+#[test]
+fn user_dict_default_freq_overrides_builtin_in_dag() {
+    // 内置词典含 "机器" (freq=50) 与 "学习" (freq=200)，但不含整词 "机器学习"。
+    // 无用户词时 DAG 无法命中 "机器学习" 整词，切分为 "机器"/"学习"。
+    let bytes = dict_bin_with_words(&[("机器", 50), ("学习", 200)]);
+    let d = std::sync::Arc::new(JiebaDict::load(&bytes).unwrap());
+
+    // 基线：无用户词 → "机器学习" 被拆为 "机器"+"学习"。
+    let tok_no_user = JiebaTokenizer::new(d.clone(), &[]).unwrap();
+    let toks = tok_no_user.tokenize("机器学习");
+    assert!(
+        !toks.iter().any(|t| t.text == "机器学习"),
+        "无用户词时不应命中整词: {:?}",
+        toks
+    );
+
+    // 注入 UserDictEntry::Word("机器学习")（缺省 freq = max_freq = 200）。
+    // DAG 中 "机器学习" 整词 freq=200 与 "机器"(50)+"学习"(200) 路径竞争；
+    // 整词概率路径更优（jieba DAG 取最大概率路径，整词覆盖更多字符且 freq 高），
+    // 故切分为整词 "机器学习"。
+    let user = vec![UserDictEntry::Word("机器学习".into())];
+    let tok = JiebaTokenizer::new(d, &user).unwrap();
+    let toks = tok.tokenize("机器学习");
+    assert_eq!(
+        toks.len(),
+        1,
+        "缺省 freq 用户词应命中整词（单 token）: {:?}",
+        toks
+    );
+    assert_eq!(toks[0].text, "机器学习");
+}
+
 // ============================================================
 // Task 7: build_tokenizer 接入 + TokenizerId（R-3：无二次哈希）
 // ============================================================
