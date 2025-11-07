@@ -15,6 +15,10 @@ pub struct SegmentMeta {
     pub docid_base: u64,
     pub tokenizer_id: TokenizerId,
     /// tombstone 位图（SPEC §6.3）。M0 恒为空（delete 是 M1）。
+    ///
+    /// 存**绝对 docid**（u32 空间，与 WAL `WalRecord::AddTombstone.docids` 及
+    /// 运行期 `CollectionInner.tombstones` 位图一致，M-minor-2 / M2 parked minor 2.1.6）。
+    /// 段内 local docid 仅在 SegmentReader 边界处由 `docid_base` 转换。
     pub tombstones: roaring::RoaringBitmap,
 }
 
