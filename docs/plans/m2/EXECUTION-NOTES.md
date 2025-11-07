@@ -8,10 +8,13 @@
 ## 阶段进度
 
 ### 阶段零（M1 遗留清理 + M2 前置）
-- [ ] #12 scoping & SPEC v1.2 修订提案（in_progress）
-- [ ] #13 安全清理（parked minors + wiki nDCG + vane-wasm 骨架）
-- [ ] #14 冷启动懒加载（blocked by SPEC 批准）
-- [ ] #15 stored.bin zstd + per-file format_version（blocked by SPEC 批准）
+- [x] #12 scoping & SPEC v1.2 修订提案（完成：00-scoping-report；SPEC v1.2 三处修订用户批准，commit c2bd0bb）
+- [ ] #13 安全清理
+  - [x] vane-wasm 骨架（commit 6458247；340 测试未回退；wasm32 双 check 通过；体积 9.46KB default / 151KB --export-all <<800KB；CI job 更新留 M2-01）
+  - [x] parked minors（6 项，commits f81be11/70622b2/d490b43/4ff9203/f964864/ff1d527 + 报告 4034440；347 测试=340+7；JS 17 全绿；2.1.3 行为变更 filter 非标量字段→E_INVALID_ARG 端到端验证通过；2.1.5 新增 #[cfg(test)] set_jieba_dict_for_test 注入）
+  - [~] 真实维基 nDCG corpus → fold 为 M2-13（Phase One 计划，Phase Two 执行；需真实维基数据获取 + qrels 方法论，宜正式计划非 ad-hoc）
+- [ ] #14 冷启动懒加载（SPEC v1.2 已批准；fold 为 M2-07，Phase One 计划后 Phase Two 执行）
+- [ ] #15 stored.bin zstd + per-file format_version（SPEC v1.2 已批准；fold 为 M2-08，Phase One 计划后 Phase Two 执行）
 
 ### 阶段一（计划拆分）
 - [ ] #16 plan-splitter M2 模块拆分
