@@ -131,6 +131,10 @@ pub type RecoveredTombstones = HashMap<String, HashMap<String, roaring::RoaringB
 ///   `Vfs::delete` 段目录（经 `merge::delete_segment_dir` 递归删）。
 /// - **DeleteSegment**：仅信息记录，不动作。若 ULID 仍在 manifest → 合并未完成，
 ///   保留旧段（恢复到合并前）；若 ULID 已不在 manifest → 已清除，无操作。
+/// - **目录扫描（M2 parked minor 2.1.4）**：WAL 重放后扫描 `segments/` 目录，
+///   对每个 `seg_<ulid>` 子目录，若 ulid 不在 manifest 任何 collection 的
+///   `segment_ulids` 中，判定为孤儿段（段文件已写盘但 WAL 未 append 即崩溃，
+///   SPEC §6.4 line 226），调 `merge::delete_segment_dir` 清理。防御性增强。
 ///
 /// # 返回值偏离 README 契约
 ///
@@ -181,7 +185,51 @@ pub fn recover(
             }
         }
     }
+
+    // 2.1.4：目录扫描——清理 manifest 不含的孤儿 seg_<ulid> 段目录。
+    // 防御性增强（SPEC §6.4 line 226：段文件已写盘但 WAL 未 append 即崩溃）。
+    cleanup_orphan_segment_dirs(vfs, db_path, manifest)?;
+
     Ok(tombstones)
+}
+
+/// 扫描 `<db_path>/segments/` 目录，清理 manifest 不含的孤儿 `seg_<ulid>` 段目录。
+///
+/// 对每个 `seg_` 前缀的子目录条目，提取 ulid，若不在 manifest 任何 collection 的
+/// `segment_ulids` 中，调 `merge::delete_segment_dir` 递归删除。`segments/` 目录
+/// 不存在或为空时无操作（新库）。
+fn cleanup_orphan_segment_dirs(
+    vfs: &Arc<dyn Vfs>,
+    db_path: &str,
+    manifest: &Manifest,
+) -> Result<()> {
+    let segments_dir = format!("{}/segments", db_path);
+    let entries = match vfs.list(&segments_dir) {
+        Ok(e) => e,
+        Err(VaneError::Io(_)) => return Ok(()), // 目录不存在（新库），无操作。
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        // 仅处理 seg_<ulid> 前缀的段目录。
+        let ulid = match entry.strip_prefix("seg_") {
+            Some(u) => u,
+            None => continue,
+        };
+        if !ulid_in_any_collection(manifest, ulid) {
+            let seg_dir = format!("{}/{}", segments_dir, entry);
+            // 尽力清理，忽略单个删除失败（可能已被 WAL 重放清理）。
+            let _ = crate::merge::delete_segment_dir(vfs.as_ref(), &seg_dir);
+        }
+    }
+    Ok(())
+}
+
+/// 判断 ulid 是否在 manifest 任何 collection 的 segment_ulids 中。
+fn ulid_in_any_collection(manifest: &Manifest, ulid: &str) -> bool {
+    manifest
+        .collections
+        .values()
+        .any(|m| m.segment_ulids.iter().any(|u| u == ulid))
 }
 
 fn ulid_in_manifest(manifest: &Manifest, collection: &str, ulid: &str) -> bool {
