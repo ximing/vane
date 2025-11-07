@@ -321,3 +321,107 @@ fn concurrent_search_during_reindex_no_panic() {
         assert_eq!(reader.meta().tokenizer_id, current_id);
     }
 }
+
+// 2.1.5：jieba 分词器下的并发读写测试——验证 I-4（单一分词身份）不破。
+// jieba collection + 多线程 search 与 setUserDict/reindex 并发：
+// - 任意时刻 search 不 panic、不死锁、每次成功返回。
+// - 旧身份期间用旧切分（reindex 完成前 search 用旧 tokenizer，不混排）。
+// - reindex 完成后所有 reader 的 tokenizer_id 一致（无新段+旧分词器混排）。
+#[cfg(all(test, feature = "jieba"))]
+#[test]
+fn jieba_concurrent_search_during_reindex_no_panic() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+    use std::thread;
+
+    use crate::tokenizer::jieba::{tests as jieba_tests, JiebaDict};
+    use crate::tokenizer::BuiltinTokenizer;
+
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn crate::vfs::Vfs>;
+    let mut db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    // 注入测试用 jieba 词典（不依赖 dict-zh feature）。
+    let dict_bytes = jieba_tests::test_fixture_dict_bin();
+    let dict = StdArc::new(JiebaDict::load(&dict_bytes).unwrap());
+    db.set_jieba_dict_for_test(dict);
+
+    let schema = build_schema();
+    let col = StdArc::new(
+        db.collection(
+            "c",
+            schema,
+            CollectionOptions {
+                tokenizer: BuiltinTokenizer::Jieba,
+                user_dict: vec![],
+                auto_commit: Default::default(),
+            },
+        )
+        .unwrap(),
+    );
+    col.add(&[
+        Doc {
+            id: "d0".into(),
+            text: Some("机器学习 深度学习".into()),
+            vector: Some(vec![1.0, 0.0, 0.0, 0.0]),
+            meta: None,
+        },
+        Doc {
+            id: "d1".into(),
+            text: Some("北京天安门".into()),
+            vector: Some(vec![0.0, 1.0, 0.0, 0.0]),
+            meta: None,
+        },
+    ])
+    .unwrap();
+    col.flush().unwrap();
+
+    let stop = StdArc::new(AtomicBool::new(false));
+    let searches = StdArc::new(AtomicUsize::new(0));
+
+    // 两个 search 线程持续查询（text 模式，jieba 切分），跨越 reindex 收尾窗口。
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let col_c = col.clone();
+        let stop_c = stop.clone();
+        let cnt_c = searches.clone();
+        handles.push(thread::spawn(move || {
+            let q = SearchQuery {
+                text: Some("机器".into()),
+                vector: None,
+                top_k: 10,
+                mode: SearchMode::Text,
+                fusion: FusionSpec::Rrf,
+                filter: None,
+                candidate_multiplier: 3,
+            };
+            while !stop_c.load(Ordering::Relaxed) {
+                // 任意时刻 search 必须成功（不 panic、不死锁、不混排报错）。
+                // I-4：旧身份期间用旧切分，reindex 切换原子，不会出现新段+旧分词器。
+                let _ = col_c.search(&q).unwrap();
+                cnt_c.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    // 让 search 线程先运转起来，再触发 reindex（放大窗口命中概率）。
+    thread::sleep(std::time::Duration::from_millis(5));
+    col.set_user_dict(&[UserDictEntry::Word("机器学习".into())])
+        .unwrap();
+    let handle = col.reindex().unwrap();
+    handle.wait().unwrap();
+
+    // reindex 完成后再持续一小段，覆盖切换后路径。
+    thread::sleep(std::time::Duration::from_millis(5));
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert!(
+        searches.load(Ordering::Relaxed) > 0,
+        "concurrent jieba searches must have run during reindex"
+    );
+    // 最终一致性：reindex 完成后所有 reader 的 tokenizer_id 一致（I-4 不混排）。
+    let current_id = col.tokenizer_id();
+    for reader in col.snapshot_readers() {
+        assert_eq!(reader.meta().tokenizer_id, current_id);
+    }
+}
