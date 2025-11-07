@@ -8,6 +8,11 @@ use crate::types::{Result, TokenizerId, VaneError, FORMAT_VERSION, MAGIC};
 //
 // FA2：全字段统一 LE（含 format_version）。此前 format_version 用 BE 与 payload
 // 字段序混用，现已统一为 LE。
+//
+// M2 parked minor 2.1.6：tombstone_data 存**绝对 docid**（u32 空间，与 WAL
+// `WalRecord::AddTombstone.docids` 及运行期 `CollectionInner.tombstones` 位图
+// 一致，M-minor-2）。段内 local docid 仅在 SegmentReader 边界处由 `docid_base`
+// 转换，header.bin 不涉及 local 语义。
 
 /// header.bin 编码。
 pub fn encode_header(meta: &SegmentMeta) -> Result<Vec<u8>> {
