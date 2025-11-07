@@ -93,3 +93,91 @@ fn wal_truncate_then_append_works() {
         WalRecord::AddSegment { ref ulid, .. } if ulid == "seg_b"
     ));
 }
+
+// 2.1.4：recover 目录扫描——清理 manifest 不含的孤儿 seg_<ulid> 段目录。
+// 场景：段文件已写盘但 WAL 未 append 即崩溃（SPEC §6.4 line 226）。
+#[test]
+fn recover_cleans_orphan_segment_dir_not_in_wal() {
+    use crate::persistence::{CollectionMeta, Manifest};
+    use crate::types::{FieldDef, Metric, ScalarKind, Schema};
+    use crate::vfs::Vfs;
+
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    // 构造 manifest 含一个合法段 ULID。
+    let schema = Schema::new(vec![
+        (
+            "tag".into(),
+            FieldDef::Scalar {
+                kind: ScalarKind::Keyword,
+            },
+        ),
+        (
+            "v".into(),
+            FieldDef::Vector {
+                dim: 2,
+                metric: Metric::Cosine,
+            },
+        ),
+    ])
+    .unwrap();
+    let mut manifest = Manifest::empty();
+    manifest.collections.insert(
+        "c".into(),
+        CollectionMeta {
+            schema,
+            tokenizer_kind: crate::tokenizer::BuiltinTokenizer::Standard,
+            tokenizer_id: crate::tokenizer::compute_tokenizer_id(
+                crate::tokenizer::BuiltinTokenizer::Standard,
+                &[],
+            ),
+            user_dict: vec![],
+            segment_ulids: vec!["01LEGALULID".into()],
+        },
+    );
+
+    // 合法段目录（在 manifest 中）——应保留。
+    vfs.create("db/segments/seg_01LEGALULID/header.bin")
+        .unwrap();
+    vfs.write_at("db/segments/seg_01LEGALULID/header.bin", b"ok", 0)
+        .unwrap();
+
+    // 孤儿段目录（不在 manifest、不在 WAL）——应被清理。
+    vfs.create("db/segments/seg_ORPHAN_NO_WAL/header.bin")
+        .unwrap();
+    vfs.write_at("db/segments/seg_ORPHAN_NO_WAL/header.bin", b"partial", 0)
+        .unwrap();
+
+    // 非 seg_ 前缀的杂项目录——不触碰。
+    vfs.create("db/segments/_tmp/header.bin").unwrap();
+
+    let _tombstones = recover(&vfs, "db", &manifest).unwrap();
+
+    let entries = vfs.list("db/segments").unwrap();
+    assert!(
+        entries.iter().any(|e| e.contains("01LEGALULID")),
+        "manifest 合法段必须保留: {:?}",
+        entries
+    );
+    assert!(
+        !entries.iter().any(|e| e.contains("ORPHAN_NO_WAL")),
+        "孤儿段必须被清理: {:?}",
+        entries
+    );
+    assert!(
+        entries.iter().any(|e| e.contains("_tmp")),
+        "非 seg_ 前缀目录不应被触碰: {:?}",
+        entries
+    );
+}
+
+// 2.1.4：空 segments 目录（新库）→ recover 无异常。
+#[test]
+fn recover_empty_segments_dir_no_error() {
+    use crate::persistence::Manifest;
+
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn crate::vfs::Vfs>;
+    let manifest = Manifest::empty();
+    // segments 目录不存在（新库）。
+    let _tombstones = recover(&vfs, "db", &manifest).unwrap();
+    // 无异常即通过。
+}
