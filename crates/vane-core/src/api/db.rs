@@ -213,3 +213,21 @@ fn load_default_jieba_dict() -> Option<Arc<crate::tokenizer::jieba::JiebaDict>> 
     #[cfg(not(feature = "dict-zh"))]
     None
 }
+
+/// 测试专用：注入 jieba 词典（绕过 dict-zh 自动加载）。
+///
+/// M2 parked minor 2.1.5：jieba 并发测试需在不启用 dict-zh feature 时构造
+/// jieba collection。Db::open 后立即调用（此时 inner 无其他 Arc 强引用，
+/// Arc::get_mut 成功）。`#[cfg(test)]` 保证不进生产产物。
+#[cfg(all(test, feature = "jieba"))]
+impl Db {
+    pub(crate) fn set_jieba_dict_for_test(
+        &mut self,
+        dict: std::sync::Arc<crate::tokenizer::jieba::JiebaDict>,
+    ) {
+        match std::sync::Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.jieba_dict = Some(dict),
+            None => panic!("Db::inner has other Arc references, cannot inject jieba dict"),
+        }
+    }
+}
