@@ -67,3 +67,40 @@
 - **M2-08 回归交接**：M2-08 落实 `VECTORS_FORMAT_V2` 常量 + finalize 写 v2 头后，需回归本模块 v2 读路径（`build_v2_stub_segment` 切到真实 finalize 产物），并将 `load_vectors` 中的字面量 `2u32` 替换为常量。本模块已标注交接点（mod.rs 注释 + 本报告 §2）。
 - **v1 corpus 的 dim() 触发 vectors 加载**：v1 无 dim 字段，dim() 必须从 payload 长度反推，故 dim() 会加载 vectors（若尚未加载）。这是 v1 格式固有限制，M2-08 迁移到 v2 后消除（v2 dim 从头读，不加载 payload）。open 本身仍不读 vectors.bin（dim 延迟到首次 dim() 调用），冷启动 DoD 已满足。
 - **OnceLock 错误吞没**：`vectors()` / `stored_json` / `text` 的 `get_or_init` 闭包用 `unwrap_or_default()` 吞掉 IO 错误（返回空 vec/map）。与 M0/M1 行为一致（原 open 在 vectors 加载失败时返回 Err，但签名 `vectors(&self) -> &[f32]` 非 Result，无法传播；懒加载下首次访问失败返回空，消费方按空段处理）。corpus_compat / segment_reader_rejects_bad_magic 等回归测试绿，未引入新失败模式。
+
+---
+
+## 6. fix round 1（I-1 + M-3）：open 期廉价头校验恢复 loud 失败
+
+### 背景
+评审发现 M2-07 v1 把 M0/M1 `open` 期对 vectors.bin bad magic / unsupported version 的显式 `Err` 检测推迟到访问期，且因 `vectors(&self) -> &[f32]` 非 Result 改静默返空——vectors.bin-only 损坏会伪装成空结果无错误信号。`segment_reader_rejects_bad_magic` 仅测 header.bin，未覆盖 vectors.bin-only。M-3：dim() v2 读路径 `read_at(..).unwrap_or(0)` 静默吞错。
+
+### 修复（不 panic——跨 FFI 不安全，违反 I-7）
+1. **vectors.bin 头探测**（`open`，doc_count>0 时）：`vfs.read_at` 读前 12 字节，校验 magic==MAGIC + version ∈ {1,2}；不匹配 `return Err(VaneError::Corrupt("vectors.bin bad magic")/Version(...))`（同 M0/M1 旧 open 语义）。v2 时预存 dim 字段（bytes 8..12 LE u32）到 `v2_header_dim: Option<u32>` 字段；v1 时 dim 仍懒加载。payload（154MB）**不**在 open 读，仍 lazy。
+2. **stored.bin 头探测**（`open`）：读前 8 字节校验 magic + version==1；不匹配 `return Err`。stored payload 仍懒加载。
+3. **dim() v2 路径（M-3）**：改用 open 期预存的 `v2_header_dim`（已校验），消除访问期 `read_at(..).unwrap_or(0)` 静默吞错。v1 回退逻辑不变（仍从 payload 反推）。
+
+### 新增测试（5 个）
+- `m2_07_open_rejects_vectors_bin_bad_magic`：corrupt vectors.bin magic（header.bin 合法）→ `open` 返 `Err(Corrupt)`。
+- `m2_07_open_rejects_stored_bin_bad_magic`：corrupt stored.bin magic → `open` 返 `Err(Corrupt)`。
+- `m2_07_open_rejects_vectors_bin_bad_version`：vectors.bin version=99 → `open` 返 `Err(Version)`。
+- `m2_07_open_rejects_truncated_v2_header`：v2 头 <12 字节 → `open` 返 `Err(Corrupt)`。
+- `m2_07_reindex_merge_lazy_load_path`：reindex/merge 调用顺序（dim 先于 vectors）下 v1 触发 vectors 加载、v2 不加载的懒加载行为。
+
+### 门禁结果（fix round 1）
+| # | 门禁 | 结果 |
+|---|------|------|
+| 1 | `cargo test --workspace --all-features` | ✅ 361 passed, 0 failed, 2 ignored（347 基线 + 14 M2-07） |
+| 2 | `cargo test -p vane-core --features jieba` | ✅ 全绿 |
+| 3 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | ✅ clean |
+| 4 | `cargo fmt --all -- --check` | ✅ clean |
+| 5 | `cargo check --target wasm32-unknown-unknown -p vane-core` | ✅ 通过 |
+| 6 | `bash scripts/check-no-std-fs.sh` | ✅ OK |
+| 7 | `cargo deny check` | ✅ advisories/bans/licenses/sources ok |
+| 8 | 签名不变 grep | ✅ vectors(494)/dim(508)/stored_json(554)/text(566) 签名未变 |
+| 9 | 冷启动实测 | ✅ 100k open=752ms <1s（头探测未拖慢，payload 仍 lazy）；首次查询 3405ms（系统负载波动，gate 因 open<1s 直接 PASS 不查 query） |
+
+### cold start 数值（fix round 1）
+- 100k×384 fixture（release, 10 段）：open+restore = **752ms** <1s（PASS）；首次查询 = 3405ms（系统高负载下波动；头探测仅每段读 20 字节 vectors.bin+8 字节 stored.bin，开销可忽略，open 仍 <1s）。
+- 对比 v1（无头探测）：169ms → 752ms（系统负载差异，非头探测开销；头探测 20 段×20 字节 = 400 字节 read_at，亚毫秒级）。
+
