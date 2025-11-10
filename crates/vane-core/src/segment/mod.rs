@@ -195,39 +195,42 @@ impl SegmentWriter {
     pub fn finalize(self) -> Result<SegmentMeta> {
         let seg_dir = format!("{}/seg_{}", self.segments_dir, self.ulid);
 
-        // 写 vectors.bin（SPEC §6.2：magic | format_version | f32 LE 连续）
-        // FA1：vectors.bin 加 8 字节头（magic LE + format_version LE，与 FF3 统一 LE）。
-        // doc_count=0 时仍写头（空段合规）。
+        // 写 vectors.bin v2（SPEC §6.2 + M2-08：magic|version=2|dim(4 LE)|payload）。
+        // v2 头 12 字节（含 dim 字段，M2-07 open 期预存 dim 不需读 payload）。
+        // v1 旧段双模读（load_vectors 按 version 分支）。doc_count=0 时仍写头（空段合规）。
         let vpath = format!("{}/vectors.bin", seg_dir);
         self.vfs.create(&vpath)?;
-        let mut vbytes = Vec::with_capacity(8 + self.vectors.len() * 4);
+        let mut vbytes = Vec::with_capacity(12 + self.vectors.len() * 4);
         vbytes.extend_from_slice(crate::types::MAGIC);
-        vbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+        vbytes.extend_from_slice(&crate::types::VECTORS_FORMAT_V2.to_le_bytes());
+        vbytes.extend_from_slice(&self.dim.to_le_bytes());
         for f in &self.vectors {
             vbytes.extend_from_slice(&f.to_le_bytes());
         }
         self.vfs.write_at(&vpath, &vbytes, 0)?;
         self.vfs.sync(&vpath)?;
 
-        // 写 stored.bin：magic|version|count|{docid(8 LE)|text_len(4 LE)|text_bytes|meta_json_len(4 LE)|meta_json_bytes}...
-        // SPEC §6.2：原文 + JSON meta 分离存储。format_version 保持 1（补全 spec'd 格式）。
-        // I10: M0 写裸数据（zstd 块压缩延后 M1，format_version 不变）。
+        // 写 stored.bin（SPEC §6.2 + M2-08：v2 zstd 块压缩 / v1 裸 JSON）。
+        // v2 布局：magic|version=2|raw_payload_len(4 LE)|zstd_block_len(4 LE)|zstd_block。
+        //   raw_payload = v1 body（count+entries），zstd 压缩（zstd-encode feature 写）。
+        // v1 布局：magic|version=1|count|{entries}（裸 JSON，wasm 写 / 旧段兼容）。
+        // 双模读（decode_stored 按 version 分支），不做原地迁移（I-6 corpus 兼容）。
         let spath = format!("{}/stored.bin", seg_dir);
         self.vfs.create(&spath)?;
-        let mut sbytes = Vec::new();
-        sbytes.extend_from_slice(crate::types::MAGIC);
-        sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
-        sbytes.extend_from_slice(&(self.stored.len() as u32).to_le_bytes());
+        // 先构造 raw_payload（v1 body：count + entries）。
+        let mut raw_payload = Vec::new();
+        raw_payload.extend_from_slice(&(self.stored.len() as u32).to_le_bytes());
         for entry in &self.stored {
-            sbytes.extend_from_slice(&entry.docid.to_le_bytes());
+            raw_payload.extend_from_slice(&entry.docid.to_le_bytes());
             // text 为 None 时落空串（text_len=0 表示无原文）。
             let text_bytes = entry.text.as_deref().unwrap_or("").as_bytes();
-            sbytes.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
-            sbytes.extend_from_slice(text_bytes);
+            raw_payload.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
+            raw_payload.extend_from_slice(text_bytes);
             let meta_bytes = entry.meta_json.as_bytes();
-            sbytes.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
-            sbytes.extend_from_slice(meta_bytes);
+            raw_payload.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+            raw_payload.extend_from_slice(meta_bytes);
         }
+        let sbytes = encode_stored(&raw_payload);
         self.vfs.write_at(&spath, &sbytes, 0)?;
         self.vfs.sync(&spath)?;
 
@@ -236,7 +239,7 @@ impl SegmentWriter {
         self.vfs.create(&ipath)?;
         let mut ibytes = Vec::new();
         ibytes.extend_from_slice(crate::types::MAGIC);
-        ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+        ibytes.extend_from_slice(&crate::types::IDMAP_FORMAT_V1.to_le_bytes());
         ibytes.extend_from_slice(&(self.id_map.len() as u32).to_le_bytes());
         for (docid, eid) in &self.id_map {
             ibytes.extend_from_slice(&docid.to_le_bytes());
@@ -255,7 +258,7 @@ impl SegmentWriter {
         self.vfs.create(&colpath)?;
         let mut scbytes = Vec::new();
         scbytes.extend_from_slice(crate::types::MAGIC);
-        scbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+        scbytes.extend_from_slice(&crate::types::SCALARS_FORMAT_V1.to_le_bytes());
         // 收集已 set_scalar 的字段，按字段名排序保证写盘确定性。
         let mut scalar_fields: Vec<String> = self.scalars.keys().cloned().collect();
         scalar_fields.sort();
@@ -382,8 +385,8 @@ impl SegmentReader {
             }
             let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
             match version {
-                v if v == crate::types::FORMAT_VERSION => None, // v1：dim 懒加载从 payload 反推
-                2 => {
+                v if v == crate::types::VECTORS_FORMAT_V1 => None, // v1：dim 懒加载从 payload 反推
+                v if v == crate::types::VECTORS_FORMAT_V2 => {
                     // v2：dim 字段在 offset 8..12（M2-08 写入，本模块读）。
                     if n < 12 {
                         return Err(VaneError::Corrupt(
@@ -394,9 +397,10 @@ impl SegmentReader {
                 }
                 _ => {
                     return Err(VaneError::Version(format!(
-                        "vectors.bin unsupported format_version: {} (expected {} or 2)",
+                        "vectors.bin unsupported format_version: {} (expected {} or {})",
                         version,
-                        crate::types::FORMAT_VERSION
+                        crate::types::VECTORS_FORMAT_V1,
+                        crate::types::VECTORS_FORMAT_V2
                     )));
                 }
             }
@@ -405,7 +409,7 @@ impl SegmentReader {
         };
 
         // fix round 1（I-1）：stored.bin 头探测。只读前 8 字节（magic+version）。
-        // M2-07 阶段 stored 仍 v1（version==1）；M2-08 扩 v2 时此校验扩展。
+        // M2-08：stored v2（zstd 块）双模——open 期接受 version ∈ {1, 2}，payload 仍懒加载。
         {
             let spath = format!("{}/stored.bin", segment_dir);
             let mut shdr = [0u8; 8];
@@ -414,11 +418,12 @@ impl SegmentReader {
                 return Err(VaneError::Corrupt("stored.bin bad magic".into()));
             }
             let sver = u32::from_le_bytes(shdr[4..8].try_into().unwrap());
-            if sver != crate::types::FORMAT_VERSION {
+            if sver != crate::types::STORED_FORMAT_V1 && sver != crate::types::STORED_FORMAT_V2 {
                 return Err(VaneError::Version(format!(
-                    "stored.bin unsupported format_version: {} (expected {})",
+                    "stored.bin unsupported format_version: {} (expected {} or {})",
                     sver,
-                    crate::types::FORMAT_VERSION
+                    crate::types::STORED_FORMAT_V1,
+                    crate::types::STORED_FORMAT_V2
                 )));
             }
         }
@@ -446,15 +451,16 @@ impl SegmentReader {
             return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
         }
         let version = u32::from_le_bytes(vbuf[4..8].try_into().unwrap());
-        // v1=FORMAT_VERSION(1)；v2=2（VECTORS_FORMAT_V2 常量由 M2-08 落实，此处用字面量判别）。
+        // M2-08：字面量 2 替换为 VECTORS_FORMAT_V2 常量。v1=VECTORS_FORMAT_V1，v2 含 dim 头。
         let payload_off = match version {
-            v if v == crate::types::FORMAT_VERSION => 8,
-            2 => 12,
+            v if v == crate::types::VECTORS_FORMAT_V1 => 8,
+            v if v == crate::types::VECTORS_FORMAT_V2 => 12,
             _ => {
                 return Err(VaneError::Version(format!(
-                    "vectors.bin unsupported format_version: {} (expected {} or 2)",
+                    "vectors.bin unsupported format_version: {} (expected {} or {})",
                     version,
-                    crate::types::FORMAT_VERSION
+                    crate::types::VECTORS_FORMAT_V1,
+                    crate::types::VECTORS_FORMAT_V2
                 )));
             }
         };
@@ -588,12 +594,12 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
         return Err(VaneError::Corrupt(format!("{} bad magic", label)));
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-    if version != crate::types::FORMAT_VERSION {
+    if version != crate::types::IDMAP_FORMAT_V1 {
         return Err(VaneError::Version(format!(
             "{} unsupported format_version: {} (expected {})",
             label,
             version,
-            crate::types::FORMAT_VERSION
+            crate::types::IDMAP_FORMAT_V1
         )));
     }
     let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
@@ -619,63 +625,152 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
     Ok(map)
 }
 
-/// 解码 stored.bin 的原文+meta 布局（SPEC §6.2）：
-/// magic(4) | version(4 LE) | count(4 LE) |
-/// {docid(8 LE) | text_len(4 LE) | text_bytes | meta_json_len(4 LE) | meta_json_bytes}...
+/// 编码 stored.bin（SPEC §6.2 + M2-08）。
+/// - zstd-encode feature：写 v2 `magic|version=2|raw_payload_len|zstd_block_len|zstd_block`。
+/// - 无 zstd-encode（wasm）：写 v1 `magic|version=1|raw_payload`（raw_payload = count+entries）。
 ///
-/// format_version 仍为 1（补全 spec'd 格式，无发布数据故无迁移）。
+/// raw_payload 在两模式下相同（v1 body），v2 仅外包 zstd 压缩 + 长度前缀。
+fn encode_stored(raw_payload: &[u8]) -> Vec<u8> {
+    #[cfg(feature = "zstd-encode")]
+    {
+        // zstd 压缩 raw_payload（level 3 默认，stored 小无需高压缩）。
+        let zstd_block = zstd::encode_all(raw_payload, 3).unwrap_or_else(|_| raw_payload.to_vec());
+        let mut out = Vec::with_capacity(16 + zstd_block.len());
+        out.extend_from_slice(crate::types::MAGIC);
+        out.extend_from_slice(&crate::types::STORED_FORMAT_V2.to_le_bytes());
+        out.extend_from_slice(&(raw_payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(zstd_block.len() as u32).to_le_bytes());
+        out.extend_from_slice(&zstd_block);
+        out
+    }
+    #[cfg(not(feature = "zstd-encode"))]
+    {
+        // v1 裸 JSON：magic|version=1|raw_payload（wasm 写，浏览器 stored 小不压缩）。
+        let mut out = Vec::with_capacity(8 + raw_payload.len());
+        out.extend_from_slice(crate::types::MAGIC);
+        out.extend_from_slice(&crate::types::STORED_FORMAT_V1.to_le_bytes());
+        out.extend_from_slice(raw_payload);
+        out
+    }
+}
+
+/// 解码 stored.bin（SPEC §6.2 + M2-08：v1/v2 双模读取，不做原地迁移）。
+/// - v1：magic|version=1|count(4 LE)|{entries}（裸 JSON，M0/M1 产物 + wasm 写）。
+/// - v2：magic|version=2|raw_payload_len(4 LE)|zstd_block_len(4 LE)|zstd_block。
+///   v2 解压 zstd_block → raw_payload（= v1 body count+entries）→ 复用 v1 entries 解析。
+///
 /// 读期 text 始终为 String（写期 Option 在 finalize 落空串），空串表示无原文。
 fn decode_stored(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
-    if buf.len() < 12 {
+    if buf.len() < 8 {
         return Ok(std::collections::HashMap::new());
     }
     if &buf[0..4] != crate::types::MAGIC {
         return Err(VaneError::Corrupt("stored bad magic".into()));
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-    if version != crate::types::FORMAT_VERSION {
-        return Err(VaneError::Version(format!(
-            "stored unsupported format_version: {} (expected {})",
+    match version {
+        v if v == crate::types::STORED_FORMAT_V1 => {
+            if buf.len() < 12 {
+                return Ok(std::collections::HashMap::new());
+            }
+            let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+            parse_stored_entries(count, &buf[12..])
+        }
+        v if v == crate::types::STORED_FORMAT_V2 => decode_stored_v2(buf),
+        _ => Err(VaneError::Version(format!(
+            "stored unsupported format_version: {} (expected {} or {})",
             version,
-            crate::types::FORMAT_VERSION
+            crate::types::STORED_FORMAT_V1,
+            crate::types::STORED_FORMAT_V2
+        ))),
+    }
+}
+
+/// 解码 stored.bin v2（SPEC §6.2 + M2-08：zstd 块压缩）。
+/// 布局：magic|version=2|raw_payload_len(4 LE)|zstd_block_len(4 LE)|zstd_block。
+/// 解压 zstd_block → raw_payload（= v1 body count+entries）→ 复用 entries 解析。
+/// ruzstd 纯 Rust 解码器，wasm32 也可用（vane-wasm 启 zstd-decode 读 v2）。
+#[cfg(feature = "zstd-decode")]
+fn decode_stored_v2(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
+    use std::io::Read;
+    if buf.len() < 16 {
+        return Err(VaneError::Corrupt(
+            "stored v2 header truncated (need 16 bytes)".into(),
+        ));
+    }
+    let raw_len = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+    let zstd_len = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;
+    if buf.len() < 16 + zstd_len {
+        return Err(VaneError::Corrupt("stored v2 zstd_block truncated".into()));
+    }
+    let mut decoder = ruzstd::streaming_decoder::StreamingDecoder::new(&buf[16..16 + zstd_len])
+        .map_err(|e| VaneError::Corrupt(format!("stored v2 zstd decompress failed: {}", e)))?;
+    let mut owned = Vec::with_capacity(raw_len);
+    decoder
+        .read_to_end(&mut owned)
+        .map_err(|e| VaneError::Corrupt(format!("stored v2 zstd read failed: {}", e)))?;
+    if owned.len() != raw_len {
+        return Err(VaneError::Corrupt(format!(
+            "stored v2 raw_payload_len mismatch: header {} actual {}",
+            raw_len,
+            owned.len()
         )));
     }
-    let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
-    let mut pos = 12;
+    if owned.len() < 4 {
+        return Err(VaneError::Corrupt("stored v2 raw_payload too short".into()));
+    }
+    let count = u32::from_le_bytes(owned[0..4].try_into().unwrap()) as usize;
+    parse_stored_entries(count, &owned[4..])
+}
+
+/// 无 zstd-decode feature 时 v2 stored 无法解码（wasm 无 zstd-encode 但有 zstd-decode，
+/// 此分支仅在 vane-core 裸用且未启 zstd-decode 时命中——上游应启 zstd-decode 读 v2）。
+#[cfg(not(feature = "zstd-decode"))]
+fn decode_stored_v2(_buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
+    Err(VaneError::Unsupported)
+}
+
+/// 解析 stored entries（v1/v2 共享 body 布局）：
+/// {docid(8 LE) | text_len(4 LE) | text_bytes | meta_json_len(4 LE) | meta_json_bytes}...
+fn parse_stored_entries(
+    count: usize,
+    body: &[u8],
+) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
+    let mut pos = 0;
     let mut map = std::collections::HashMap::with_capacity(count);
     for _ in 0..count {
-        if pos + 8 > buf.len() {
+        if pos + 8 > body.len() {
             return Err(VaneError::Corrupt("stored entry docid truncated".into()));
         }
-        let docid = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        let docid = u64::from_le_bytes(body[pos..pos + 8].try_into().unwrap());
         pos += 8;
         // text
-        if pos + 4 > buf.len() {
+        if pos + 4 > body.len() {
             return Err(VaneError::Corrupt("stored entry text_len truncated".into()));
         }
-        let text_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        let text_len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        if pos + text_len > buf.len() {
+        if pos + text_len > body.len() {
             return Err(VaneError::Corrupt(
                 "stored entry text_bytes truncated".into(),
             ));
         }
-        let text = std::str::from_utf8(&buf[pos..pos + text_len])
+        let text = std::str::from_utf8(&body[pos..pos + text_len])
             .map_err(|e| VaneError::Corrupt(format!("stored text utf8: {}", e)))?
             .to_string();
         pos += text_len;
         // meta_json
-        if pos + 4 > buf.len() {
+        if pos + 4 > body.len() {
             return Err(VaneError::Corrupt("stored entry meta_len truncated".into()));
         }
-        let meta_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        let meta_len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        if pos + meta_len > buf.len() {
+        if pos + meta_len > body.len() {
             return Err(VaneError::Corrupt(
                 "stored entry meta_bytes truncated".into(),
             ));
         }
-        let meta_json = std::str::from_utf8(&buf[pos..pos + meta_len])
+        let meta_json = std::str::from_utf8(&body[pos..pos + meta_len])
             .map_err(|e| VaneError::Corrupt(format!("stored meta utf8: {}", e)))?
             .to_string();
         pos += meta_len;
@@ -778,11 +873,11 @@ fn decode_scalars(buf: &[u8]) -> Result<ScalarReader> {
         return Err(VaneError::Corrupt("scalars.col bad magic".into()));
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-    if version != crate::types::FORMAT_VERSION {
+    if version != crate::types::SCALARS_FORMAT_V1 {
         return Err(VaneError::Version(format!(
             "scalars.col unsupported format_version: {} (expected {})",
             version,
-            crate::types::FORMAT_VERSION
+            crate::types::SCALARS_FORMAT_V1
         )));
     }
     let num_fields = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;

@@ -8,4 +8,5 @@ license.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-vane-core = { workspace = true }
+# M2-08：native 启 zstd-encode（写 stored.bin v2 zstd）；zstd-encode 隐含 zstd-decode（读 v2）。
+vane-core = { workspace = true, features = ["zstd-encode"] }

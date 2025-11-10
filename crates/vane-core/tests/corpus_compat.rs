@@ -271,17 +271,22 @@ fn corpus_segment_files_have_magic_version_headers() {
             buf.len()
         );
         assert_eq!(&buf[0..4], b"VANE", "{} magic 错误", fname);
-        assert_eq!(
-            &buf[4..8],
-            &[1, 0, 0, 0],
-            "{} format_version 应为 LE=1",
-            fname
-        );
+        // M2-08：per-file format_version。vectors.bin v2（含 dim 头）、stored.bin v1/v2
+        // （zstd-encode 时 v2）。其余段文件仍 v1。校验 version ∈ 文件预期集合。
+        let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+        let ok = match fname {
+            "vectors.bin" => ver == 1 || ver == 2,
+            "stored.bin" => ver == 1 || ver == 2,
+            _ => ver == 1,
+        };
+        assert!(ok, "{} format_version {} 不在预期集合", fname, ver);
     }
 
-    // SPEC §6.2（00-text-persistence）：stored.bin 含原文 + meta 分离存储。
+    // SPEC §6.2（00-text-persistence + M2-08）：stored.bin 含原文 + meta 分离存储。
     // 校验首条记录 text_len > 0 且 text_bytes 等于 corpus_docs()[0].text 的 UTF-8 字节。
-    // 布局：magic(4)|version(4)|count(4)|{docid(8)|text_len(4)|text_bytes|meta_json_len(4)|meta_json_bytes}...
+    // v1 布局：magic(4)|version(4)|count(4)|{docid(8)|text_len(4)|text_bytes|meta_json_len(4)|...}
+    // v2 布局：magic(4)|version(4)|raw_payload_len(4)|zstd_block_len(4)|zstd_block（zstd-encode 时）
+    //   —— v2 时 body 校验跳过（zstd 压缩，由 decode_stored roundtrip 覆盖）。
     {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 8192];
@@ -296,32 +301,127 @@ fn corpus_segment_files_have_magic_version_headers() {
             buf.extend_from_slice(&tmp[..n]);
             off += n as u64;
         }
-        // 跳过 12 字节头（magic+version+count），读首条 docid(8) + text_len(4)
-        assert!(buf.len() >= 12 + 8 + 4, "stored.bin 首条记录头不全");
-        let text_len = u32::from_le_bytes(buf[20..24].try_into().unwrap()) as usize;
-        let corpus = corpus_docs();
-        let expected_text = corpus[0].text.as_ref().unwrap().as_bytes();
-        assert!(
-            text_len > 0,
-            "首条记录 text_len 应 > 0（corpus 首文档有原文）"
+        let sver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+        if sver == 1 {
+            // v1：跳过 12 字节头（magic+version+count），读首条 docid(8) + text_len(4)
+            assert!(buf.len() >= 12 + 8 + 4, "stored.bin 首条记录头不全");
+            let text_len = u32::from_le_bytes(buf[20..24].try_into().unwrap()) as usize;
+            let corpus = corpus_docs();
+            let expected_text = corpus[0].text.as_ref().unwrap().as_bytes();
+            assert!(
+                text_len > 0,
+                "首条记录 text_len 应 > 0（corpus 首文档有原文）"
+            );
+            assert_eq!(
+                text_len,
+                expected_text.len(),
+                "首条记录 text_len 应等于 corpus_docs()[0].text 字节数"
+            );
+            let text_bytes = &buf[24..24 + text_len];
+            assert_eq!(
+                text_bytes, expected_text,
+                "首条记录 text_bytes 应等于 corpus_docs()[0].text UTF-8 字节"
+            );
+            // meta_json 紧随其后
+            let meta_off = 24 + text_len;
+            let meta_len =
+                u32::from_le_bytes(buf[meta_off..meta_off + 4].try_into().unwrap()) as usize;
+            assert!(
+                meta_len > 0,
+                "首条记录 meta_json_len 应 > 0（flush 落 {{}}）"
+            );
+        }
+        // v2 body 校验由 decode_stored roundtrip（corpus_format_compat_roundtrip）覆盖。
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =============================================================================
+// M2-08 corpus 兼容 v2 roundtrip（SPEC §13.3 + §6.2 stored v2 zstd）
+// =============================================================================
+
+/// 测试 6：corpus 兼容 roundtrip v2——zstd-encode 启用时写 v2 stored.bin（zstd 块），
+/// close → open → search 基线一致（SPEC §13.3 冻结兼容）。
+/// vectors.bin v2（含 dim 头）始终写（无 feature 门）；stored v2 仅 zstd-encode 时。
+#[cfg(feature = "zstd-encode")]
+#[test]
+fn corpus_format_compat_v2_roundtrip() {
+    let dir = unique_dir("v2-roundtrip");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let vfs = Arc::new(StdFsVfs::with_root(dir.to_str().unwrap())) as Arc<dyn Vfs>;
+
+    let baseline = {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let col = db
+            .collection("docs", build_schema(), CollectionOptions::default())
+            .unwrap();
+        col.add(&corpus_docs()).unwrap();
+        col.flush().unwrap();
+        let baseline = run_searches(&col);
+        assert!(!baseline[0].is_empty(), "hybrid 应有命中");
+        db.close().unwrap();
+        baseline
+    };
+
+    // 校验段文件确实为 v2（vectors.bin v2 + stored.bin v2）
+    {
+        let segs = vfs.list("db/segments").unwrap();
+        let seg_dir = segs.iter().find(|s| s.starts_with("seg_")).unwrap().clone();
+        let seg_path = format!("db/segments/{}", seg_dir);
+        // vectors.bin v2
+        let mut hdr = [0u8; 12];
+        let _ = vfs
+            .read_at(&format!("{}/vectors.bin", seg_path), &mut hdr, 0)
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(hdr[4..8].try_into().unwrap()),
+            2,
+            "vectors v2"
         );
         assert_eq!(
-            text_len,
-            expected_text.len(),
-            "首条记录 text_len 应等于 corpus_docs()[0].text 字节数"
+            u32::from_le_bytes(hdr[8..12].try_into().unwrap()),
+            4,
+            "vectors v2 dim=4"
         );
-        let text_bytes = &buf[24..24 + text_len];
+        // stored.bin v2
+        let mut shdr = [0u8; 8];
+        let _ = vfs
+            .read_at(&format!("{}/stored.bin", seg_path), &mut shdr, 0)
+            .unwrap();
         assert_eq!(
-            text_bytes, expected_text,
-            "首条记录 text_bytes 应等于 corpus_docs()[0].text UTF-8 字节"
+            u32::from_le_bytes(shdr[4..8].try_into().unwrap()),
+            2,
+            "stored v2"
         );
-        // meta_json 紧随其后
-        let meta_off = 24 + text_len;
-        let meta_len = u32::from_le_bytes(buf[meta_off..meta_off + 4].try_into().unwrap()) as usize;
-        assert!(
-            meta_len > 0,
-            "首条记录 meta_json_len 应 > 0（flush 落 {{}}）"
-        );
+    }
+
+    // 重新 open：v2 stored → ruzstd 解码 → search 基线一致
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        assert!(db.collections().iter().any(|c| c == "docs"));
+        let col = db
+            .collection("docs", build_schema(), CollectionOptions::default())
+            .unwrap();
+        let reopened = run_searches(&col);
+        assert_eq!(reopened.len(), baseline.len());
+        for (i, (got, want)) in reopened.iter().zip(baseline.iter()).enumerate() {
+            assert_eq!(got.len(), want.len(), "v2 模式 {} 命中数不一致", i);
+            for (j, ((gid, gscore, gtag), (wid, wscore, wtag))) in
+                got.iter().zip(want.iter()).enumerate()
+            {
+                assert_eq!(gid, wid, "v2 模式 {} 第 {} 条 id 不一致", i, j);
+                assert!(
+                    (gscore - wscore).abs() < 1e-6,
+                    "v2 模式 {} 第 {} 条 score 不一致",
+                    i,
+                    j
+                );
+                assert_eq!(gtag, wtag, "v2 模式 {} 第 {} 条 tag 不一致", i, j);
+            }
+        }
+        db.close().unwrap();
     }
 
     let _ = std::fs::remove_dir_all(&dir);

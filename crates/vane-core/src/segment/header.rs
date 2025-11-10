@@ -1,5 +1,5 @@
 use crate::segment::SegmentMeta;
-use crate::types::{Result, TokenizerId, VaneError, FORMAT_VERSION, MAGIC};
+use crate::types::{Result, TokenizerId, VaneError, HEADER_FORMAT_V1, MAGIC};
 
 // header.bin 布局（SPEC §6.3）：
 // magic(4) | format_version(4 LE) | ulid_len(1) | ulid(26) |
@@ -18,7 +18,7 @@ use crate::types::{Result, TokenizerId, VaneError, FORMAT_VERSION, MAGIC};
 pub fn encode_header(meta: &SegmentMeta) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&HEADER_FORMAT_V1.to_le_bytes());
     let ulid_bytes = meta.ulid.as_bytes();
     out.push(ulid_bytes.len() as u8);
     out.extend_from_slice(ulid_bytes);
@@ -43,10 +43,10 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         return Err(VaneError::Corrupt(format!("bad magic: {:?}", &buf[0..4])));
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-    if version != FORMAT_VERSION {
+    if version != HEADER_FORMAT_V1 {
         return Err(VaneError::Version(format!(
             "unsupported format_version: {} (expected {})",
-            version, FORMAT_VERSION
+            version, HEADER_FORMAT_V1
         )));
     }
     let mut pos = 8;

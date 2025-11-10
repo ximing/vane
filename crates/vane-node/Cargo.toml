@@ -15,7 +15,8 @@ napi-derive = "=2.16.13"
 serde_json = "1"
 # 07：启用 dict-zh feature → Db::open 自动加载 vane-dict-zh 词典；
 # jieba 分词器在 collection 创建时自动注入词典（Task 2）。
-vane-core = { workspace = true, features = ["dict-zh"] }
+# M2-08：native node 启 zstd-encode（写 stored.bin v2 zstd）；dict-zh 已含 jieba→zstd-decode。
+vane-core = { workspace = true, features = ["dict-zh", "zstd-encode"] }
 # 07：loadDict() napi 导出读 DICT_BIN（Buffer）返回给 JS 侧。
 vane-dict-zh = { path = "../vane-dict-zh" }
 
