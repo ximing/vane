@@ -32,7 +32,10 @@
 
 ## 模块完成状态总表
 
-（阶段一拆分后填充）
+| # | 模块 | 状态 | commit | 备注 |
+|---|---|---|---|---|
+| 00 | Phase Zero 安全清理 | ✅ | 6458247/af2d895 | vane-wasm 骨架 + parked minors（6 commits）；wiki nDCG fold M2-13 |
+| 07 | 冷启动懒加载 | ✅ | 1337b1a/afd690a | OnceLock 按需加载 vectors/stored；open 100k 1573ms→752ms<1s；fix round 1: open 期廉价头探测恢复损坏 loud 失败（I-1）+ v2 dim 预存（M-3）；361 测试。**M2-08 交接**：落实 VECTORS_FORMAT_V2 常量 + finalize 写 v2 头后，替换 mod.rs 字面量 `2u32` + 将 `build_v2_stub_segment` 测试切真实 finalize 产物回归 |
 
 ## 最终指标
 
