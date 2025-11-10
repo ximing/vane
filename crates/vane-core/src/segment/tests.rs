@@ -383,3 +383,233 @@ fn segment_writer_vector_none_fills_zeros() {
     // doc1 的向量 = 零向量
     assert_eq!(&r.vectors()[3..6], &[0.0, 0.0, 0.0]);
 }
+
+// =============================================================================
+// M2-07 冷启动懒加载（SPEC v1.2 §13.1）
+// =============================================================================
+
+/// 构造一段完整的段（v1 vectors.bin，M0/M1 产物格式）供懒加载测试复用。
+fn build_v1_segment(dim: u32, docs: &[(&str, &[f32])]) -> (Arc<dyn Vfs>, String) {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w =
+        SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0x77; 32]), 0).unwrap();
+    for (eid, vec) in docs {
+        w.add_doc(eid, Some(vec), "{}").unwrap();
+    }
+    let meta = w.finalize().unwrap();
+    (vfs, format!("seg/seg_{}", meta.ulid))
+}
+
+/// 手工构造 vectors.bin v2 stub（12 字节头 `magic|version=2|dim(4 LE)|payload`）。
+/// M2-08 将在 finalize 落实 v2 写入；本模块只读，故用 stub 验证读路径。
+/// 同时写 header.bin / idmap.bin / stored.bin 以满足 SegmentReader::open。
+fn build_v2_stub_segment(dim: u32, doc_count: u32) -> (Arc<dyn Vfs>, String) {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let ulid = ulid::gen_ulid();
+    let seg_dir = format!("seg/seg_{}", ulid);
+
+    // header.bin：复用 SegmentWriter 产出的 header 编码（doc_count 可控）。
+    let meta = SegmentMeta {
+        ulid: ulid.clone(),
+        doc_count,
+        docid_base: 0,
+        tokenizer_id: TokenizerId([0x88; 32]),
+        tombstones: roaring::RoaringBitmap::new(),
+    };
+    let hpath = format!("{}/header.bin", seg_dir);
+    vfs.create(&hpath).unwrap();
+    vfs.write_at(&hpath, &header::encode_header(&meta).unwrap(), 0)
+        .unwrap();
+
+    // vectors.bin v2 stub：magic(4) | version=2(4 LE) | dim(4 LE) | payload(doc_count*dim f32 LE)
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    vfs.create(&vpath).unwrap();
+    let mut vbytes = Vec::with_capacity(12 + (doc_count as usize) * (dim as usize) * 4);
+    vbytes.extend_from_slice(crate::types::MAGIC);
+    vbytes.extend_from_slice(&2u32.to_le_bytes()); // version=2（VECTORS_FORMAT_V2 由 M2-08 落实）
+    vbytes.extend_from_slice(&dim.to_le_bytes());
+    for i in 0..(doc_count as usize) * (dim as usize) {
+        vbytes.extend_from_slice(&(i as f32).to_le_bytes());
+    }
+    vfs.write_at(&vpath, &vbytes, 0).unwrap();
+
+    // idmap.bin：magic|version|count=0|（空，doc_count 个空 entry 也可，此处简化为 0）
+    let ipath = format!("{}/idmap.bin", seg_dir);
+    vfs.create(&ipath).unwrap();
+    let mut ibytes = Vec::new();
+    ibytes.extend_from_slice(crate::types::MAGIC);
+    ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+    ibytes.extend_from_slice(&0u32.to_le_bytes());
+    vfs.write_at(&ipath, &ibytes, 0).unwrap();
+
+    // stored.bin：magic|version|count=0
+    let spath = format!("{}/stored.bin", seg_dir);
+    vfs.create(&spath).unwrap();
+    let mut sbytes = Vec::new();
+    sbytes.extend_from_slice(crate::types::MAGIC);
+    sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+    sbytes.extend_from_slice(&0u32.to_le_bytes());
+    vfs.write_at(&spath, &sbytes, 0).unwrap();
+
+    (vfs, seg_dir)
+}
+
+/// 测试 1：open 不加载 vectors（v2 stub）。
+/// open 后 vectors OnceLock 未初始化（get() 返回 None）。
+#[test]
+fn m2_07_open_does_not_load_vectors() {
+    let (vfs, seg_dir) = build_v2_stub_segment(384, 10);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // open 后 vectors OnceLock 未初始化
+    assert!(
+        r.vectors.get().is_none(),
+        "vectors OnceLock should be uninit after open"
+    );
+    // dim() 读 v2 头，不触发 vectors 加载
+    assert_eq!(r.dim(), 384);
+    assert!(
+        r.vectors.get().is_none(),
+        "v2 dim() should not load vectors payload"
+    );
+}
+
+/// 测试 3+5：首次 vectors() 触发加载；多次调用幂等返回同一 &[f32]。
+#[test]
+fn m2_07_vectors_lazy_load_and_idempotent() {
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // open 后未加载
+    assert!(r.vectors.get().is_none());
+    // 首次调用触发加载
+    let v1 = r.vectors();
+    assert_eq!(v1.len(), 4);
+    assert_eq!(v1, &[1.0, 2.0, 3.0, 4.0]);
+    assert!(r.vectors.get().is_some());
+    // 幂等：多次调用返回同一指针
+    let v2 = r.vectors();
+    assert_eq!(v1.as_ptr(), v2.as_ptr());
+}
+
+/// 测试 6：vectors() 并发安全——多线程同时首次调用，只加载一次。
+#[test]
+fn m2_07_vectors_concurrent_load_once() {
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let r = Arc::new(SegmentReader::open(&vfs, &seg_dir).unwrap());
+    let r2 = r.clone();
+    std::thread::scope(|s| {
+        let h1 = s.spawn(|| r.vectors().as_ptr() as usize);
+        let h2 = s.spawn(|| r2.vectors().as_ptr() as usize);
+        let p1 = h1.join().unwrap();
+        let p2 = h2.join().unwrap();
+        assert_eq!(
+            p1, p2,
+            "concurrent first-call must return same backing slice"
+        );
+    });
+}
+
+/// 测试 7：stored 懒加载——open 后 stored OnceLock 未初始化；首次 stored_json/text 触发加载。
+#[test]
+fn m2_07_stored_lazy_load() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0; 32]), 0).unwrap();
+    w.add_doc("d0", Some(&[1.0, 0.0]), r#"{"k":"v"}"#).unwrap();
+    w.set_text("原文").unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // open 后 stored 未加载
+    assert!(r.stored.get().is_none());
+    // 首次 stored_json 触发加载
+    assert_eq!(r.stored_json(0), Some(r#"{"k":"v"}"#));
+    assert!(r.stored.get().is_some());
+    // text 同一 OnceLock，已加载
+    assert_eq!(r.text(0), Some("原文"));
+    // 幂等
+    assert_eq!(r.stored_json(0), Some(r#"{"k":"v"}"#));
+}
+
+/// 测试 8：dim 正确性 v2——vectors.bin v2 头含 dim=384，open 后 reader.dim()==384，
+/// 且不触发 vectors 加载。
+#[test]
+fn m2_07_dim_from_v2_header() {
+    let (vfs, seg_dir) = build_v2_stub_segment(128, 5);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.dim(), 128);
+    assert!(r.vectors.get().is_none(), "v2 dim must not load vectors");
+    // vectors() 加载 v2 payload（跳过 12 字节头）
+    let v = r.vectors();
+    assert_eq!(v.len(), 5 * 128);
+    assert_eq!(v[0], 0.0);
+    assert_eq!(v[1], 1.0);
+}
+
+/// 测试 9：dim 回退 v1——M0/M1 产物 vectors.bin v1（无 dim 字段），dim 从 payload 长度反推。
+#[test]
+fn m2_07_dim_v1_fallback() {
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.dim(), 4);
+    // v1 dim() 走回退路径会触发 vectors 加载（v1 无 dim 字段）
+    assert!(r.vectors.get().is_some());
+}
+
+/// 测试：dim() 先于 vectors() 调用（v1 回退路径触发 vectors 加载）。
+/// 覆盖 merge/reindex 调用顺序（dim 在 vectors 之前）。
+#[test]
+fn m2_07_dim_before_vectors_v1() {
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert!(r.vectors.get().is_none());
+    assert_eq!(r.dim(), 4); // 触发 vectors 加载
+    let v = r.vectors();
+    assert_eq!(v, &[1.0, 2.0, 3.0, 4.0]);
+}
+
+/// 测试：vectors() 先于 dim() 调用（v1 回退路径复用已加载 vectors，不重复读）。
+/// 覆盖 search 调用顺序（vectors 在 dim 之前）。
+#[test]
+fn m2_07_vectors_before_dim_v1() {
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    let v = r.vectors();
+    assert_eq!(v.len(), 4);
+    assert_eq!(r.dim(), 4); // 复用已加载 vectors，无需重复读
+}
+
+/// 测试：空段（doc_count=0）dim()==0，vectors() 为空。
+#[test]
+fn m2_07_empty_segment_dim_zero() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let w = SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0; 32]), 0).unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.dim(), 0);
+    assert!(r.vectors().is_empty());
+}
