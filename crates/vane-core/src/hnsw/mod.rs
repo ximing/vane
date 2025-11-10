@@ -20,7 +20,7 @@
 //! SPEC §6.2 + §3.3「50 万不塌红线」）。`HnswReader::search` 由 api 层传入
 //! `vectors: &[f32]`（SegmentReader 已加载的 vectors.bin 单一副本）导航。
 
-use crate::types::{Metric, Result, ScoredDoc, VaneError, FORMAT_VERSION, MAGIC};
+use crate::types::{Metric, Result, ScoredDoc, VaneError, HNSW_FORMAT_V1, MAGIC};
 use crate::vfs::Vfs;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -458,7 +458,7 @@ pub fn write_hnsw(vfs: &dyn Vfs, segment_dir: &str, graph: &HnswGraph) -> Result
     vfs.create(&path)?;
     let mut buf = Vec::with_capacity(64 + graph.nodes.len() * 32);
     buf.extend_from_slice(MAGIC);
-    buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&HNSW_FORMAT_V1.to_le_bytes());
     buf.extend_from_slice(&graph.dim.to_le_bytes());
     buf.push(metric_to_u8(graph.metric));
     buf.extend_from_slice(&graph.m.to_le_bytes());
@@ -531,10 +531,10 @@ impl HnswReader {
             return Err(VaneError::Corrupt("hnsw.bin bad magic".into()));
         }
         let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        if version != FORMAT_VERSION {
+        if version != HNSW_FORMAT_V1 {
             return Err(VaneError::Version(format!(
                 "hnsw.bin unsupported format_version: {} (expected {})",
-                version, FORMAT_VERSION
+                version, HNSW_FORMAT_V1
             )));
         }
         let dim = u32::from_le_bytes(buf[8..12].try_into().unwrap());

@@ -12,8 +12,27 @@ pub const RRF_K: u32 = 60;
 pub const PAGE_CACHE_DEFAULT_MB: u32 = 32;
 pub const PAGE_SIZE: usize = 64 * 1024;
 pub const MAGIC: &[u8; 4] = b"VANE";
+/// 全库 schema 版本（SPEC §6.2）：保留作 manifest/整体格式标识。
+/// 段文件编解码改用 per-file 常量（见下），此常量仅作 schema 级版本与
+/// inverted.bin（未 per-file 化的段文件）的版本字段。
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_SEGMENT_DOCS_SMALL: u32 = 10_000;
+
+// SPEC §6.2 per-file format_version（M2-08）：每段文件独立递增，替代单一
+// FORMAT_VERSION 作段文件编解码版本判别。保留 FORMAT_VERSION 作全库 schema 版本。
+// 段文件 magic + version(LE) 头由各自常量决定；v1/v2 双模读取保证 corpus 兼容（I-6）。
+pub const HEADER_FORMAT_V1: u32 = 1;
+pub const VECTORS_FORMAT_V1: u32 = 1;
+/// vectors.bin v2：12 字节头 `magic|version=2|dim(4 LE)|payload`（M2-07 dim 来源）。
+/// v1 头 8 字节（无 dim 字段，dim 从 payload 长度反推）。
+pub const VECTORS_FORMAT_V2: u32 = 2;
+pub const STORED_FORMAT_V1: u32 = 1;
+/// stored.bin v2：`magic|version=2|raw_payload_len(4 LE)|zstd_block_len(4 LE)|zstd_block`。
+/// raw_payload 为 v1 body（count+entries），zstd 块压缩（zstd-encode feature 写，ruzstd 解码）。
+pub const STORED_FORMAT_V2: u32 = 2;
+pub const IDMAP_FORMAT_V1: u32 = 1;
+pub const SCALARS_FORMAT_V1: u32 = 1;
+pub const HNSW_FORMAT_V1: u32 = 1;
 
 /// SPEC §10 错误码。code() 返回值与 SPEC §10 表一一对应。
 #[derive(Debug, Clone)]
@@ -372,5 +391,21 @@ mod tests {
         assert_eq!(MAGIC, b"VANE");
         assert_eq!(FORMAT_VERSION, 1);
         assert_eq!(MAX_SEGMENT_DOCS_SMALL, 10_000);
+    }
+
+    /// M2-08 测试 1：per-file format_version 常量各自独立值（SPEC §6.2）。
+    #[test]
+    fn per_file_format_versions_independent() {
+        assert_eq!(HEADER_FORMAT_V1, 1);
+        assert_eq!(VECTORS_FORMAT_V1, 1);
+        assert_eq!(VECTORS_FORMAT_V2, 2);
+        assert_eq!(STORED_FORMAT_V1, 1);
+        assert_eq!(STORED_FORMAT_V2, 2);
+        assert_eq!(IDMAP_FORMAT_V1, 1);
+        assert_eq!(SCALARS_FORMAT_V1, 1);
+        assert_eq!(HNSW_FORMAT_V1, 1);
+        // v2 常量与 v1 区分（判别位）
+        assert_ne!(VECTORS_FORMAT_V1, VECTORS_FORMAT_V2);
+        assert_ne!(STORED_FORMAT_V1, STORED_FORMAT_V2);
     }
 }

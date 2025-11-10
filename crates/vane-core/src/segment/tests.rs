@@ -263,8 +263,10 @@ fn vectors_bin_has_magic_version_header() {
         off += n as u64;
     }
     assert_eq!(&buf[0..4], b"VANE");
-    assert_eq!(&buf[4..8], &[1, 0, 0, 0]); // LE
-    assert_eq!(buf.len(), 8 + 4 * 4); // 头 + 1 文档 × 4 维
+    // M2-08：vectors.bin v2 头（version=2 + dim 字段，12 字节头）
+    assert_eq!(&buf[4..8], &[2, 0, 0, 0]); // version=2 LE
+    assert_eq!(&buf[8..12], &[4, 0, 0, 0]); // dim=4 LE
+    assert_eq!(buf.len(), 12 + 4 * 4); // v2 头(12) + 1 文档 × 4 维
 
     // reader 跳过头，vectors() 返回纯 f32
     let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
@@ -274,7 +276,7 @@ fn vectors_bin_has_magic_version_header() {
 
 #[test]
 fn vectors_bin_empty_segment_still_writes_header() {
-    // FA1：doc_count=0 时 vectors.bin 仍写 8 字节头（空段合规）。
+    // FA1 + M2-08：doc_count=0 时 vectors.bin 仍写 v2 头（12 字节，空段合规）。
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
     let schema = Schema::new(vec![(
         "v".into(),
@@ -302,10 +304,11 @@ fn vectors_bin_empty_segment_still_writes_header() {
         buf.extend_from_slice(&tmp[..n]);
         off += n as u64;
     }
-    assert_eq!(buf.len(), 8);
+    assert_eq!(buf.len(), 12); // v2 头（magic+version+dim），无 payload
     assert_eq!(&buf[0..4], b"VANE");
-    assert_eq!(&buf[4..8], &[1, 0, 0, 0]);
-    // reader 读回 doc_count=0，vectors 为空
+    assert_eq!(&buf[4..8], &[2, 0, 0, 0]); // version=2 LE
+    assert_eq!(&buf[8..12], &[2, 0, 0, 0]); // dim=2 LE
+                                            // reader 读回 doc_count=0，vectors 为空
     let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
     assert_eq!(r.doc_count(), 0);
     assert!(r.vectors().is_empty());
@@ -388,8 +391,71 @@ fn segment_writer_vector_none_fills_zeros() {
 // M2-07 冷启动懒加载（SPEC v1.2 §13.1）
 // =============================================================================
 
-/// 构造一段完整的段（v1 vectors.bin，M0/M1 产物格式）供懒加载测试复用。
+/// 构造一段 v1 vectors.bin 段（M0/M1 产物格式，8 字节头 magic|version=1|payload）。
+/// M2-08 起 finalize 写 v2，故 v1 段须手工构造（模拟旧 corpus，v1 回退路径测试用）。
+/// 同时写 header.bin / idmap.bin / stored.bin（v1）以满足 SegmentReader::open。
 fn build_v1_segment(dim: u32, docs: &[(&str, &[f32])]) -> (Arc<dyn Vfs>, String) {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let ulid = ulid::gen_ulid();
+    let seg_dir = format!("seg/seg_{}", ulid);
+    let doc_count = docs.len() as u32;
+
+    // header.bin
+    let meta = SegmentMeta {
+        ulid: ulid.clone(),
+        doc_count,
+        docid_base: 0,
+        tokenizer_id: TokenizerId([0x77; 32]),
+        tombstones: roaring::RoaringBitmap::new(),
+    };
+    let hpath = format!("{}/header.bin", seg_dir);
+    vfs.create(&hpath).unwrap();
+    vfs.write_at(&hpath, &header::encode_header(&meta).unwrap(), 0)
+        .unwrap();
+
+    // vectors.bin v1：magic(4) | version=1(4 LE) | payload(doc_count*dim f32 LE)
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    vfs.create(&vpath).unwrap();
+    let mut vbytes = Vec::with_capacity(8 + (doc_count as usize) * (dim as usize) * 4);
+    vbytes.extend_from_slice(crate::types::MAGIC);
+    vbytes.extend_from_slice(&crate::types::VECTORS_FORMAT_V1.to_le_bytes());
+    for (_, vec) in docs {
+        for f in *vec {
+            vbytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    vfs.write_at(&vpath, &vbytes, 0).unwrap();
+
+    // idmap.bin v1：magic|version=1|count|{docid|len|bytes}
+    let ipath = format!("{}/idmap.bin", seg_dir);
+    vfs.create(&ipath).unwrap();
+    let mut ibytes = Vec::new();
+    ibytes.extend_from_slice(crate::types::MAGIC);
+    ibytes.extend_from_slice(&crate::types::IDMAP_FORMAT_V1.to_le_bytes());
+    ibytes.extend_from_slice(&doc_count.to_le_bytes());
+    for (i, (eid, _)) in docs.iter().enumerate() {
+        ibytes.extend_from_slice(&(i as u64).to_le_bytes());
+        ibytes.extend_from_slice(&(eid.len() as u32).to_le_bytes());
+        ibytes.extend_from_slice(eid.as_bytes());
+    }
+    vfs.write_at(&ipath, &ibytes, 0).unwrap();
+
+    // stored.bin v1：magic|version=1|count=0（懒加载测试不读 stored 内容）
+    let spath = format!("{}/stored.bin", seg_dir);
+    vfs.create(&spath).unwrap();
+    let mut sbytes = Vec::new();
+    sbytes.extend_from_slice(crate::types::MAGIC);
+    sbytes.extend_from_slice(&crate::types::STORED_FORMAT_V1.to_le_bytes());
+    sbytes.extend_from_slice(&0u32.to_le_bytes());
+    vfs.write_at(&spath, &sbytes, 0).unwrap();
+
+    (vfs, seg_dir)
+}
+
+/// 构造一段 v2 段（M2-08 finalize 产物：vectors.bin v2 头含 dim + stored.bin v2 zstd）。
+/// M2-07 stub 已切到真实 finalize 产物（spec 要求）。dim/doc_count 由 schema+docs 决定。
+/// 向量内容为 `0.0, 1.0, 2.0, ...` 连续递增（与原 stub 一致，断言对齐）。
+fn build_v2_segment(dim: u32, doc_count: u32) -> (Arc<dyn Vfs>, String) {
     let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
     let schema = Schema::new(vec![(
         "v".into(),
@@ -400,73 +466,21 @@ fn build_v1_segment(dim: u32, docs: &[(&str, &[f32])]) -> (Arc<dyn Vfs>, String)
     )])
     .unwrap();
     let mut w =
-        SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0x77; 32]), 0).unwrap();
-    for (eid, vec) in docs {
-        w.add_doc(eid, Some(vec), "{}").unwrap();
+        SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0x88; 32]), 0).unwrap();
+    let total = (doc_count as usize) * (dim as usize);
+    let v: Vec<f32> = (0..total).map(|i| i as f32).collect();
+    for (i, chunk) in v.chunks(dim as usize).enumerate() {
+        w.add_doc(&format!("d{}", i), Some(chunk), "{}").unwrap();
     }
     let meta = w.finalize().unwrap();
     (vfs, format!("seg/seg_{}", meta.ulid))
-}
-
-/// 手工构造 vectors.bin v2 stub（12 字节头 `magic|version=2|dim(4 LE)|payload`）。
-/// M2-08 将在 finalize 落实 v2 写入；本模块只读，故用 stub 验证读路径。
-/// 同时写 header.bin / idmap.bin / stored.bin 以满足 SegmentReader::open。
-fn build_v2_stub_segment(dim: u32, doc_count: u32) -> (Arc<dyn Vfs>, String) {
-    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
-    let ulid = ulid::gen_ulid();
-    let seg_dir = format!("seg/seg_{}", ulid);
-
-    // header.bin：复用 SegmentWriter 产出的 header 编码（doc_count 可控）。
-    let meta = SegmentMeta {
-        ulid: ulid.clone(),
-        doc_count,
-        docid_base: 0,
-        tokenizer_id: TokenizerId([0x88; 32]),
-        tombstones: roaring::RoaringBitmap::new(),
-    };
-    let hpath = format!("{}/header.bin", seg_dir);
-    vfs.create(&hpath).unwrap();
-    vfs.write_at(&hpath, &header::encode_header(&meta).unwrap(), 0)
-        .unwrap();
-
-    // vectors.bin v2 stub：magic(4) | version=2(4 LE) | dim(4 LE) | payload(doc_count*dim f32 LE)
-    let vpath = format!("{}/vectors.bin", seg_dir);
-    vfs.create(&vpath).unwrap();
-    let mut vbytes = Vec::with_capacity(12 + (doc_count as usize) * (dim as usize) * 4);
-    vbytes.extend_from_slice(crate::types::MAGIC);
-    vbytes.extend_from_slice(&2u32.to_le_bytes()); // version=2（VECTORS_FORMAT_V2 由 M2-08 落实）
-    vbytes.extend_from_slice(&dim.to_le_bytes());
-    for i in 0..(doc_count as usize) * (dim as usize) {
-        vbytes.extend_from_slice(&(i as f32).to_le_bytes());
-    }
-    vfs.write_at(&vpath, &vbytes, 0).unwrap();
-
-    // idmap.bin：magic|version|count=0|（空，doc_count 个空 entry 也可，此处简化为 0）
-    let ipath = format!("{}/idmap.bin", seg_dir);
-    vfs.create(&ipath).unwrap();
-    let mut ibytes = Vec::new();
-    ibytes.extend_from_slice(crate::types::MAGIC);
-    ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
-    ibytes.extend_from_slice(&0u32.to_le_bytes());
-    vfs.write_at(&ipath, &ibytes, 0).unwrap();
-
-    // stored.bin：magic|version|count=0
-    let spath = format!("{}/stored.bin", seg_dir);
-    vfs.create(&spath).unwrap();
-    let mut sbytes = Vec::new();
-    sbytes.extend_from_slice(crate::types::MAGIC);
-    sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
-    sbytes.extend_from_slice(&0u32.to_le_bytes());
-    vfs.write_at(&spath, &sbytes, 0).unwrap();
-
-    (vfs, seg_dir)
 }
 
 /// 测试 1：open 不加载 vectors（v2 stub）。
 /// open 后 vectors OnceLock 未初始化（get() 返回 None）。
 #[test]
 fn m2_07_open_does_not_load_vectors() {
-    let (vfs, seg_dir) = build_v2_stub_segment(384, 10);
+    let (vfs, seg_dir) = build_v2_segment(384, 10);
     let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
     // open 后 vectors OnceLock 未初始化
     assert!(
@@ -550,7 +564,7 @@ fn m2_07_stored_lazy_load() {
 /// 且不触发 vectors 加载。
 #[test]
 fn m2_07_dim_from_v2_header() {
-    let (vfs, seg_dir) = build_v2_stub_segment(128, 5);
+    let (vfs, seg_dir) = build_v2_segment(128, 5);
     let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
     assert_eq!(r.dim(), 128);
     assert!(r.vectors.get().is_none(), "v2 dim must not load vectors");
@@ -692,21 +706,21 @@ fn m2_07_open_rejects_truncated_v2_header() {
     vfs.create(&vpath).unwrap();
     let mut vbytes = Vec::new();
     vbytes.extend_from_slice(crate::types::MAGIC);
-    vbytes.extend_from_slice(&2u32.to_le_bytes());
+    vbytes.extend_from_slice(&crate::types::VECTORS_FORMAT_V2.to_le_bytes());
     vfs.write_at(&vpath, &vbytes, 0).unwrap();
-    // idmap.bin + stored.bin 合法（复用 build_v2_stub_segment 的写法）
+    // idmap.bin + stored.bin 合法（v1，复用 build_v1_segment 的写法）
     let ipath = format!("{}/idmap.bin", seg_dir);
     vfs.create(&ipath).unwrap();
     let mut ibytes = Vec::new();
     ibytes.extend_from_slice(crate::types::MAGIC);
-    ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+    ibytes.extend_from_slice(&crate::types::IDMAP_FORMAT_V1.to_le_bytes());
     ibytes.extend_from_slice(&0u32.to_le_bytes());
     vfs.write_at(&ipath, &ibytes, 0).unwrap();
     let spath = format!("{}/stored.bin", seg_dir);
     vfs.create(&spath).unwrap();
     let mut sbytes = Vec::new();
     sbytes.extend_from_slice(crate::types::MAGIC);
-    sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+    sbytes.extend_from_slice(&crate::types::STORED_FORMAT_V1.to_le_bytes());
     sbytes.extend_from_slice(&0u32.to_le_bytes());
     vfs.write_at(&spath, &sbytes, 0).unwrap();
 
@@ -739,7 +753,7 @@ fn m2_07_reindex_merge_lazy_load_path() {
     assert!(r.dim.get().is_some());
 
     // v2 路径：dim() 不触发 vectors 加载（用预存 v2_header_dim）
-    let (vfs2, seg2) = build_v2_stub_segment(64, 3);
+    let (vfs2, seg2) = build_v2_segment(64, 3);
     let r2 = SegmentReader::open(&vfs2, &seg2).unwrap();
     assert!(r2.vectors.get().is_none());
     assert_eq!(r2.dim(), 64); // 用预存 v2 dim，不加载 vectors
@@ -747,4 +761,224 @@ fn m2_07_reindex_merge_lazy_load_path() {
     let v = r2.vectors();
     assert_eq!(v.len(), 3 * 64);
     assert!(r2.vectors.get().is_some());
+}
+
+// =============================================================================
+// M2-08 stored.bin zstd + per-file format_version（SPEC §6.2）
+// =============================================================================
+
+/// 测试 2+3（zstd-encode）：finalize 写 stored.bin v2（zstd 块），decode_stored 读回一致。
+/// v2 布局：magic|version=2|raw_payload_len(4 LE)|zstd_block_len(4 LE)|zstd_block。
+#[cfg(feature = "zstd-encode")]
+#[test]
+fn m2_08_stored_v2_zstd_roundtrip() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0; 32]), 0).unwrap();
+    w.add_doc("d0", Some(&[1.0, 0.0]), r#"{"k":"v0"}"#).unwrap();
+    w.set_text("原文 d0").unwrap();
+    w.add_doc("d1", Some(&[0.0, 1.0]), r#"{"k":"v1"}"#).unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+
+    // 读 stored.bin 原始字节，校验 v2 头布局
+    let buf = {
+        let mut b = Vec::new();
+        let mut tmp = [0u8; 8192];
+        let mut off = 0u64;
+        loop {
+            let n = vfs
+                .read_at(&format!("{}/stored.bin", seg_dir), &mut tmp, off)
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            b.extend_from_slice(&tmp[..n]);
+            off += n as u64;
+        }
+        b
+    };
+    assert_eq!(&buf[0..4], b"VANE");
+    let sver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    assert_eq!(sver, crate::types::STORED_FORMAT_V2, "stored v2 version=2");
+    let raw_len = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+    let zstd_len = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;
+    assert!(raw_len > 0, "raw_payload_len 应 > 0");
+    assert!(zstd_len > 0, "zstd_block_len 应 > 0（zstd 压缩非空）");
+    assert!(
+        zstd_len < raw_len,
+        "zstd 应压缩 stored（{} < {}）",
+        zstd_len,
+        raw_len
+    );
+    assert_eq!(
+        buf.len(),
+        16 + zstd_len,
+        "v2 stored 总长 = 16 头 + zstd_block"
+    );
+
+    // decode_stored 读回：HashMap 内容与写入一致
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.stored_json(0), Some(r#"{"k":"v0"}"#));
+    assert_eq!(r.text(0), Some("原文 d0"));
+    assert_eq!(r.stored_json(1), Some(r#"{"k":"v1"}"#));
+    assert_eq!(r.text(1), Some("")); // 未调 set_text → 空串
+}
+
+/// 测试 4：stored v1 读兼容（M0/M1 产物 v1 裸 JSON → 新 decode_stored 读回一致）。
+/// 用 build_v1_segment 产 v1 stored（手工构造 v1 段，模拟旧 corpus）。
+#[test]
+fn m2_08_stored_v1_read_compat() {
+    // build_v1_segment 写 v1 stored（count=0）；另手工写非空 v1 stored 验证 entries 解析。
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let ulid = ulid::gen_ulid();
+    let seg_dir = format!("seg/seg_{}", ulid);
+    let meta = SegmentMeta {
+        ulid: ulid.clone(),
+        doc_count: 1,
+        docid_base: 0,
+        tokenizer_id: TokenizerId([0; 32]),
+        tombstones: roaring::RoaringBitmap::new(),
+    };
+    let hpath = format!("{}/header.bin", seg_dir);
+    vfs.create(&hpath).unwrap();
+    vfs.write_at(&hpath, &header::encode_header(&meta).unwrap(), 0)
+        .unwrap();
+    // vectors.bin v1
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    vfs.create(&vpath).unwrap();
+    let mut vb = Vec::new();
+    vb.extend_from_slice(crate::types::MAGIC);
+    vb.extend_from_slice(&crate::types::VECTORS_FORMAT_V1.to_le_bytes());
+    vb.extend_from_slice(&1.0f32.to_le_bytes());
+    vb.extend_from_slice(&0.0f32.to_le_bytes());
+    vfs.write_at(&vpath, &vb, 0).unwrap();
+    // idmap v1
+    let ipath = format!("{}/idmap.bin", seg_dir);
+    vfs.create(&ipath).unwrap();
+    let mut ib = Vec::new();
+    ib.extend_from_slice(crate::types::MAGIC);
+    ib.extend_from_slice(&crate::types::IDMAP_FORMAT_V1.to_le_bytes());
+    ib.extend_from_slice(&1u32.to_le_bytes());
+    ib.extend_from_slice(&0u64.to_le_bytes());
+    ib.extend_from_slice(&1u32.to_le_bytes());
+    ib.push(b'd');
+    vfs.write_at(&ipath, &ib, 0).unwrap();
+    // stored.bin v1 裸 JSON：magic|version=1|count=1|{docid(8)|text_len(4)|text|meta_len(4)|meta}
+    let spath = format!("{}/stored.bin", seg_dir);
+    vfs.create(&spath).unwrap();
+    let mut sb = Vec::new();
+    sb.extend_from_slice(crate::types::MAGIC);
+    sb.extend_from_slice(&crate::types::STORED_FORMAT_V1.to_le_bytes());
+    sb.extend_from_slice(&1u32.to_le_bytes()); // count=1
+    sb.extend_from_slice(&0u64.to_le_bytes()); // docid=0
+    let text = "旧原文";
+    sb.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    sb.extend_from_slice(text.as_bytes());
+    let meta_json = r#"{"old":true}"#;
+    sb.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
+    sb.extend_from_slice(meta_json.as_bytes());
+    vfs.write_at(&spath, &sb, 0).unwrap();
+
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(r.text(0), Some("旧原文"));
+    assert_eq!(r.stored_json(0), Some(r#"{"old":true}"#));
+}
+
+/// 测试 5：stored v1 写（无 zstd-encode）——finalize 写 v1 裸 JSON，version=1。
+#[cfg(not(feature = "zstd-encode"))]
+#[test]
+fn m2_08_stored_v1_written_without_zstd_encode() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0; 32]), 0).unwrap();
+    w.add_doc("d0", Some(&[1.0, 0.0]), r#"{"k":"v"}"#).unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+    let buf = {
+        let mut b = Vec::new();
+        let mut tmp = [0u8; 8192];
+        let mut off = 0u64;
+        loop {
+            let n = vfs
+                .read_at(&format!("{}/stored.bin", seg_dir), &mut tmp, off)
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            b.extend_from_slice(&tmp[..n]);
+            off += n as u64;
+        }
+        b
+    };
+    assert_eq!(&buf[0..4], b"VANE");
+    let sver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    assert_eq!(sver, crate::types::STORED_FORMAT_V1, "无 zstd-encode 写 v1");
+    // v1 body 直接可读：count 在 offset 8
+    let count = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    assert_eq!(count, 1);
+}
+
+/// 测试 11：vectors.bin v2 头含 dim——finalize 写 v2（version=2 + dim 字段），open 读 dim 正确。
+#[test]
+fn m2_08_vectors_v2_header_contains_dim() {
+    let (vfs, seg_dir) = build_v2_segment(96, 4);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // v2 头含 dim，open 期预存，dim() 不触发 vectors 加载
+    assert_eq!(r.dim(), 96);
+    assert!(r.vectors.get().is_none(), "v2 dim 不触发 vectors 加载");
+    assert_eq!(r.vectors().len(), 4 * 96);
+}
+
+/// 测试 12：vectors.bin v1 读兼容——M0/M1 产物 v1 vectors.bin → open 读 dim 回退 payload。
+#[test]
+fn m2_08_vectors_v1_read_compat_dim_fallback() {
+    let (vfs, seg_dir) = build_v1_segment(8, &[("a", &[1.0; 8])]);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // v1 无 dim 字段，dim 从 payload_len/doc_count/4 反推
+    assert_eq!(r.dim(), 8);
+    assert_eq!(r.vectors().len(), 8);
+}
+
+/// 测试 15：zstd-encode feature 隔离——
+/// zstd-encode 启用时 stored v2；禁用时 stored v1。两配置下 vectors.bin 均 v2（无 feature 门）。
+#[cfg(feature = "zstd-encode")]
+#[test]
+fn m2_08_zstd_encode_feature_writes_v2_stored() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 2,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let mut w = SegmentWriter::new(vfs.clone(), "seg", &schema, &TokenizerId([0; 32]), 0).unwrap();
+    w.add_doc("d0", Some(&[1.0, 0.0]), "{}").unwrap();
+    let meta = w.finalize().unwrap();
+    let seg_dir = format!("seg/seg_{}", meta.ulid);
+    let mut hdr = [0u8; 8];
+    vfs.read_at(&format!("{}/stored.bin", seg_dir), &mut hdr, 0)
+        .unwrap();
+    let sver = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+    assert_eq!(
+        sver,
+        crate::types::STORED_FORMAT_V2,
+        "zstd-encode 写 v2 stored"
+    );
 }

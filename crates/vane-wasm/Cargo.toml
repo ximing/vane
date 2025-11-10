@@ -8,5 +8,7 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-vane-core = { workspace = true }
+# M2-08：wasm 启 zstd-decode（ruzstd 纯 Rust，读 v2 stored.bin）；不启 zstd-encode（zstd-sys C 库不进 wasm）。
+# 词典永不进 wasm（红线）：不启 jieba/dict-zh。
+vane-core = { workspace = true, features = ["zstd-decode"] }
 wasm-bindgen = "0.2"

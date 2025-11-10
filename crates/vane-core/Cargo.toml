@@ -17,13 +17,26 @@ serde_json = { workspace = true }
 unicode-segmentation = { workspace = true }
 rust-stemmers = { workspace = true }
 ulid = { workspace = true }
+# ruzstd：纯 Rust zstd 解码器（读期）。stored.bin v2 + jieba dict.bin 共用。
+# wasm32 也可启用（纯 Rust，无 C 依赖）——vane-wasm 启 zstd-decode 读 v2 stored。
 ruzstd = { version = "0.5", optional = true }
+# zstd：C 库编码器（写期，zstd-encode feature）。仅 native/node 启用；
+# wasm32 不启（zstd-sys C 库不进 wasm，红线）。
+zstd = { version = "0.13", optional = true }
 # 词典数据包（SPEC §12.3）：dict-zh feature 启用时 Db::open 自动加载预编译 dict.bin。
 # 独立 crate，wasm32 构建永不启用（词典永不进 wasm，红线）。
 vane-dict-zh = { path = "../vane-dict-zh", optional = true }
 
 [features]
-jieba = ["ruzstd"]
+# zstd-decode：启用 ruzstd 读期解码（stored.bin v2 + jieba dict.bin）。
+# wasm32 可启用（纯 Rust）。vane-wasm 启此 feature 读 v2 stored。
+zstd-decode = ["dep:ruzstd"]
+# zstd-encode：启用 zstd C 库写期编码（stored.bin v2 zstd 块压缩）。
+# 仅 native/node 启用；wasm32 不启（zstd-sys C 库不进 wasm）。
+# 隐含 zstd-decode：写 v2 的配置也必须能读 v2（roundtrip）。
+zstd-encode = ["dep:zstd", "zstd-decode"]
+# jieba：复用 ruzstd 解码 dict.bin（原 jieba=["ruzstd"] 解耦为 zstd-decode）。
+jieba = ["zstd-decode"]
 # dict-zh：启用 jieba + 捆绑 vane-dict-zh 数据包，Db::open 自动加载词典。
 # vane-node 启用此 feature；vane-core 默认不启用（wasm32 check 不涉）。
 dict-zh = ["jieba", "dep:vane-dict-zh"]
