@@ -613,3 +613,138 @@ fn m2_07_empty_segment_dim_zero() {
     assert_eq!(r.dim(), 0);
     assert!(r.vectors().is_empty());
 }
+
+// =============================================================================
+// M2-07 fix round 1（I-1 + M-3）：open 期廉价头校验恢复 loud 失败
+// =============================================================================
+
+/// I-1：corrupt vectors.bin magic（header.bin 合法）→ open 返 Err（非静默空）。
+#[test]
+fn m2_07_open_rejects_vectors_bin_bad_magic() {
+    use crate::types::VaneError;
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    // corrupt vectors.bin magic（保留 header.bin / stored.bin 合法）
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    let mut hdr = [0u8; 8];
+    let _ = vfs.read_at(&vpath, &mut hdr, 0).unwrap();
+    hdr[0] = b'X';
+    vfs.write_at(&vpath, &hdr, 0).unwrap();
+    let r = SegmentReader::open(&vfs, &seg_dir);
+    assert!(
+        matches!(r, Err(VaneError::Corrupt(ref m)) if m.contains("vectors.bin bad magic")),
+        "open should loudly reject vectors.bin bad magic, got err variant"
+    );
+}
+
+/// I-1：corrupt stored.bin magic → open 返 Err。
+#[test]
+fn m2_07_open_rejects_stored_bin_bad_magic() {
+    use crate::types::VaneError;
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let spath = format!("{}/stored.bin", seg_dir);
+    let mut hdr = [0u8; 8];
+    let _ = vfs.read_at(&spath, &mut hdr, 0).unwrap();
+    hdr[0] = b'X';
+    vfs.write_at(&spath, &hdr, 0).unwrap();
+    let r = SegmentReader::open(&vfs, &seg_dir);
+    assert!(
+        matches!(r, Err(VaneError::Corrupt(ref m)) if m.contains("stored.bin bad magic")),
+        "open should loudly reject stored.bin bad magic, got err variant"
+    );
+}
+
+/// I-1：vectors.bin version=99（不支持）→ open 返 Err(Version)。
+#[test]
+fn m2_07_open_rejects_vectors_bin_bad_version() {
+    use crate::types::VaneError;
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    // 改 version 字段（offset 4..8）为 99
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    vfs.write_at(&vpath, &99u32.to_le_bytes(), 4).unwrap();
+    let r = SegmentReader::open(&vfs, &seg_dir);
+    assert!(
+        matches!(r, Err(VaneError::Version(_))),
+        "open should loudly reject vectors.bin bad version, got err variant"
+    );
+}
+
+/// I-1：v2 头截断（<12 字节）→ open 返 Err(Corrupt)。
+#[test]
+fn m2_07_open_rejects_truncated_v2_header() {
+    use crate::types::VaneError;
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let ulid = ulid::gen_ulid();
+    let seg_dir = format!("seg/seg_{}", ulid);
+    // header.bin：doc_count=1
+    let meta = SegmentMeta {
+        ulid: ulid.clone(),
+        doc_count: 1,
+        docid_base: 0,
+        tokenizer_id: TokenizerId([0x88; 32]),
+        tombstones: roaring::RoaringBitmap::new(),
+    };
+    let hpath = format!("{}/header.bin", seg_dir);
+    vfs.create(&hpath).unwrap();
+    vfs.write_at(&hpath, &header::encode_header(&meta).unwrap(), 0)
+        .unwrap();
+    // vectors.bin：v2 头但只写 8 字节（magic+version=2，缺 dim 字段）
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    vfs.create(&vpath).unwrap();
+    let mut vbytes = Vec::new();
+    vbytes.extend_from_slice(crate::types::MAGIC);
+    vbytes.extend_from_slice(&2u32.to_le_bytes());
+    vfs.write_at(&vpath, &vbytes, 0).unwrap();
+    // idmap.bin + stored.bin 合法（复用 build_v2_stub_segment 的写法）
+    let ipath = format!("{}/idmap.bin", seg_dir);
+    vfs.create(&ipath).unwrap();
+    let mut ibytes = Vec::new();
+    ibytes.extend_from_slice(crate::types::MAGIC);
+    ibytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+    ibytes.extend_from_slice(&0u32.to_le_bytes());
+    vfs.write_at(&ipath, &ibytes, 0).unwrap();
+    let spath = format!("{}/stored.bin", seg_dir);
+    vfs.create(&spath).unwrap();
+    let mut sbytes = Vec::new();
+    sbytes.extend_from_slice(crate::types::MAGIC);
+    sbytes.extend_from_slice(&crate::types::FORMAT_VERSION.to_le_bytes());
+    sbytes.extend_from_slice(&0u32.to_le_bytes());
+    vfs.write_at(&spath, &sbytes, 0).unwrap();
+
+    let r = SegmentReader::open(&vfs, &seg_dir);
+    assert!(
+        matches!(r, Err(VaneError::Corrupt(ref m)) if m.contains("v2 header truncated")),
+        "open should reject truncated v2 header, got err variant"
+    );
+}
+
+/// 评审测试缺口：reindex/merge 路径首次访问前 vectors.get().is_none()、后 .is_some()。
+/// 用 merge 路径验证（merge_ctx 读 reader.vectors()）——这里直接验证 SegmentReader
+/// 在 reindex/merge 典型调用顺序（dim 先于 vectors）下的懒加载行为。
+#[test]
+fn m2_07_reindex_merge_lazy_load_path() {
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    let r = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // open 后未加载（reindex/merge 在 open 后、读 vectors 前可能做其他事）
+    assert!(
+        r.vectors.get().is_none(),
+        "vectors should be uninit after open"
+    );
+    assert!(r.dim.get().is_none(), "dim should be uninit after open");
+    // reindex/merge 调用顺序：dim() 先于 vectors()
+    assert_eq!(r.dim(), 4);
+    // v1 dim() 触发 vectors 加载（v1 无 dim 字段，必须从 payload 反推）
+    assert!(r.vectors.get().is_some(), "v1 dim() should load vectors");
+    assert_eq!(r.vectors(), &[1.0, 2.0, 3.0, 4.0]);
+    // dim 已缓存
+    assert!(r.dim.get().is_some());
+
+    // v2 路径：dim() 不触发 vectors 加载（用预存 v2_header_dim）
+    let (vfs2, seg2) = build_v2_stub_segment(64, 3);
+    let r2 = SegmentReader::open(&vfs2, &seg2).unwrap();
+    assert!(r2.vectors.get().is_none());
+    assert_eq!(r2.dim(), 64); // 用预存 v2 dim，不加载 vectors
+    assert!(r2.vectors.get().is_none(), "v2 dim() must not load vectors");
+    let v = r2.vectors();
+    assert_eq!(v.len(), 3 * 64);
+    assert!(r2.vectors.get().is_some());
+}

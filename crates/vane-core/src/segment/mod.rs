@@ -327,8 +327,12 @@ pub struct SegmentReader {
     // v2 头含 dim 字段（offset 8..12，M2-08 写入）；v1 回退 `(payload_len)/doc_count/4`。
     // v1 回退时复用已加载的 vectors（若 vectors() 先于 dim() 调用），否则触发 vectors 加载。
     dim: OnceLock<u32>,
+    // M2-07 fix round 1（I-1）：open 期廉价头探测预存的 v2 dim（Some 仅当 vectors.bin v2 头）。
+    // v1（None）时 dim 走 OnceLock 闭包从 payload 反推。open 期已校验 magic+version，
+    // dim() 直接信任预存值，消除访问期 read_at 静默吞错（M-3）。
+    v2_header_dim: Option<u32>,
     id_map: std::collections::HashMap<u64, String>,
-    // M2-07：stored 首次访问按需加载（OnceLock）。open 不读 stored.bin。
+    // M2-07：stored 首次访问按需加载（OnceLock）。open 不读 stored.bin payload（仅头探测）。
     // key 为段内局部 docid（0 起，与 id_map 同一 key 空间）。
     stored: OnceLock<std::collections::HashMap<u64, StoredReadEntry>>,
 }
@@ -350,9 +354,12 @@ fn read_all(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
 }
 
 impl SegmentReader {
-    /// M2-07 冷启动懒加载：open 仅读 header + id_map（SPEC v1.2 §13.1 元数据 open<1s）。
-    /// vectors/stored 改 OnceLock 首次访问按需加载；dim 首次访问按需计算（v2 头含 dim；v1 回退）。
-    /// 不读 vectors.bin / stored.bin payload，元数据 open 耗时与 doc_count 解耦。
+    /// M2-07 冷启动懒加载：open 仅读 header + id_map + 廉价头探测（SPEC v1.2 §13.1 元数据 open<1s）。
+    /// vectors/stored payload 改 OnceLock 首次访问按需加载；dim 首次访问按需计算（v2 头含 dim；v1 回退）。
+    ///
+    /// fix round 1（I-1）：open 期对 vectors.bin / stored.bin 做**廉价头探测**（各读 ≤12 字节），
+    /// 恢复 M0/M1 对 bad magic / unsupported version 的 loud `Err` 失败（payload 仍懒加载，不读）。
+    /// 避免 vectors.bin-only 损坏被 `unwrap_or_default()` 静默吞成空结果。
     pub fn open(vfs: &Arc<dyn Vfs>, segment_dir: &str) -> Result<Self> {
         // 读 header
         let hpath = format!("{}/header.bin", segment_dir);
@@ -362,13 +369,68 @@ impl SegmentReader {
         // 读 id_map（小文件，open 时读）
         let id_map = Self::load_id_map(vfs.as_ref(), segment_dir)?;
 
-        // M2-07：vectors / stored / dim 延迟到首次访问（OnceLock）。
+        // fix round 1（I-1）：vectors.bin 头探测（doc_count>0 时）。
+        // 只读前 12 字节：v1 头 8 字节（magic+version），v2 头 12 字节（magic+version+dim）。
+        // 校验 magic + version ∈ {1, 2}，不匹配 loud `Err`（同 M0/M1 旧 open 语义）。
+        // payload（154MB）不在 open 读，仍 lazy。doc_count==0 时 vectors.bin 仅 8 字节空段头，跳过探测。
+        let v2_header_dim = if meta.doc_count > 0 {
+            let vpath = format!("{}/vectors.bin", segment_dir);
+            let mut hdr = [0u8; 12];
+            let n = vfs.read_at(&vpath, &mut hdr, 0)?;
+            if n < 8 || &hdr[0..4] != crate::types::MAGIC {
+                return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
+            }
+            let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+            match version {
+                v if v == crate::types::FORMAT_VERSION => None, // v1：dim 懒加载从 payload 反推
+                2 => {
+                    // v2：dim 字段在 offset 8..12（M2-08 写入，本模块读）。
+                    if n < 12 {
+                        return Err(VaneError::Corrupt(
+                            "vectors.bin v2 header truncated (need 12 bytes)".into(),
+                        ));
+                    }
+                    Some(u32::from_le_bytes(hdr[8..12].try_into().unwrap()))
+                }
+                _ => {
+                    return Err(VaneError::Version(format!(
+                        "vectors.bin unsupported format_version: {} (expected {} or 2)",
+                        version,
+                        crate::types::FORMAT_VERSION
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        // fix round 1（I-1）：stored.bin 头探测。只读前 8 字节（magic+version）。
+        // M2-07 阶段 stored 仍 v1（version==1）；M2-08 扩 v2 时此校验扩展。
+        {
+            let spath = format!("{}/stored.bin", segment_dir);
+            let mut shdr = [0u8; 8];
+            let n = vfs.read_at(&spath, &mut shdr, 0)?;
+            if n < 8 || &shdr[0..4] != crate::types::MAGIC {
+                return Err(VaneError::Corrupt("stored.bin bad magic".into()));
+            }
+            let sver = u32::from_le_bytes(shdr[4..8].try_into().unwrap());
+            if sver != crate::types::FORMAT_VERSION {
+                return Err(VaneError::Version(format!(
+                    "stored.bin unsupported format_version: {} (expected {})",
+                    sver,
+                    crate::types::FORMAT_VERSION
+                )));
+            }
+        }
+
+        // M2-07：vectors / stored / dim 延迟到首次访问（OnceLock）。头已校验，payload 仍 lazy。
         Ok(Self {
             meta,
             vfs: vfs.clone(),
             segment_dir: segment_dir.to_string(),
             vectors: OnceLock::new(),
             dim: OnceLock::new(),
+            v2_header_dim,
             id_map,
             stored: OnceLock::new(),
         })
@@ -437,26 +499,20 @@ impl SegmentReader {
             .as_slice()
     }
     /// 返回向量维度。M2-07：首次调用按需计算（OnceLock）。
-    /// - v2 头（version==2）：读 vectors.bin 前 12 字节 dim 字段（offset 8..12），不触发 vectors 加载。
+    /// - v2 头（version==2）：用 open 期预存的 `v2_header_dim`（已校验），不触发 vectors 加载、不再 read_at。
     /// - v1 回退（version==1）：dim = `vectors.len() / doc_count`；若 vectors 已加载则复用，
     ///   否则触发 vectors 加载（v1 无 dim 字段，必须从 payload 长度反推）。
     ///
+    /// fix round 1（M-3）：open 期已校验 vectors.bin 头，dim() 信任预存值，消除访问期 read_at 静默吞错。
     /// doc_count==0 时返回 0。签名不变（§4 IDL 冻结）。
     pub fn dim(&self) -> u32 {
         *self.dim.get_or_init(|| {
             if self.meta.doc_count == 0 {
                 return 0;
             }
-            // 先尝试 v2 头（只读 12 字节，不加载 vectors payload）。
-            let vpath = format!("{}/vectors.bin", self.segment_dir);
-            let mut hdr = [0u8; 12];
-            let n = self.vfs.read_at(&vpath, &mut hdr, 0).unwrap_or(0);
-            if n >= 12 && &hdr[0..4] == crate::types::MAGIC {
-                let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
-                if version == 2 {
-                    // v2：dim 字段在 offset 8..12（M2-08 写入，本模块读）。
-                    return u32::from_le_bytes(hdr[8..12].try_into().unwrap());
-                }
+            // v2：open 期预存 dim（已校验 magic+version），直接用，不读 vectors payload。
+            if let Some(d) = self.v2_header_dim {
+                return d;
             }
             // v1 回退：dim = vectors.len() / doc_count。
             // 若 vectors 已加载（vectors() 先于 dim() 调用），复用；否则触发加载。
@@ -469,6 +525,8 @@ impl SegmentReader {
                     let _ = self.vectors.set(v);
                     dim
                 }
+                // open 期已校验头，此处 Err 仅在段文件被外部篡改时发生（违反 I-1 不可变）；
+                // 签名非 Result 无法上抛，返回 0 作兜底（消费方按空段处理）。
                 Err(_) => 0,
             }
         })
