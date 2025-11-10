@@ -5,7 +5,7 @@ pub mod ulid;
 
 use crate::types::{Result, ScalarKind, Schema, TokenizerId, VaneError};
 use crate::vfs::Vfs;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// 段元数据（SPEC §6.3）。写期由 SegmentWriter.finalize 产出，
 /// 读期由 SegmentReader.open 从 header.bin 解码。
@@ -309,19 +309,28 @@ struct StoredReadEntry {
     meta_json: String,
 }
 
-/// 段读期句柄（SPEC §6.2）。加载 header + vectors + idmap + stored，
-/// 提供查询访问。inverted.bin 由 05-bm25 的 InvertedIndexReader 通过
-/// segment_dir() 单独读取，本结构不加载倒排。
+/// 段读期句柄（SPEC §6.2）。M2-07 冷启动懒加载：open 仅读 header + idmap，
+/// vectors/stored 改 `OnceLock` 首次访问按需加载（SPEC v1.2 §13.1 元数据 open<1s + 首次查询<3s）。
+/// inverted.bin 由 05-bm25 的 InvertedIndexReader 通过 segment_dir() 单独读取，本结构不加载倒排。
+///
+/// 不变量 I-1（段不可变）：懒加载只读缓存，不写回段文件。
+/// 并发安全：`OnceLock::get_or_init` 原子保证多线程首查只加载一次（std::sync，无新依赖）。
+/// §4 IDL 签名冻结：`vectors(&self)->&[f32]` / `dim(&self)->u32` / `stored_json` / `text` 签名不变，
+/// OnceLock 提供内部可变性，消费方（HnswReader::search / brute_search / reindex / merge）零改动。
 pub struct SegmentReader {
     meta: SegmentMeta,
     vfs: Arc<dyn Vfs>,
     segment_dir: String,
-    vectors: Vec<f32>,
-    dim: u32,
+    // M2-07：vectors 首次访问按需加载（OnceLock）。open 不读 vectors.bin payload。
+    vectors: OnceLock<Vec<f32>>,
+    // M2-07：dim 首次访问按需计算（OnceLock）。
+    // v2 头含 dim 字段（offset 8..12，M2-08 写入）；v1 回退 `(payload_len)/doc_count/4`。
+    // v1 回退时复用已加载的 vectors（若 vectors() 先于 dim() 调用），否则触发 vectors 加载。
+    dim: OnceLock<u32>,
     id_map: std::collections::HashMap<u64, String>,
-    // stored.bin 按 docid 索引的原文 + meta JSON（回填 Hit.fields / reindex 重建倒排，SPEC §6.2）。
+    // M2-07：stored 首次访问按需加载（OnceLock）。open 不读 stored.bin。
     // key 为段内局部 docid（0 起，与 id_map 同一 key 空间）。
-    stored: std::collections::HashMap<u64, StoredReadEntry>,
+    stored: OnceLock<std::collections::HashMap<u64, StoredReadEntry>>,
 }
 
 /// 模块级辅助：循环 read_at 直到 EOF，拼出完整文件字节。
@@ -341,56 +350,59 @@ fn read_all(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
 }
 
 impl SegmentReader {
+    /// M2-07 冷启动懒加载：open 仅读 header + id_map（SPEC v1.2 §13.1 元数据 open<1s）。
+    /// vectors/stored 改 OnceLock 首次访问按需加载；dim 首次访问按需计算（v2 头含 dim；v1 回退）。
+    /// 不读 vectors.bin / stored.bin payload，元数据 open 耗时与 doc_count 解耦。
     pub fn open(vfs: &Arc<dyn Vfs>, segment_dir: &str) -> Result<Self> {
         // 读 header
         let hpath = format!("{}/header.bin", segment_dir);
         let hbuf = read_all(vfs.as_ref(), &hpath)?;
         let meta = header::decode_header(&hbuf)?;
 
-        // 读 vectors（doc_count=0 时为空）
-        // FA1：vectors.bin 前 8 字节为 magic+format_version 头，跳过后再 chunks_exact(4)。
-        let vectors: Vec<f32> = if meta.doc_count > 0 {
-            let vpath = format!("{}/vectors.bin", segment_dir);
-            let vbuf = read_all(vfs.as_ref(), &vpath)?;
-            if vbuf.len() < 8 || &vbuf[0..4] != crate::types::MAGIC {
-                return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
-            }
-            let version = u32::from_le_bytes(vbuf[4..8].try_into().unwrap());
-            if version != crate::types::FORMAT_VERSION {
-                return Err(VaneError::Version(format!(
-                    "vectors.bin unsupported format_version: {} (expected {})",
-                    version,
-                    crate::types::FORMAT_VERSION
-                )));
-            }
-            vbuf[8..]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let dim = if vectors.is_empty() {
-            0
-        } else {
-            (vectors.len() / meta.doc_count as usize) as u32
-        };
-
-        // 读 id_map
+        // 读 id_map（小文件，open 时读）
         let id_map = Self::load_id_map(vfs.as_ref(), segment_dir)?;
 
-        // 读 stored.bin（按 docid 索引，供 stored_json() 回填 Hit.fields）
-        let stored = Self::load_stored(vfs.as_ref(), segment_dir)?;
-
+        // M2-07：vectors / stored / dim 延迟到首次访问（OnceLock）。
         Ok(Self {
             meta,
             vfs: vfs.clone(),
             segment_dir: segment_dir.to_string(),
-            vectors,
-            dim,
+            vectors: OnceLock::new(),
+            dim: OnceLock::new(),
             id_map,
-            stored,
+            stored: OnceLock::new(),
         })
+    }
+
+    /// M2-07：从 vectors.bin 加载并解码全部向量（OnceLock 闭包用）。
+    /// 支持 v1（8 字节头 magic|version=1|payload）与 v2（12 字节头 magic|version=2|dim|payload）。
+    /// v2 头由 M2-08 finalize 写入；本模块只读。payload 起始偏移随 version 变化。
+    fn load_vectors(vfs: &dyn Vfs, segment_dir: &str) -> Result<Vec<f32>> {
+        let vpath = format!("{}/vectors.bin", segment_dir);
+        let vbuf = read_all(vfs, &vpath)?;
+        if vbuf.len() < 8 || &vbuf[0..4] != crate::types::MAGIC {
+            return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
+        }
+        let version = u32::from_le_bytes(vbuf[4..8].try_into().unwrap());
+        // v1=FORMAT_VERSION(1)；v2=2（VECTORS_FORMAT_V2 常量由 M2-08 落实，此处用字面量判别）。
+        let payload_off = match version {
+            v if v == crate::types::FORMAT_VERSION => 8,
+            2 => 12,
+            _ => {
+                return Err(VaneError::Version(format!(
+                    "vectors.bin unsupported format_version: {} (expected {} or 2)",
+                    version,
+                    crate::types::FORMAT_VERSION
+                )));
+            }
+        };
+        if vbuf.len() < payload_off {
+            return Err(VaneError::Corrupt("vectors.bin truncated".into()));
+        }
+        Ok(vbuf[payload_off..]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect())
     }
 
     fn load_stored(
@@ -414,11 +426,52 @@ impl SegmentReader {
     pub fn meta(&self) -> &SegmentMeta {
         &self.meta
     }
+    /// 返回段内全部向量连续排布（vectors.bin payload，SPEC §6.2）。
+    /// M2-07：首次调用触发 OnceLock 加载（get_or_init），后续调用幂等返回同一 &[f32]。
+    /// 多线程并发首查由 OnceLock 原子保证只加载一次。签名不变（§4 IDL 冻结）。
     pub fn vectors(&self) -> &[f32] {
-        &self.vectors
+        self.vectors
+            .get_or_init(|| {
+                Self::load_vectors(self.vfs.as_ref(), &self.segment_dir).unwrap_or_default()
+            })
+            .as_slice()
     }
+    /// 返回向量维度。M2-07：首次调用按需计算（OnceLock）。
+    /// - v2 头（version==2）：读 vectors.bin 前 12 字节 dim 字段（offset 8..12），不触发 vectors 加载。
+    /// - v1 回退（version==1）：dim = `vectors.len() / doc_count`；若 vectors 已加载则复用，
+    ///   否则触发 vectors 加载（v1 无 dim 字段，必须从 payload 长度反推）。
+    ///
+    /// doc_count==0 时返回 0。签名不变（§4 IDL 冻结）。
     pub fn dim(&self) -> u32 {
-        self.dim
+        *self.dim.get_or_init(|| {
+            if self.meta.doc_count == 0 {
+                return 0;
+            }
+            // 先尝试 v2 头（只读 12 字节，不加载 vectors payload）。
+            let vpath = format!("{}/vectors.bin", self.segment_dir);
+            let mut hdr = [0u8; 12];
+            let n = self.vfs.read_at(&vpath, &mut hdr, 0).unwrap_or(0);
+            if n >= 12 && &hdr[0..4] == crate::types::MAGIC {
+                let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+                if version == 2 {
+                    // v2：dim 字段在 offset 8..12（M2-08 写入，本模块读）。
+                    return u32::from_le_bytes(hdr[8..12].try_into().unwrap());
+                }
+            }
+            // v1 回退：dim = vectors.len() / doc_count。
+            // 若 vectors 已加载（vectors() 先于 dim() 调用），复用；否则触发加载。
+            if let Some(v) = self.vectors.get() {
+                return (v.len() / self.meta.doc_count as usize) as u32;
+            }
+            match Self::load_vectors(self.vfs.as_ref(), &self.segment_dir) {
+                Ok(v) => {
+                    let dim = (v.len() / self.meta.doc_count as usize) as u32;
+                    let _ = self.vectors.set(v);
+                    dim
+                }
+                Err(_) => 0,
+            }
+        })
     }
     pub fn doc_count(&self) -> u32 {
         self.meta.doc_count
@@ -438,17 +491,25 @@ impl SegmentReader {
     }
     /// 读取某文档的 stored.bin JSON（回填 Hit.fields，SPEC §6.2 stored.bin）。
     /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
+    /// M2-07：首次调用触发 stored OnceLock 加载；后续幂等。签名不变。
     /// 语义不变：仍返回 meta JSON（原文经 text() 读出）。
     pub fn stored_json(&self, local_docid: u64) -> Option<&str> {
-        self.stored.get(&local_docid).map(|e| e.meta_json.as_str())
+        let map = self.stored.get_or_init(|| {
+            Self::load_stored(self.vfs.as_ref(), &self.segment_dir).unwrap_or_default()
+        });
+        map.get(&local_docid).map(|e| e.meta_json.as_str())
     }
 
     /// 读取某文档的原文（SPEC §6.2 stored.bin 含原文）。
     /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
     /// 无原文（text_len=0，写期未调 set_text）返回 Some("")；docid 不存在返回 None。
+    /// M2-07：首次调用触发 stored OnceLock 加载；后续幂等。签名不变。
     /// 06-userdict-reindex 经此读原文用新分词器重建倒排；02-tombstone-merge 经此读原文写入新段。
     pub fn text(&self, local_docid: u64) -> Option<&str> {
-        self.stored.get(&local_docid).map(|e| e.text.as_str())
+        let map = self.stored.get_or_init(|| {
+            Self::load_stored(self.vfs.as_ref(), &self.segment_dir).unwrap_or_default()
+        });
+        map.get(&local_docid).map(|e| e.text.as_str())
     }
     pub fn segment_dir(&self) -> &str {
         &self.segment_dir

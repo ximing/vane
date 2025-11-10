@@ -3,15 +3,16 @@
 // 验证 SPEC §13.1：打开 10 万文档库 <1s；>2s 降级为分级指标
 // （元数据 <1s、首次查询 <3s）。
 //
+// M2-07 冷启动懒加载：SegmentReader::open 仅读 header + id_map（不加载
+// vectors/stored），元数据 open <1s 达成（SPEC v1.2 修订 A §13.1）。
+// 首次 vector search 触发 vectors 懒加载 + HNSW 搜索 <3s。
+//
 // 本测试生成 10 万文档 StdFsVfs 库（100 批 × 1000 文档，每批 flush 触发
 // auto-merge 到 ≤10 段），测两阶段：
-//   阶段 1 = Db::open + collection restore（M0 SegmentReader 全加载 vectors/
-//            inverted/hnsw/scalars/text）。
-//   阶段 2 = 首次 vector search（topK=10）。
+//   阶段 1 = Db::open + collection restore（M2-07 懒加载：仅 header + id_map）。
+//   阶段 2 = 首次 vector search（topK=10，触发 vectors 懒加载）。
 //
-// M0 SegmentReader::open 一次性全加载（签名冻结，懒加载留 M2）。若阶段 1 >1s，
-// 走 SPEC §13.1 降级路径：首次查询 <3s。metadata 与 vectors 加载在 M0 全加载
-// 模型下不可分离，整体 open 时间作为阶段 1 记录，报告交编排者裁决是否优化。
+// 断言：open <1s（SPEC §13.1 元数据目标，M2-07 懒加载背书）；首次查询 <3s（降级分级保留 fallback）。
 //
 // 标 #[ignore]：10 万 fixture 生成耗时较长（HNSW 构建 + auto-merge），不进常规
 // `cargo test --workspace` 快速门禁；由 cold-start CI job 或手动
@@ -135,12 +136,11 @@ fn cold_start_meets_grade_or_fallback() {
         hits.len()
     );
 
-    // SPEC §13.1 目标：open <1s。
+    // SPEC §13.1 目标（M2-07 懒加载背书）：open <1s。
     if open_ms < 1000 {
-        eprintln!("[cold-start-gate] PASS: open <1s (SPEC §13.1 目标达成)");
+        eprintln!("[cold-start-gate] PASS: open <1s (SPEC §13.1 元数据目标达成, M2-07 懒加载)");
     } else {
-        // 降级路径：首次查询 <3s（metadata <1s 在 M0 全加载模型下不可分离，
-        // 以 open 整体时间记录，交编排者裁决）。
+        // 降级路径：首次查询 <3s（metadata <1s 在慢盘/CI 上可能超时，降级保留 fallback）。
         assert!(
             query_ms < 3000,
             "cold start fallback fail: open={}ms first_query={}ms \

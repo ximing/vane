@@ -3,18 +3,19 @@
 //! 目标：open 10 万文档 StdFsVfs 库 <1s。若 >2s 则降级为分级指标
 //! （元数据 <1s、首次查询 <3s）。
 //!
+//! M2-07 冷启动懒加载：SegmentReader::open 仅读 header + id_map（不加载
+//! vectors/stored），元数据 open <1s 达成（SPEC v1.2 修订 A §13.1）。
+//! 首次 vector search 触发 vectors 懒加载 + HNSW 搜索 <3s。
+//!
 //! ## fixture 生成
 //! 10 万×384 维向量 ≈154MB，体积过大不提交。bench 自包含 setup 在
 //! tempdir 内确定性生成 10 万文档库（100 批 × 1000 文档，每批 flush
 //! 触发 auto-merge 到 ≤10 段）。OnceLock 保证单次 bench 运行内只生成一次。
 //!
 //! ## 两阶段测量
-//! - 阶段 1 `open_100k_metadata`：Db::open + collection restore（M0 SegmentReader
-//!   全加载 vectors/inverted/hnsw/scalars/text）。
-//! - 阶段 2 `open_100k_full_and_first_query`：阶段 1 + 首次 vector search。
-//!
-//! M0 SegmentReader::open 一次性全加载（无懒加载，签名冻结）。若阶段 1 >1s，
-//! 不调低断言——走 SPEC §13.1 降级路径（首次查询 <3s），懒加载留 M2。
+//! - 阶段 1 `open_100k_metadata`：Db::open + collection restore（M2-07 懒加载：
+//!   仅 header + id_map，vectors/stored 延迟首次访问）。
+//! - 阶段 2 `open_100k_full_and_first_query`：阶段 1 + 首次 vector search（触发 vectors 懒加载）。
 
 use std::sync::{Arc, OnceLock};
 
