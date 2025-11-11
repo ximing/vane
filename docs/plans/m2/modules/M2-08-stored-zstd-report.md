@@ -87,3 +87,31 @@
 - **zstd-encode 隐含 zstd-decode**：spec Cargo.toml 未显式声明此依赖关系，本模块加（`zstd-encode = ["dep:zstd", "zstd-decode"]`）以保证写 v2 的配置也能读 v2（roundtrip 自洽）。若编排者认为应拆分（写不隐含读），可调整——但 vane-ffi/vane-node 写 v2 后必须读 v2，实务上必须隐含。
 - **inverted.bin 未 per-file 化**：spec 仅列 6 个段文件（header/vectors/stored/idmap/scalars/hnsw），inverted.bin 保留 `FORMAT_VERSION`。若后续需 per-file 化可补 `INVERTED_FORMAT_V1`。
 - **wasm 体积门禁**：当前 11.4KB 远低于 800KB，但因 vane-wasm 占位未引用 decode 路径。M2 浏览器模块接入后须重测。
+
+## 7. fix round 1（I-1：stored zstd 压缩失败回退 v1 保可读）
+
+### 问题
+评审 I-1：`encode_stored`（mod.rs:636）原实现 `zstd::encode_all(...).unwrap_or_else(|_| raw_payload.to_vec())`——zstd 压缩失败时把未压缩 raw_payload 当作 zstd_block 写入，但头仍标 `version=2`。后续 ruzstd 按 v2 解压失败 → 不可读 v2 文件（数据完整性问题，违反 I-1 段不可变/可读不变量）。
+
+### 修复（方案 A：压缩失败降级 v1）
+`segment/mod.rs:633-665` `encode_stored` 改为：
+- zstd encode 成功 → 写 v2（`magic|version=2|raw_payload_len|zstd_block_len|zstd_block`）。
+- zstd encode 失败 → **回退写 v1**（`magic|version=1|raw_payload`），`decode_stored` v1 路径可读回。
+- 文件始终可读（降级而非损坏），不产生不可读 v2。
+
+### 新增测试
+- `m2_08_stored_v1_fallback_is_readable`（`#[cfg(not(feature = "zstd-encode"))]`）：验证 `encode_stored` v1 布局可被 `decode_stored` 读回（entries 一致）。
+- `m2_08_stored_v2_normal_path_still_readable`（`#[cfg(feature = "zstd-encode")]`）：验证压缩成功路径仍写 v2 且读回一致；同时守护「无论 v1/v2，decode_stored 必须读回正确数据」（I-1 核心）。
+
+### 自证门禁（fix round 1）
+| 门禁 | 结果 |
+|------|------|
+| `cargo test --workspace --all-features` | ok（0 failed） |
+| `cargo test -p vane-core --features zstd-encode` | ok（0 failed，含 v2 正常路径 + v1 回退两测试） |
+| `cargo test -p vane-core --features jieba` | ok |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
+| `cargo fmt --all -- --check` | clean |
+| wasm32 check（core / wasm） | ok |
+| `bash scripts/check-no-std-fs.sh` | OK |
+| `cargo deny check` | ok |
+| corpus v1+v2 roundtrip | 绿 |
