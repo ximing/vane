@@ -13,3 +13,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # （词典由 Go embed 运行时注入，不烘焙进 staticlib）。
 vane-core = { workspace = true, features = ["zstd-encode", "jieba"] }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# M2-11 fix：load_dict 成功路径测试需 vane-dict-zh::DICT_BIN 提供 dict.bin 字节。
+vane-dict-zh = { path = "../vane-dict-zh" }

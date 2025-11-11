@@ -303,7 +303,7 @@ impl Scope<'_> {
 // M2-11 实装 M1 README §09 契约（句柄注册表 std::sync::RwLock<HashMap>，非 dashmap）
 // 函数面（M1 README §09 已定稿，M2 落地）：
 pub fn vane_open(path_ptr: *const u8, path_len: usize, opts_json: *const u8, opts_len: usize, out_handle: *mut u64) -> i32;
-pub fn vane_collection(db_h: u64, name: *const u8, name_len: usize, schema_json: *const u8, schema_len: usize, out_handle: *mut u64) -> i32;
+pub fn vane_collection(db_h: u64, name: *const u8, name_len: usize, schema_json: *const u8, schema_len: usize, opts_json: *const u8, opts_len: usize, out_handle: *mut u64) -> i32;
 pub fn vane_add(col_h: u64, docs_json: *const u8, docs_len: usize) -> i32;
 pub fn vane_flush(col_h: u64) -> i32;
 pub fn vane_search(col_h: u64, query_json: *const u8, query_len: usize, out_arena: *mut *mut u8, out_len: *mut usize) -> i32;

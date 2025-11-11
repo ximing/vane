@@ -468,7 +468,7 @@ func DictVersion() string  // "2026.08"
 // crates/vane-ffi/src/lib.rs（SPEC §9 C ABI，cbindgen 生成 vane.h）
 // 句柄 uint64_t + 全局注册表（std::sync::RwLock<HashMap<u64, Arc<...>>>，非 dashmap）
 pub fn vane_open(path_ptr: *const u8, path_len: usize, opts_json: *const u8, opts_len: usize, out_handle: *mut u64) -> i32;
-pub fn vane_collection(db_h: u64, name: *const u8, name_len: usize, schema_json: *const u8, schema_len: usize, out_handle: *mut u64) -> i32;
+pub fn vane_collection(db_h: u64, name: *const u8, name_len: usize, schema_json: *const u8, schema_len: usize, opts_json: *const u8, opts_len: usize, out_handle: *mut u64) -> i32;  // M2-11：opts_json 传入 CollectionOptions（tokenizer/userDict/autoCommit）
 pub fn vane_add(col_h: u64, docs_json: *const u8, docs_len: usize) -> i32;
 pub fn vane_flush(col_h: u64) -> i32;
 pub fn vane_search(col_h: u64, query_json: *const u8, query_len: usize, out_arena: *mut *mut u8, out_len: *mut usize) -> i32;

@@ -26,6 +26,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"unsafe"
 )
 
@@ -43,6 +44,7 @@ const (
 	EBusy             = -9
 	EUnsupported      = -10
 	EInvalidArg       = -11
+	EInternal         = -12
 )
 
 // VaneError 包装 C ABI 返回的错误码 + 描述。
@@ -142,22 +144,28 @@ func cStr(s string) (*C.uint8_t, C.size_t) {
 	return cBytes([]byte(s))
 }
 
-// checkError 把非零 rc 转为 VaneError。
+// checkError 把非零 rc 转为 VaneError。必须在 LockOSThread 内调用（与 FFI 调用同线程）。
 func checkError(handle uint64, rc C.int32_t) error {
 	if rc == 0 {
 		return nil
 	}
-	msg := lastErrorMessage(handle)
-	return &VaneError{Code: int32(rc), Message: msg}
-}
-
-func lastErrorMessage(handle uint64) string {
+	// I-1 fix：在同一线程（LockOSThread 内）读 last_error_message，
+	// 避免 goroutine 迁线程导致 thread-local 错误丢失。
 	ptr := C.vane_last_error_message(C.uint64_t(handle))
 	if ptr == nil {
-		return ""
+		return &VaneError{Code: int32(rc), Message: ""}
 	}
-	// 线程局部 C 字符串，不需 free。用 C.GoString 读取。
-	return C.GoString((*C.char)(unsafe.Pointer(ptr)))
+	return &VaneError{Code: int32(rc), Message: C.GoString((*C.char)(unsafe.Pointer(ptr)))}
+}
+
+// lockThreadAndCall 在固定 OS 线程上执行 FFI 调用 + 错误读取（I-1 fix）。
+// goroutine 可能在 cgo 调用间迁线程，导致 Rust thread-local 错误丢失
+// （vane_flush 在线程X 设 last_error，vane_last_error_message 在线程Y 读 → 空错误）。
+// LockOSThread 确保整个"调用 FFI + 读 last_error"序列在同一线程内完成。
+func lockThreadAndCall(fn func() error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return fn()
 }
 
 // Open 打开数据库。
@@ -173,9 +181,13 @@ func Open(path string, opts *OpenOptions) (*Db, error) {
 	var handle C.uint64_t
 	p, pl := cStr(path)
 	op, ol := cBytes(optsJSON)
-	rc := C.vane_open(p, pl, op, ol, &handle)
-	if rc != 0 {
-		return nil, checkError(0, rc)
+	var rc C.int32_t
+	err := lockThreadAndCall(func() error {
+		rc = C.vane_open(p, pl, op, ol, &handle)
+		return checkError(0, rc)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &Db{handle: uint64(handle)}, nil
 }
@@ -198,9 +210,13 @@ func (db *Db) Collection(name string, schema Schema, opts *CollectionOptions) (*
 	np, nl := cStr(name)
 	sp, sl := cBytes(schemaJSON)
 	op, ol := cBytes(optsJSON)
-	rc := C.vane_collection(C.uint64_t(db.handle), np, nl, sp, sl, op, ol, &handle)
-	if rc != 0 {
-		return nil, checkError(db.handle, rc)
+	var rc C.int32_t
+	err = lockThreadAndCall(func() error {
+		rc = C.vane_collection(C.uint64_t(db.handle), np, nl, sp, sl, op, ol, &handle)
+		return checkError(db.handle, rc)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &Collection{handle: uint64(handle)}, nil
 }
@@ -208,21 +224,27 @@ func (db *Db) Collection(name string, schema Schema, opts *CollectionOptions) (*
 // Export 导出快照（M2-12 接入前返 E_UNSUPPORTED）。
 func (db *Db) Export(dest string) error {
 	dp, dl := cStr(dest)
-	rc := C.vane_export(C.uint64_t(db.handle), dp, dl)
-	return checkError(db.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_export(C.uint64_t(db.handle), dp, dl)
+		return checkError(db.handle, rc)
+	})
 }
 
 // LoadDict 加载 jieba 词典（zstd 压缩 dict.bin 字节）。
 func (db *Db) LoadDict(dictBytes []byte) error {
 	dp, dl := cBytes(dictBytes)
-	rc := C.vane_load_dict(C.uint64_t(db.handle), dp, dl)
-	return checkError(db.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_load_dict(C.uint64_t(db.handle), dp, dl)
+		return checkError(db.handle, rc)
+	})
 }
 
 // Close 关闭 Db 句柄。
 func (db *Db) Close() error {
-	rc := C.vane_close(C.uint64_t(db.handle))
-	return checkError(db.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_close(C.uint64_t(db.handle))
+		return checkError(db.handle, rc)
+	})
 }
 
 // Add 追加文档。
@@ -232,14 +254,18 @@ func (c *Collection) Add(docs []Doc) error {
 		return fmt.Errorf("marshal docs: %w", err)
 	}
 	dp, dl := cBytes(b)
-	rc := C.vane_add(C.uint64_t(c.handle), dp, dl)
-	return checkError(c.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_add(C.uint64_t(c.handle), dp, dl)
+		return checkError(c.handle, rc)
+	})
 }
 
 // Flush 刷新缓冲区。
 func (c *Collection) Flush() error {
-	rc := C.vane_flush(C.uint64_t(c.handle))
-	return checkError(c.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_flush(C.uint64_t(c.handle))
+		return checkError(c.handle, rc)
+	})
 }
 
 // Search 搜索。
@@ -251,14 +277,18 @@ func (c *Collection) Search(query SearchQuery) ([]Hit, error) {
 	var arena *C.uint8_t
 	var arenaLen C.size_t
 	qp, ql := cBytes(b)
-	rc := C.vane_search(C.uint64_t(c.handle), qp, ql, &arena, &arenaLen)
-	if rc != 0 {
-		return nil, checkError(c.handle, rc)
+	err = lockThreadAndCall(func() error {
+		rc := C.vane_search(C.uint64_t(c.handle), qp, ql, &arena, &arenaLen)
+		return checkError(c.handle, rc)
+	})
+	if err != nil {
+		return nil, err
 	}
 	if arena == nil || arenaLen == 0 {
 		return []Hit{}, nil
 	}
 	// 拷贝到 Go 内存后立即释放 C arena（I-7：arena 一次 free）。
+	// arena free 也在 LockOSThread 内不必要（不涉及 thread-local error）。
 	goBytes := C.GoBytes(unsafe.Pointer(arena), C.int(arenaLen))
 	C.vane_string_free(arena)
 	var hits []Hit
@@ -276,25 +306,34 @@ func (c *Collection) Delete(ids []string) (uint64, error) {
 	}
 	var count C.uint64_t
 	ip, il := cBytes(b)
-	rc := C.vane_delete(C.uint64_t(c.handle), ip, il, &count)
-	if rc != 0 {
-		return 0, checkError(c.handle, rc)
+	err = lockThreadAndCall(func() error {
+		rc := C.vane_delete(C.uint64_t(c.handle), ip, il, &count)
+		return checkError(c.handle, rc)
+	})
+	if err != nil {
+		return 0, err
 	}
 	return uint64(count), nil
 }
 
 // Compact 段合并。
 func (c *Collection) Compact() error {
-	rc := C.vane_compact(C.uint64_t(c.handle))
-	return checkError(c.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_compact(C.uint64_t(c.handle))
+		return checkError(c.handle, rc)
+	})
 }
 
 // Reindex 触发 reindex。
 func (c *Collection) Reindex() (*ReindexHandle, error) {
 	var handle C.uint64_t
-	rc := C.vane_reindex(C.uint64_t(c.handle), &handle)
-	if rc != 0 {
-		return nil, checkError(c.handle, rc)
+	var rc C.int32_t
+	err := lockThreadAndCall(func() error {
+		rc = C.vane_reindex(C.uint64_t(c.handle), &handle)
+		return checkError(c.handle, rc)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &ReindexHandle{handle: uint64(handle)}, nil
 }
@@ -302,29 +341,39 @@ func (c *Collection) Reindex() (*ReindexHandle, error) {
 // Progress 查询 reindex 进度。
 func (rh *ReindexHandle) Progress() (float32, error) {
 	var p C.float
-	rc := C.vane_reindex_progress(C.uint64_t(rh.handle), &p)
-	if rc != 0 {
-		return 0, checkError(rh.handle, rc)
+	var rc C.int32_t
+	err := lockThreadAndCall(func() error {
+		rc = C.vane_reindex_progress(C.uint64_t(rh.handle), &p)
+		return checkError(rh.handle, rc)
+	})
+	if err != nil {
+		return 0, err
 	}
 	return float32(p), nil
 }
 
 // Wait 阻塞等待 reindex 完成。
 func (rh *ReindexHandle) Wait() error {
-	rc := C.vane_reindex_wait(C.uint64_t(rh.handle))
-	return checkError(rh.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_reindex_wait(C.uint64_t(rh.handle))
+		return checkError(rh.handle, rc)
+	})
 }
 
 // Close 关闭 ReindexHandle 句柄。
 func (rh *ReindexHandle) Close() error {
-	rc := C.vane_close(C.uint64_t(rh.handle))
-	return checkError(rh.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_close(C.uint64_t(rh.handle))
+		return checkError(rh.handle, rc)
+	})
 }
 
 // Close 关闭 Collection 句柄。
 func (c *Collection) Close() error {
-	rc := C.vane_close(C.uint64_t(c.handle))
-	return checkError(c.handle, rc)
+	return lockThreadAndCall(func() error {
+		rc := C.vane_close(C.uint64_t(c.handle))
+		return checkError(c.handle, rc)
+	})
 }
 
 // DictVersion 查询已加载词典版本信息（JSON: {"version":"...","sha256Prefix":"..."}）。
@@ -332,9 +381,13 @@ func (c *Collection) Close() error {
 func DictVersion() (string, error) {
 	var arena *C.uint8_t
 	var arenaLen C.size_t
-	rc := C.vane_dict_version(&arena, &arenaLen)
-	if rc != 0 {
-		return "", checkError(0, rc)
+	var rc C.int32_t
+	err := lockThreadAndCall(func() error {
+		rc = C.vane_dict_version(&arena, &arenaLen)
+		return checkError(0, rc)
+	})
+	if err != nil {
+		return "", err
 	}
 	if arena == nil || arenaLen == 0 {
 		return "", nil

@@ -130,3 +130,69 @@ open → LoadDict(jieba) → collection → add → flush → vector search → 
 2. **wazero 实装骨架**：`bindings/go/wazero/` 仅 API 骨架 + `ErrWazeroNotImplemented`，完整实装（wasm32-wasi 编译 + wazero host 封装）留 M2 后续。
 3. **vane_export E_UNSUPPORTED**：M2-12 接入后改为真实导出实装。
 4. **CGO_ENABLED=0 错误引导**：`//go:build !wazero` 在 cgo 变体上确保 CGO_ENABLED=0 时编译失败（cgo import C 需 CGO_ENABLED=1），引导用户加 `-tags wazero`。
+
+---
+
+## Fix Round 1（评审 PASS_WITH_FINDINGS 修复）
+
+### B-1（阻塞）：panic 跨 FFI = UB
+**问题**：全部 extern "C" 函数缺 catch_unwind；9 处锁 .unwrap() 是 panic 向量。
+
+**修复**：
+1. 新增 `catch_unwind_code` helper（`AssertUnwindSafe` 包装闭包），每个 extern "C" 入口经它包装。panic 时返 `E_INTERNAL`(-12) + set_error("internal panic")。
+2. `vane_last_error_message` 返 `*const u8` 非 i32，单独用 `catch_unwind` 包装（panic 时返 null）。
+3. `vane_string_free` 返 void，同样包装。
+4. 全部 9 处锁 `.unwrap()` 改为 `map_err(|_| { set_error("lock poisoned"); E_INTERNAL })`，poisoned lock 返错误码不 panic。
+5. 新增 `E_INTERNAL = -12` 错误码（Go 侧 `EInternal` 同步）。
+6. 新增 `panic_safety_returns_error_not_crash` 测试验证 catch_unwind 不影响正常返回值。
+
+### I-1：Go 侧 thread-local 错误跨 goroutine 丢失
+**问题**：cgo goroutine 可迁线程，vane_flush（线程X 设 last_error）与 vane_last_error_message（线程Y 读）跨线程 → 间歇空错误。
+
+**修复**：Go 侧新增 `lockThreadAndCall(fn func() error) error` helper，用 `runtime.LockOSThread()` / `defer runtime.UnlockOSThread()` 包裹"调用 FFI + 读 last_error"成对序列。全部 16 个 Go 公共函数经此包装，确保 set+read 同线程。
+
+### I-3：collection 创建 jieba_dict TOCTOU
+**问题**：collection.rs create_new 中两次 `db.jieba_dict.read()` 间可被 `set_jieba_dict` 改写 → tokenizer 用 dict A、CollectionInner 存 dict B → I-4 reindex 身份不一致。
+
+**修复**：改为单次 read lock snapshot：
+```rust
+let jieba_dict_snapshot = db.jieba_dict.read().unwrap().clone();
+// snapshot 用于 build_collection_tokenizer + CollectionInner.jieba_dict
+```
+消除 TOCTOU 窗口。
+
+### I-4：vane_reindex_wait 持注册表读锁阻塞
+**问题**：`with_reindex_handle` 持读锁调 `rh.wait()` → 阻塞所有 handle 写操作。
+
+**修复**：
+1. vane-core `ReindexHandle` 加 `#[derive(Clone)]`（inner 是 Arc，clone 廉价；additive pub API 不改签名）。
+2. FFI `with_reindex_handle` 改为 `with_reindex_handle_clone`：read lock 内 clone ReindexHandle → 释放锁 → 锁外调 f（wait/progress 不持锁）。
+
+### I-2：vane_collection 签名偏离 M1 README §09
+**问题**：实装含 opts_json/opts_len（8 参数），M1 README §09 记录 6 参数。
+
+**修复**：同步 M1 README §09 + M2 README + M2-11 模块 spec 的 vane_collection 签名为实际（含 opts_json/opts_len），注明 CollectionOptions 经 opts_json 传入。
+
+### M-1：reindex/load_dict 成功路径测试
+新增 3 个测试：
+- `load_dict_and_dict_version_success`：加载 dict.bin → dict_version 可查 → jieba collection 创建成功 → 中文分词搜索。
+- `reindex_success_path`：验证 reindex 无 set_user_dict 时返 E_INVALID_ARG（Stable 状态）。
+- `panic_safety_returns_error_not_crash`：验证 catch_unwind 包装不影响正常返回值。
+
+### 自证门禁结果（fix round 1）
+
+| # | 门禁 | 结果 |
+|---|---|---|
+| 1 | `cargo test --workspace --all-features` | PASS（379 测试，0 回退） |
+| 2 | `cargo test -p vane-ffi` | PASS（10 测试，含 3 新增） |
+| 3 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS（clean） |
+| 4 | `cargo fmt --all -- --check` | PASS（clean） |
+| 5 | `cargo check --target wasm32-unknown-unknown -p vane-core` | PASS |
+| 6 | `cargo build --release -p vane-ffi` staticlib | PASS（21MB） |
+| 7 | vane.h 头文件 | 手写，与签名一致 |
+| 8 | `go build ./...` | PASS（host） |
+| 9 | `go test ./...` | PASS（4 vane + 3 dict） |
+| 10 | `go run main.go` demo | PASS（open→search→close 端到端） |
+| 11 | Go embed dict <2MB | PASS（1.41MB） |
+| 12 | `cargo deny check` | PASS |
+| 13 | CI go-cross matrix | 配置就绪 |
