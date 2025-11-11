@@ -152,8 +152,9 @@ impl CollectionInner {
         let tokenizer: Arc<dyn crate::tokenizer::Tokenizer> = {
             #[cfg(feature = "jieba")]
             {
+                let dict_guard = db.jieba_dict.read().unwrap();
                 build_collection_tokenizer(
-                    db.jieba_dict.as_ref(),
+                    dict_guard.as_ref(),
                     meta.tokenizer_kind,
                     &meta.user_dict,
                 )?
@@ -188,7 +189,7 @@ impl CollectionInner {
             dict_state: RwLock::new(DictState::Stable),
             pending_dict: RwLock::new(Vec::new()),
             #[cfg(feature = "jieba")]
-            jieba_dict: db.jieba_dict.clone(),
+            jieba_dict: db.jieba_dict.read().unwrap().clone(),
         })
     }
 
