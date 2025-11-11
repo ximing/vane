@@ -36,6 +36,7 @@
 |---|---|---|---|---|
 | 00 | Phase Zero 安全清理 | ✅ | 6458247/af2d895 | vane-wasm 骨架 + parked minors（6 commits）；wiki nDCG fold M2-13 |
 | 07 | 冷启动懒加载 | ✅ | 1337b1a/afd690a | OnceLock 按需加载 vectors/stored；open 100k 1573ms→752ms<1s；fix round 1: open 期廉价头探测恢复损坏 loud 失败（I-1）+ v2 dim 预存（M-3）；361 测试。**M2-08 交接**：落实 VECTORS_FORMAT_V2 常量 + finalize 写 v2 头后，替换 mod.rs 字面量 `2u32` + 将 `build_v2_stub_segment` 测试切真实 finalize 产物回归 |
+| 08 | stored-zstd + per-file version | ✅ | b91f28f/a3e9ae2 | per-file 常量（6 段文件）+ vectors v2 头（M2-07 交接落实）+ stored v2 zstd 双模 + zstd-encode/zstd-decode feature 解耦（ruzstd 进 wasm）；368→370 测试；fix round 1: 压缩失败回退 v1 保可读（I-1）。**carry-forward**：wasm 11.4KB 占位 LTO 剥离 decode，真实 800KB 门禁须 M2-01 接入真实 API 后重测；3 Minor（inverted per-file / dict.rs 改名 / 注释）接受不修 |
 
 ## 最终指标
 
