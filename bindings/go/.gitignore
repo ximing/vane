@@ -1,0 +1,4 @@
+# Build artifacts: staticlib 由 cargo build --release -p vane-ffi 产出，
+# 复制到 lib/<platform>/ 供 cgo 链接。CI 自动构建；本地开发运行 scripts/build-go-lib.sh。
+lib/*/libvane_ffi.a
+lib/*/libvane_ffi.lib
