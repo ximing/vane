@@ -626,7 +626,9 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
 }
 
 /// 编码 stored.bin（SPEC §6.2 + M2-08）。
-/// - zstd-encode feature：写 v2 `magic|version=2|raw_payload_len|zstd_block_len|zstd_block`。
+/// - zstd-encode feature：尝试 zstd 压缩 → 成功写 v2
+///   `magic|version=2|raw_payload_len|zstd_block_len|zstd_block`；**失败回退写 v1**
+///   `magic|version=1|raw_payload`（I-1：压缩失败降级 v1 而非写不可读 v2，文件始终可读）。
 /// - 无 zstd-encode（wasm）：写 v1 `magic|version=1|raw_payload`（raw_payload = count+entries）。
 ///
 /// raw_payload 在两模式下相同（v1 body），v2 仅外包 zstd 压缩 + 长度前缀。
@@ -634,14 +636,27 @@ fn encode_stored(raw_payload: &[u8]) -> Vec<u8> {
     #[cfg(feature = "zstd-encode")]
     {
         // zstd 压缩 raw_payload（level 3 默认，stored 小无需高压缩）。
-        let zstd_block = zstd::encode_all(raw_payload, 3).unwrap_or_else(|_| raw_payload.to_vec());
-        let mut out = Vec::with_capacity(16 + zstd_block.len());
-        out.extend_from_slice(crate::types::MAGIC);
-        out.extend_from_slice(&crate::types::STORED_FORMAT_V2.to_le_bytes());
-        out.extend_from_slice(&(raw_payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(zstd_block.len() as u32).to_le_bytes());
-        out.extend_from_slice(&zstd_block);
-        out
+        // I-1 fix：压缩失败回退写 v1（version=1 + raw_payload），而非写 version=2 + 未压缩
+        // raw_payload 作 zstd_block（后者 ruzstd 解压失败 → 不可读 v2 文件）。
+        match zstd::encode_all(raw_payload, 3) {
+            Ok(zstd_block) => {
+                let mut out = Vec::with_capacity(16 + zstd_block.len());
+                out.extend_from_slice(crate::types::MAGIC);
+                out.extend_from_slice(&crate::types::STORED_FORMAT_V2.to_le_bytes());
+                out.extend_from_slice(&(raw_payload.len() as u32).to_le_bytes());
+                out.extend_from_slice(&(zstd_block.len() as u32).to_le_bytes());
+                out.extend_from_slice(&zstd_block);
+                out
+            }
+            Err(_) => {
+                // 压缩失败降级 v1：magic|version=1|raw_payload（decode_stored v1 路径可读）。
+                let mut out = Vec::with_capacity(8 + raw_payload.len());
+                out.extend_from_slice(crate::types::MAGIC);
+                out.extend_from_slice(&crate::types::STORED_FORMAT_V1.to_le_bytes());
+                out.extend_from_slice(raw_payload);
+                out
+            }
+        }
     }
     #[cfg(not(feature = "zstd-encode"))]
     {

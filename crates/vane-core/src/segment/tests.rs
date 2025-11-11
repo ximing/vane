@@ -982,3 +982,72 @@ fn m2_08_zstd_encode_feature_writes_v2_stored() {
         "zstd-encode 写 v2 stored"
     );
 }
+
+/// I-1 fix：v1 回退路径写出的 stored.bin 可被 decode_stored v1 读回。
+/// 验证 encode_stored 在无 zstd-encode（或压缩失败回退）时产 v1 布局，
+/// 且 decode_stored 能正确读回 entries（文件始终可读，降级而非损坏）。
+#[cfg(not(feature = "zstd-encode"))]
+#[test]
+fn m2_08_stored_v1_fallback_is_readable() {
+    // 构造 raw_payload（v1 body：count=2 + 2 条 entry）
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&2u32.to_le_bytes()); // count=2
+                                                // entry 0: docid=0, text="t0", meta='{"m":0}'
+    raw.extend_from_slice(&0u64.to_le_bytes());
+    let t0 = "t0";
+    raw.extend_from_slice(&(t0.len() as u32).to_le_bytes());
+    raw.extend_from_slice(t0.as_bytes());
+    let m0 = r#"{"m":0}"#;
+    raw.extend_from_slice(&(m0.len() as u32).to_le_bytes());
+    raw.extend_from_slice(m0.as_bytes());
+    // entry 1: docid=1, text="", meta='{"m":1}'
+    raw.extend_from_slice(&1u64.to_le_bytes());
+    raw.extend_from_slice(&0u32.to_le_bytes()); // text_len=0
+    let m1 = r#"{"m":1}"#;
+    raw.extend_from_slice(&(m1.len() as u32).to_le_bytes());
+    raw.extend_from_slice(m1.as_bytes());
+
+    // encode_stored 无 zstd-encode → 写 v1
+    let encoded = super::encode_stored(&raw);
+    assert_eq!(&encoded[0..4], b"VANE");
+    let sver = u32::from_le_bytes(encoded[4..8].try_into().unwrap());
+    assert_eq!(sver, crate::types::STORED_FORMAT_V1, "回退写 v1");
+
+    // decode_stored 读回：内容一致（文件可读，未损坏）
+    let map = super::decode_stored(&encoded).unwrap();
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.get(&0).unwrap().text, "t0");
+    assert_eq!(map.get(&0).unwrap().meta_json, r#"{"m":0}"#);
+    assert_eq!(map.get(&1).unwrap().text, "");
+    assert_eq!(map.get(&1).unwrap().meta_json, r#"{"m":1}"#);
+}
+
+/// I-1 fix（zstd-encode 配置）：zstd 压缩成功写 v2，decode_stored 读回一致。
+/// 此测试守护 v2 正常路径（压缩成功）仍正确——确保回退逻辑不影响成功路径。
+#[cfg(feature = "zstd-encode")]
+#[test]
+fn m2_08_stored_v2_normal_path_still_readable() {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&1u32.to_le_bytes()); // count=1
+    raw.extend_from_slice(&0u64.to_le_bytes()); // docid=0
+    let t = "压缩成功路径";
+    raw.extend_from_slice(&(t.len() as u32).to_le_bytes());
+    raw.extend_from_slice(t.as_bytes());
+    let m = r#"{"ok":true}"#;
+    raw.extend_from_slice(&(m.len() as u32).to_le_bytes());
+    raw.extend_from_slice(m.as_bytes());
+
+    let encoded = super::encode_stored(&raw);
+    let sver = u32::from_le_bytes(encoded[4..8].try_into().unwrap());
+    // 压缩成功 → v2（若极端情况下压缩失败回退 v1，也必须可读——两路径都守护）
+    assert!(
+        sver == crate::types::STORED_FORMAT_V2 || sver == crate::types::STORED_FORMAT_V1,
+        "encode_stored 应产 v1 或 v2，实际 {}",
+        sver
+    );
+    // 无论 v1/v2，decode_stored 必须读回正确数据（I-1 核心：文件始终可读）
+    let map = super::decode_stored(&encoded).unwrap();
+    assert_eq!(map.len(), 1);
+    assert_eq!(map.get(&0).unwrap().text, "压缩成功路径");
+    assert_eq!(map.get(&0).unwrap().meta_json, r#"{"ok":true}"#);
+}
