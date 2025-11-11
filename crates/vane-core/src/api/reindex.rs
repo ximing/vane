@@ -17,6 +17,10 @@ use crate::vfs::Vfs;
 use std::sync::{Arc, Condvar, Mutex};
 
 /// SPEC §4.1 ReindexHandle（可轮询可阻塞）。
+///
+/// M2-11 fix：derive Clone——FFI 注册表需 clone 出 ReindexHandle 后释放锁再调
+/// `wait()`，避免持读锁阻塞（I-4）。inner 是 Arc，clone 廉价。
+#[derive(Clone)]
 pub struct ReindexHandle {
     inner: Arc<ReindexInner>,
 }

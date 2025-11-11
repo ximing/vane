@@ -34,7 +34,7 @@ SPEC 节号：§9（C ABI 约定 + 函数面）、§12.2（Go staticlib 目标�
 M1 README §09 契约逐字落实（见 README M2-11 节函数清单）：
 ```rust
 pub fn vane_open(path_ptr: *const u8, path_len: usize, opts_json: *const u8, opts_len: usize, out_handle: *mut u64) -> i32;
-pub fn vane_collection(db_h: u64, name: *const u8, name_len: usize, schema_json: *const u8, schema_len: usize, out_handle: *mut u64) -> i32;
+pub fn vane_collection(db_h: u64, name: *const u8, name_len: usize, schema_json: *const u8, schema_len: usize, opts_json: *const u8, opts_len: usize, out_handle: *mut u64) -> i32;
 pub fn vane_add(col_h: u64, docs_json: *const u8, docs_len: usize) -> i32;
 pub fn vane_flush(col_h: u64) -> i32;
 pub fn vane_search(col_h: u64, query_json: *const u8, query_len: usize, out_arena: *mut *mut u8, out_len: *mut usize) -> i32;

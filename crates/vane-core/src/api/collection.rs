@@ -149,12 +149,18 @@ impl CollectionInner {
         meta: CollectionMeta,
         auto_commit: AutoCommitConfig,
     ) -> Result<Self> {
+        // M2-11 fix I-3：jieba_dict 在单次 read lock 内 snapshot，消除 TOCTOU 窗口。
+        // 之前两次 read lock 间可被 set_jieba_dict 改写 → tokenizer 用 dict A、
+        // CollectionInner 存 dict B → I-4 reindex 身份不一致。
+        #[cfg(feature = "jieba")]
+        let jieba_dict_snapshot: Option<
+            std::sync::Arc<crate::tokenizer::jieba::JiebaDict>,
+        > = db.jieba_dict.read().unwrap().clone();
         let tokenizer: Arc<dyn crate::tokenizer::Tokenizer> = {
             #[cfg(feature = "jieba")]
             {
-                let dict_guard = db.jieba_dict.read().unwrap();
                 build_collection_tokenizer(
-                    dict_guard.as_ref(),
+                    jieba_dict_snapshot.as_ref(),
                     meta.tokenizer_kind,
                     &meta.user_dict,
                 )?
@@ -189,7 +195,7 @@ impl CollectionInner {
             dict_state: RwLock::new(DictState::Stable),
             pending_dict: RwLock::new(Vec::new()),
             #[cfg(feature = "jieba")]
-            jieba_dict: db.jieba_dict.read().unwrap().clone(),
+            jieba_dict: jieba_dict_snapshot,
         })
     }
 
