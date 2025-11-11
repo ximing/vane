@@ -27,8 +27,11 @@ pub(crate) struct DbInner {
     // collection 创建时若 tokenizer=Jieba 且此字段 Some → build_jieba_tokenizer；
     // 否则 build_tokenizer(Jieba) 返回 DictUnavailable，绑定层降级 CjkBigram（Task 3）。
     // pub(crate) 扩展，非 M0 冻结破坏（DbInner 内部结构，不暴露 pub API）。
+    // M2-11：改为 RwLock 以支持 FFI vane_load_dict 运行时注入（dict-zh off 时
+    // Db::open 设 None，FFI 调 set_jieba_dict 注入 Go embed 词典）。
     #[cfg(feature = "jieba")]
-    pub(crate) jieba_dict: Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>,
+    pub(crate) jieba_dict:
+        std::sync::RwLock<Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>>,
 }
 
 impl Db {
@@ -47,7 +50,7 @@ impl Db {
             collections,
             auto_commit: opts.auto_commit.clone(),
             #[cfg(feature = "jieba")]
-            jieba_dict,
+            jieba_dict: std::sync::RwLock::new(jieba_dict),
         });
         let db = Db {
             inner: inner.clone(),
@@ -174,7 +177,18 @@ impl Db {
     /// 绑定层（vane-node）用此判断 collection 创建时是否需降级 CjkBigram（Task 3）。
     #[cfg(feature = "jieba")]
     pub fn jieba_dict_available(&self) -> bool {
-        self.inner.jieba_dict.is_some()
+        self.inner.jieba_dict.read().unwrap().is_some()
+    }
+
+    /// M2-11：运行时注入 jieba 词典（FFI `vane_load_dict` 调用）。
+    ///
+    /// dict-zh feature 关闭时 Db::open 设 jieba_dict=None；FFI 绑定层从 Go embed
+    /// 读取 dict.bin 字节 → `JiebaDict::load_zstd` → 经此方法注入。注入后后续
+    /// `collection(tokenizer=Jieba)` 调用即可用 jieba 分词。
+    /// 已创建的 collection 不受影响（tokenizer 在创建时固定）。
+    #[cfg(feature = "jieba")]
+    pub fn set_jieba_dict(&self, dict: std::sync::Arc<crate::tokenizer::jieba::JiebaDict>) {
+        *self.inner.jieba_dict.write().unwrap() = Some(dict);
     }
 }
 
@@ -226,7 +240,7 @@ impl Db {
         dict: std::sync::Arc<crate::tokenizer::jieba::JiebaDict>,
     ) {
         match std::sync::Arc::get_mut(&mut self.inner) {
-            Some(inner) => inner.jieba_dict = Some(dict),
+            Some(inner) => *inner.jieba_dict.write().unwrap() = Some(dict),
             None => panic!("Db::inner has other Arc references, cannot inject jieba dict"),
         }
     }

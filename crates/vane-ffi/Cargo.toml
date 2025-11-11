@@ -9,4 +9,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # M2-08：native 启 zstd-encode（写 stored.bin v2 zstd）；zstd-encode 隐含 zstd-decode（读 v2）。
-vane-core = { workspace = true, features = ["zstd-encode"] }
+# M2-11：启 jieba feature（FFI vane_load_dict 需 JiebaDict::load_zstd）；不启 dict-zh
+# （词典由 Go embed 运行时注入，不烘焙进 staticlib）。
+vane-core = { workspace = true, features = ["zstd-encode", "jieba"] }
+serde_json = { workspace = true }
