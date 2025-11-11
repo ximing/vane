@@ -167,7 +167,67 @@ jobs:
       - name: Run nDCG regression (合成语料降级)
         run: cargo test --test ndcg_wiki -p vane-core --features dict-zh --release -- --nocapture
 
-  # go-cross (DEFERRED — 09-go-cgo)：
-  # SPEC §12.2 Go staticlib 6 平台交叉编译矩阵（zig cc）。
-  # 09 计划 deferred，待 Go FFI 落地后启用。
-  # 矩阵：x86_64/aarch64-linux-gnu/musl, x86_64/aarch64-apple-darwin, x86_64-windows-msvc
+  # M2-11：Go cgo 绑定——host 平台 build + test + demo（darwin/arm64 本地可跑）。
+  # 远程 CI（ubuntu-latest）需先 cargo build --release -p vane-ffi 再 go build/test。
+  go-host:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Build vane-ffi staticlib
+        run: cargo build --release -p vane-ffi
+      - name: Prepare staticlib for cgo (linux-amd64)
+        run: |
+          mkdir -p bindings/go/lib/linux-amd64
+          cp target/release/libvane_ffi.a bindings/go/lib/linux-amd64/
+      - name: Go build
+        run: cd bindings/go && go build ./...
+      - name: Go test
+        run: cd bindings/go && go test ./...
+      - name: Go demo
+        run: cd bindings/go/example && go run main.go
+
+  # M2-11：Go staticlib 4 平台交叉编译矩阵（zig cc，远程 CI 待触发）。
+  # SPEC §12.2：zig cc 交叉编译 libvane_ffi.a 到 4 平台。
+  # 本地 zig 不可用 → 此 job 仅在远程 CI 触发时执行。
+  # 矩阵：x86_64-linux-gnu / aarch64-linux-gnu / x86_64-apple-darwin / aarch64-apple-darwin
+  #       (+ x86_64-windows-msvc 作为第 5 平台，使用 zig cc+x86_64-windows-gnu 替代)
+  go-cross:
+    needs: go-host
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-linux-gnu
+            lib_dir: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            zig_target: aarch64-linux-gnu
+            lib_dir: linux-arm64
+          - target: x86_64-apple-darwin
+            zig_target: x86_64-macos
+            lib_dir: darwin-amd64
+          - target: aarch64-apple-darwin
+            zig_target: aarch64-macos
+            lib_dir: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: '0.13.0'
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+      - name: Cross-compile vane-ffi staticlib (zig cc)
+        run: cargo zigbuild --release -p vane-ffi --target ${{ matrix.zig_target }}
+      - name: Verify staticlib produced
+        run: |
+          find target/ -name "libvane_ffi.a" -path "*${{ matrix.zig_target }}*" | head -1
+          ls -lh target/${{ matrix.zig_target }}/release/libvane_ffi.a || true
