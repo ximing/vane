@@ -54,8 +54,8 @@ jobs:
         run: cargo test --test recall_regression -p vane-core
 
   wasm32-check:
-    # SPEC §13.3：core 出现 std::fs 即失败（M0 第一天硬门禁）。
-    # 不变量 I-5：核心算法零平台分支。
+    # SPEC §13.3：core/wasm 出现 std::fs 即失败（M0 第一天硬门禁）。
+    # 不变量 I-5：核心算法零平台分支。M2-01：vane-wasm 同禁 std::fs/std::net/mmap。
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -63,9 +63,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: cargo check wasm32
+      - name: cargo check wasm32 (vane-core)
         run: cargo check --target wasm32-unknown-unknown -p vane-core
-      - name: grep 双保险（禁 std::fs/std::net/mmap）
+      - name: cargo check wasm32 (vane-wasm)
+        run: cargo check --target wasm32-unknown-unknown -p vane-wasm
+      - name: clippy wasm32 (vane-wasm)
+        run: cargo clippy --target wasm32-unknown-unknown -p vane-wasm -- -D warnings
+      - name: grep 双保险（禁 std::fs/std::net/mmap，覆盖 vane-core + vane-wasm）
         run: bash scripts/check-no-std-fs.sh
 
   deny:
@@ -114,7 +118,7 @@ jobs:
 
   wasm32-size:
     # SPEC §13.2-3：核心 wasm gzip ≤ 800KB（含 jieba 代码、不含词典）。
-    # vane-core 无 #[no_mangle] 导出，用 --export-all 强制导出防 dead-code 消除（保守上界）。
+    # M2-01：双口径测量——vane-wasm default（真实 deliverable）+ vane-core --export-all（保守上界）。
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -124,7 +128,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get install -y binaryen
-      - name: Check wasm32 gzip size ≤800KB
+      - name: Check wasm32 gzip size ≤800KB (vane-wasm + vane-core --export-all)
         run: bash scripts/check-wasm-size.sh
 
   dict-size:
