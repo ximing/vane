@@ -26,6 +26,11 @@ zstd = { version = "0.13", optional = true }
 # 词典数据包（SPEC §12.3）：dict-zh feature 启用时 Db::open 自动加载预编译 dict.bin。
 # 独立 crate，wasm32 构建永不启用（词典永不进 wasm，红线）。
 vane-dict-zh = { path = "../vane-dict-zh", optional = true }
+# web-time：跨平台 Instant（SPEC §13.2）。
+# native：零开销 re-export std::time::Instant；wasm32：performance.now()（经 js-sys）。
+# 必要因：std::time::Instant::now() 在 wasm32-unknown-unknown panic（无单调时钟），
+# AutoCommitter 需 Instant 做 auto-commit 时间触发。
+web-time = "1"
 
 [features]
 # zstd-decode：启用 ruzstd 读期解码（stored.bin v2 + jieba dict.bin）。

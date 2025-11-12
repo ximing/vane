@@ -3,13 +3,14 @@
 // N1 裁决：Cargo.toml 中 ulid = { version="1", default-features=false }，
 // 禁用了 rand feature，因此 Ulid::new() 不可用（编译失败）。
 // 改用 Ulid::from_parts(timestamp_ms, random_bits)：
-//   - timestamp_ms 取自 std::time::SystemTime（wasm32 cargo check 可通过；
-//     运行时 panic 由 M2 处理，M0 门禁只校验编译）。
+//   - timestamp_ms 取自 web_time::SystemTime（M2-01：跨平台——native 零开销
+//     re-export std::time::SystemTime；wasm32 用 Date.now() 经 js-sys，
+//     消解 M0 已知 panic 遗留）。
 //   - random_bits 由一个 AtomicU64 计数器递增后转 u128 填充 80 位随机段，
 //     保证零 rand 依赖、wasm32 安全、段 ID 单调可排序。
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use ulid::Ulid;
+use web_time::{SystemTime, UNIX_EPOCH};
 
 static RANDOM_COUNTER: AtomicU64 = AtomicU64::new(0);
 

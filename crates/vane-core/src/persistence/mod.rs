@@ -149,7 +149,7 @@ impl Default for AutoCommitConfig {
 pub struct AutoCommitter {
     config: AutoCommitConfig,
     docs_since_flush: u32,
-    last_flush: std::time::Instant,
+    last_flush: web_time::Instant,
 }
 
 impl AutoCommitter {
@@ -157,7 +157,7 @@ impl AutoCommitter {
         Self {
             config,
             docs_since_flush: 0,
-            last_flush: std::time::Instant::now(),
+            last_flush: web_time::Instant::now(),
         }
     }
 
@@ -186,6 +186,6 @@ impl AutoCommitter {
 
     pub fn reset(&mut self) {
         self.docs_since_flush = 0;
-        self.last_flush = std::time::Instant::now();
+        self.last_flush = web_time::Instant::now();
     }
 }
