@@ -14,4 +14,10 @@ if grep -rn --include='*.rs' --exclude='tests.rs' 'std::fs::\|std::net::\|mmap' 
     echo "FAIL: forbidden IO usage outside vfs/std_fs.rs (tests.rs fixtures excluded)" >&2
     exit 1
 fi
+
+# M2-01：vane-wasm 同禁 std::fs/std::net/mmap（wasm32 无文件系统，OPFS 经 Vfs trait 走 M2-02）。
+if grep -rn --include='*.rs' --exclude='tests.rs' 'std::fs::\|std::net::\|mmap' crates/vane-wasm/src/; then
+    echo "FAIL: forbidden IO usage in vane-wasm (wasm32: no std::fs/std::net/mmap)" >&2
+    exit 1
+fi
 echo "OK"

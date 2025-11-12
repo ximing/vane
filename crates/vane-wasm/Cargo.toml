@@ -5,10 +5,28 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # M2-08：wasm 启 zstd-decode（ruzstd 纯 Rust，读 v2 stored.bin）；不启 zstd-encode（zstd-sys C 库不进 wasm）。
 # 词典永不进 wasm（红线）：不启 jieba/dict-zh。
+# default features 不启 dict-zh（红线）。
 vane-core = { workspace = true, features = ["zstd-decode"] }
 wasm-bindgen = "0.2"
+# web-sys / js-sys optional dep（feature-gated，本模块仅占位不启用浏览器 API）。
+# M2-02 启 opfs（SyncAccessHandle）；M2-03 启 idb；M2-04 启 worker。
+web-sys = { version = "0.3", optional = true }
+js-sys = { version = "0.3", optional = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+# M2-02：OPFS VFS 后端（SyncAccessHandle，Worker 内同步）。
+opfs = ["dep:web-sys", "dep:js-sys"]
+# M2-03：IndexedDB 异步存储后端。
+idb = ["dep:web-sys", "dep:js-sys"]
+# M2-04：Dedicated Worker 胶水（postMessage Promise 边界）。
+worker = ["dep:web-sys", "dep:js-sys"]
