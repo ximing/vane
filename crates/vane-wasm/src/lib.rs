@@ -26,6 +26,7 @@ use vane_core::vfs::memory::MemoryVfs;
 use vane_core::vfs::Vfs;
 
 pub mod simd_probe;
+pub mod vfs;
 
 // =========================================================================
 // 句柄注册表（与 vane-ffi 同构，wasm32 单线程，RwLock 即线程局部）
