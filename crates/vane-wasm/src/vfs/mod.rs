@@ -9,10 +9,14 @@
 //! `opfs` feature-gated，仅 wasm32 编译通过（浏览器手动验证 M2-04）。
 
 pub mod container;
+#[cfg(feature = "idb")]
+pub mod idb;
 #[cfg(feature = "opfs")]
 pub mod opfs;
 pub mod overlay;
 
+#[cfg(feature = "idb")]
+pub use idb::{IdbBackend, IdbVfs};
 #[cfg(feature = "opfs")]
 pub use opfs::{OpfsBackend, OpfsVfs};
 pub use overlay::{MemOverlay, MemoryBackend, OverlayBackend};

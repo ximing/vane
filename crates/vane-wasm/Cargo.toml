@@ -33,7 +33,15 @@ wasm-bindgen-test = "0.3"
 default = []
 # M2-02：OPFS VFS 后端（SyncAccessHandle，Worker 内同步）。
 opfs = ["dep:web-sys", "dep:js-sys"]
-# M2-03：IndexedDB 异步存储后端。
-idb = ["dep:web-sys", "dep:js-sys"]
+# M2-03：IndexedDB 降级 VFS 后端（内存 Vec + 异步 checkpoint，sync best-effort）。
+# web-sys IDB 子 features 供 M2-04 Worker 壳层 put/get；IdbVfs 本身不直接调用 IDB API
+# （薄层：from_blob 接收 Worker 异步读取的 blob，snapshot 供 Worker 异步 put 回 IDB）。
+idb = [
+    "dep:web-sys",
+    "dep:js-sys",
+    "web-sys/IdbDatabase",
+    "web-sys/IdbObjectStore",
+    "web-sys/IdbTransaction",
+]
 # M2-04：Dedicated Worker 胶水（postMessage Promise 边界）。
 worker = ["dep:web-sys", "dep:js-sys"]
