@@ -114,3 +114,50 @@ vane-wasm 新增 36 个原生单元测试：
 - **OpfsBackend 浏览器验证**：SyncAccessHandle 运行时行为（read/write/flush/truncate/getSize）需在真实浏览器 Worker 中验证（M2-04 Worker shell 接入后）。当前仅 wasm32 编译通过。
 - **sync 性能优化**：初版每次 sync 都 flush（保守）。dirty 合并去重留作 M2 后期。
 - **meta slot 容量**：256 KB 预留，约支持 ~10k 文件表项。超限返回 Err（可扩大 META_SLOT_SIZE）。
+
+## 9. Fix Round 1（评审 PASS_WITH_FINDINGS 修复）
+
+### M-1（数据完整性）：compaction shadow-write 崩溃安全
+
+**问题**：原 `compact_internal` 从 DATA_OFFSET 原地破坏性重写数据区。若在 persist_meta 前崩溃，旧 meta slot 仍 active 但其 extent 指向的数据已被覆盖 → 段文件/WAL 数据损坏。
+
+**修复（shadow-write 模式）**：
+1. 读所有活跃数据到内存（备份）。
+2. 写紧凑数据到**容器尾部新区域** `[old_cs, old_cs + live_size)`——旧数据区 `[DATA_OFFSET, old_cs)` 暂不破坏。
+3. 更新 state：新 file_table 指向尾部，旧区域进 free_list，container_size = old_cs + live_size。
+4. `persist_meta`（双槽翻转，原子提交）——新 meta 指向尾部新区域。
+5. 旧区域在 free_list 中，后续 append 可 first-fit 复用。
+
+**崩溃恢复**：
+- 崩溃在 persist 前/中（CRC 失败）→ 旧 meta active、旧数据完整（未被覆盖）→ recover 回旧状态。
+- 崩溃在 persist 后 → 新 meta active、新数据在尾部完整 → recover 到新状态。
+
+**新增测试**：
+- `compaction_crash_persist_fails_old_data_intact`：compaction persist CRC 损坏 → recover → 旧数据完整（a.bin + b.bin 均可读，delete 回滚）。
+- `compaction_crash_after_persist_new_data_intact`：compaction 完成 → recover → 新数据在尾部完整，b.bin 已删除。
+
+### I-1：OpfsBackend::truncate u32 → f64
+
+**问题**：`truncate_with_u32` 限制容器上限 4GB。
+**修复**：改用 `truncate_with_f64`（SyncAccessHandle.truncate 接受 f64/JS Number），无 4GB 限制。
+
+### I-3：时点 B 测试语义修正
+
+**问题**：原测试模拟「rename 后损坏 active 槽」而非计划描述的「写一半 inactive 槽」。
+**修复**：改为记录 rename 前的 inactive 槽号，rename 后覆写该槽（inactive→active）payload 字节使 CRC 失败——语义为「persist_meta 写 inactive 槽中途截断」。recover 校验 CRC 失败 → 回退旧 active 槽 → 旧 manifest 完好。
+
+### 门禁结果（fix round 1）
+
+| # | 门禁 | 结果 |
+|---|---|---|
+| 1 | wasm32 check --features opfs | ✓ |
+| 2 | workspace tests | ✓ 417 passed, 0 failed（+2 compaction 崩溃测试） |
+| 3 | clippy -D warnings | ✓ |
+| 4 | fmt --check | ✓ |
+| 5 | no-std-fs | ✓ |
+| 6 | cargo deny | ✓ |
+| 7 | 体积 gzip | 351,027 bytes（343 KB）≤ 800 KB ✓ |
+
+### 体积（fix 后）
+
+opfs 增量仍 2.2 KB gzip（shadow-write 不影响 wasm 体积，仅运行时逻辑变更）。

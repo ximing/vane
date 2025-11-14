@@ -279,19 +279,26 @@ impl MemOverlay {
 
     /// 全量 rewrite compaction：读所有活跃区间 → 重写到紧凑数据区 → 回收碎片。
     /// core 不感知。触发条件：delete 后 free_space / total > 50%（`maybe_compact`）。
-    /// 全量 rewrite compaction：读所有活跃区间 → 重写到紧凑数据区 → 回收碎片。
+    /// 全量 rewrite compaction（shadow-write 模式，崩溃安全）。
+    ///
+    /// 写 compaction 产物到**容器尾部新区域**（旧数据暂不破坏），persist_meta
+    /// 原子提交后旧区域进 free list。若崩溃在 persist 前/中 → 旧 meta 仍 active、
+    /// 旧数据完整（未被覆盖）→ recover 回旧状态；若崩溃在 persist 后 → 新 meta
+    /// active、新数据完整。两路径都安全（M-1 修复）。
+    ///
     /// core 不感知。触发条件：delete 后 free_space / total > 50%（内嵌于 `delete`）。
     pub fn compact(&self) -> Result<()> {
         let mut state = self.state.write().map_err(poison_err)?;
         self.compact_internal(&mut state)?;
-        persist_meta(self.backend.as_ref(), &mut state)?;
         Ok(())
     }
 
-    /// compaction 内核（不持久化）——读所有活跃数据，重写紧凑排列，更新 state。
-    /// 调用方负责后续 persist_meta。
+    /// compaction 内核（shadow-write + persist_meta，自带持久化）。
+    /// 调用方无需再调 persist_meta。
     fn compact_internal(&self, state: &mut OverlayState) -> Result<()> {
-        // 1. 读所有活跃文件数据到内存
+        let old_cs = state.container_size;
+
+        // 1. 读所有活跃文件数据到内存（备份——旧数据不被破坏）
         let mut live: Vec<(String, Vec<u8>)> = Vec::new();
         for (path, ext) in &state.file_table {
             if ext.size > 0 {
@@ -309,8 +316,9 @@ impl MemOverlay {
             }
         }
 
-        // 2. 重写数据区（从 DATA_OFFSET 起，紧凑排列）
-        let mut new_base = DATA_OFFSET;
+        // 2. shadow-write：写紧凑数据到容器尾部新区域 [old_cs, old_cs + live_size)
+        //    旧数据区 [DATA_OFFSET, old_cs) 暂不破坏——崩溃安全的关键。
+        let mut new_base = old_cs;
         let mut new_table: HashMap<String, Extent> = HashMap::new();
         for (path, data) in &live {
             if data.is_empty() {
@@ -328,14 +336,19 @@ impl MemOverlay {
             }
         }
 
-        // 3. 更新状态
+        // 3. 更新 state：新 file_table 指向尾部新区域，旧区域进 free list
         state.file_table = new_table;
-        state.free_list = Vec::new();
+        state.free_list = vec![Extent {
+            base: DATA_OFFSET,
+            size: old_cs.saturating_sub(DATA_OFFSET),
+        }];
         state.container_size = new_base;
         state.dirty = true;
 
-        // 4. 截断后端到 container_size（回收旧尾部数据）
-        self.backend.truncate(state.container_size)?;
+        // 4. 原子提交（双 meta_slot + CRC + 翻转 + flush）
+        //    崩溃在此之前 → 旧 meta active、旧数据完整 → recover 回旧状态。
+        //    崩溃在此之后 → 新 meta active、新数据在尾部完整 → recover 到新状态。
+        persist_meta(self.backend.as_ref(), state)?;
         Ok(())
     }
 
@@ -568,10 +581,11 @@ impl Vfs for MemOverlay {
         let free_space: u64 = state.free_list.iter().map(|e| e.size).sum();
         let total = state.container_size.saturating_sub(DATA_OFFSET);
         if total > 0 && (free_space as f64 / total as f64) > 0.5 {
-            // 先 compact（重写数据 + 回收碎片），再持久化——单次 persist_meta。
+            // compact_internal 自带 persist_meta（shadow-write + 原子提交）
             self.compact_internal(&mut state)?;
+        } else {
+            persist_meta(self.backend.as_ref(), &mut state)?;
         }
-        persist_meta(self.backend.as_ref(), &mut state)?;
         Ok(())
     }
 
@@ -975,9 +989,11 @@ mod tests {
 
     #[test]
     fn crash_recovery_meta_write_partial() {
-        // T14: 崩溃恢复——元数据写一半（CRC 损坏）
-        // recover 校验 CRC 失败 → 回退旧槽 → 旧 manifest 完好
+        // T14: 崩溃恢复——persist_meta 写 inactive 槽中途截断（CRC 失败）
+        // 模拟：rename 的 persist_meta 写 inactive 槽时数据不完整。
+        // recover 校验 CRC 失败 → 回退旧 active 槽 → 旧 manifest 完好。
         let backend = Arc::new(MemoryBackend::new());
+        let inactive_slot;
         {
             let overlay = MemOverlay::open(backend.clone()).unwrap();
             setup_manifest_atomic(&overlay);
@@ -989,15 +1005,18 @@ mod tests {
                 .unwrap();
             overlay.sync("manifest.tmp").unwrap();
 
-            // 执行 rename（写新 meta 到非活跃槽 + 翻转）
+            // rename 会 persist_meta 到 inactive 槽。记录 inactive 槽号。
+            inactive_slot = 1 - overlay.active_meta_slot();
             overlay.rename("manifest.tmp", "manifest.json").unwrap();
-            // 此时 active 指向新槽，manifest.json → NEW
-
-            // 模拟崩溃：损坏当前活跃 meta slot（使 CRC 失败）
-            let active = overlay.active_meta_slot();
-            corrupt_meta_slot(backend.as_ref(), active);
+            // rename 完成：inactive 槽（现已翻转为 active）有新 meta
         }
-        // recover：活跃槽 CRC 失败 → 回退到旧槽（sync 时的状态）
+        // 模拟 persist_meta 写 inactive 槽中途截断：覆写该槽 payload 字节使 CRC 失败
+        let slot_offset = meta_slot_offset(inactive_slot);
+        backend
+            .write(slot_offset + 20, &[0xDE, 0xAD, 0xBE, 0xEF])
+            .unwrap();
+
+        // recover：该槽 CRC 失败 → 回退到另一槽（sync 时的状态）
         let overlay2 = MemOverlay::open(backend.clone()).unwrap();
         let mut buf = [0u8; 12];
         let n = overlay2.read_at("manifest.json", &mut buf, 0).unwrap();
@@ -1039,22 +1058,23 @@ mod tests {
         overlay.create("a.bin").unwrap();
         overlay.write_at("a.bin", &[0x41; 100], 0).unwrap();
         overlay.sync("a.bin").unwrap();
-        let _cs_after_a = overlay.container_size();
+        let cs_after_sync = overlay.container_size();
 
         // 删除 a.bin → 释放 100 字节区间
+        // free_ratio = 100% > 50% → 触发 compaction（shadow-write）
+        // 无活跃文件 → shadow-write 写 0 字节到尾部，旧区域进 free list
         overlay.delete("a.bin").unwrap();
-        // delete 触发了 persist，但不一定 compaction（free_ratio = 100% > 50% → 会 compact！）
-        // 等等——delete 后 free_space = 100, total = 100, ratio = 1.0 > 0.5 → 触发 compaction
-        // compaction 后 container_size = DATA_OFFSET（无活跃文件）
         let cs_after_delete = overlay.container_size();
-        assert_eq!(cs_after_delete, super::super::container::DATA_OFFSET);
+        // shadow-write：container_size 不变（无数据写到尾部），旧区域在 free list
+        assert_eq!(cs_after_delete, cs_after_sync);
+        assert_eq!(overlay.free_list_snapshot().len(), 1);
 
-        // 重新写文件——在 compaction 后的空容器中分配
+        // 重新写文件——复用 free list 中的 100B 区间
         overlay.create("b.bin").unwrap();
         overlay.append("b.bin", &[0x42; 50]).unwrap();
         let cs_after_b = overlay.container_size();
-        // container_size = DATA_OFFSET + 50
-        assert_eq!(cs_after_b, super::super::container::DATA_OFFSET + 50);
+        // container_size 不增长——复用了 free list ✓
+        assert_eq!(cs_after_b, cs_after_sync);
     }
 
     #[test]
@@ -1084,7 +1104,7 @@ mod tests {
 
     #[test]
     fn compaction_full_rewrite_data_intact() {
-        // T17: 碎片率超阈值 → 触发 rewrite → 数据一致
+        // T17: 碎片率超阈值 → 触发 shadow-write compaction → 数据一致
         let (overlay, _) = new_overlay();
         // 写 3 个文件
         overlay.create("a.bin").unwrap();
@@ -1099,11 +1119,11 @@ mod tests {
         // 删除 b.bin（8B）→ free 8B, total = 14B, ratio = 57% > 50% → 触发 compaction
         overlay.delete("b.bin").unwrap();
         let cs_after = overlay.container_size();
-        // compaction 后只有 a.bin(4B) + c.bin(2B) = 6B 数据
-        assert_eq!(cs_after, super::super::container::DATA_OFFSET + 6);
-        assert!(cs_after < cs_before);
+        // shadow-write：活跃数据 a.bin(4B)+c.bin(2B)=6B 写到尾部 [cs_before, cs_before+6)
+        // container_size = cs_before + 6（增长 6B，旧区域在 free list）
+        assert_eq!(cs_after, cs_before + 6);
 
-        // 数据一致
+        // 数据一致（在新位置）
         let mut buf = [0u8; 4];
         overlay.read_at("a.bin", &mut buf, 0).unwrap();
         assert_eq!(&buf, b"AAAA");
@@ -1111,8 +1131,8 @@ mod tests {
         overlay.read_at("c.bin", &mut buf2, 0).unwrap();
         assert_eq!(&buf2, b"CC");
 
-        // free list 空
-        assert!(overlay.free_list_snapshot().is_empty());
+        // free list 有旧区域（shadow-write 不破坏旧数据，旧区域可复用）
+        assert!(!overlay.free_list_snapshot().is_empty());
 
         // round-trip：重新打开后数据仍一致
         let backend = overlay.backend().clone();
@@ -1120,6 +1140,64 @@ mod tests {
         let mut buf3 = [0u8; 4];
         overlay2.read_at("a.bin", &mut buf3, 0).unwrap();
         assert_eq!(&buf3, b"AAAA");
+    }
+
+    // ── 门禁 10a: compaction 崩溃安全（M-1 修复）─────────────────────
+
+    #[test]
+    fn compaction_crash_persist_fails_old_data_intact() {
+        // compaction shadow-write 完成，但 persist_meta 写入损坏（CRC 失败）
+        // → recover 回退到旧 meta → 旧数据完整（未被 shadow-write 破坏）
+        let backend = Arc::new(MemoryBackend::new());
+        {
+            let overlay = MemOverlay::open(backend.clone()).unwrap();
+            overlay.create("a.bin").unwrap();
+            overlay.write_at("a.bin", b"AAAA", 0).unwrap();
+            overlay.create("b.bin").unwrap();
+            overlay.write_at("b.bin", b"BBBBBBBB", 0).unwrap();
+            overlay.sync("a.bin").unwrap(); // 旧 meta 持久化
+        }
+        // 执行 delete → 触发 compaction（shadow-write + persist_meta）
+        {
+            let overlay = MemOverlay::open(backend.clone()).unwrap();
+            overlay.delete("b.bin").unwrap(); // compaction 完成
+                                              // compaction 的 persist_meta 写了新 meta（generation 递增）
+            let active = overlay.active_meta_slot();
+            // 模拟崩溃：新 meta CRC 损坏（persist 写一半）
+            corrupt_meta_slot(backend.as_ref(), active);
+        }
+        // recover：新 meta CRC 失败 → 回退到旧 meta（sync 时的状态）
+        let overlay2 = MemOverlay::open(backend.clone()).unwrap();
+        // 旧 meta 有 a.bin + b.bin（delete 未提交）
+        let mut buf_a = [0u8; 4];
+        overlay2.read_at("a.bin", &mut buf_a, 0).unwrap();
+        assert_eq!(&buf_a, b"AAAA"); // 旧数据完整 ✓
+        let mut buf_b = [0u8; 8];
+        overlay2.read_at("b.bin", &mut buf_b, 0).unwrap();
+        assert_eq!(&buf_b, b"BBBBBBBB"); // b.bin 仍在（delete 回滚）✓
+    }
+
+    #[test]
+    fn compaction_crash_after_persist_new_data_intact() {
+        // compaction 完成（persist_meta 成功）→ recover → 新数据在尾部完整
+        let backend = Arc::new(MemoryBackend::new());
+        {
+            let overlay = MemOverlay::open(backend.clone()).unwrap();
+            overlay.create("a.bin").unwrap();
+            overlay.write_at("a.bin", b"AAAA", 0).unwrap();
+            overlay.create("b.bin").unwrap();
+            overlay.write_at("b.bin", b"BBBBBBBB", 0).unwrap();
+            overlay.sync("a.bin").unwrap();
+            overlay.delete("b.bin").unwrap(); // compaction 完成
+        }
+        // recover：新 meta active，数据在尾部
+        let overlay2 = MemOverlay::open(backend.clone()).unwrap();
+        let mut buf = [0u8; 4];
+        overlay2.read_at("a.bin", &mut buf, 0).unwrap();
+        assert_eq!(&buf, b"AAAA"); // 新数据完整 ✓
+        assert!(overlay2.read_at("b.bin", &mut [0u8; 1], 0).is_err()); // b.bin 已删除 ✓
+                                                                       // free list 有旧区域
+        assert!(!overlay2.free_list_snapshot().is_empty());
     }
 
     // ── 门禁 11: superblock 自损坏恢复 ─────────────────────────────────

@@ -72,8 +72,8 @@ impl OverlayBackend for OpfsBackend {
     }
 
     fn truncate(&self, sz: u64) -> Result<()> {
-        // 截断到 u32 范围（OPFS 文件大小在 u32 范围内足够）
-        self.sah.truncate_with_u32(sz as u32).map_err(js_err)
+        // SyncAccessHandle.truncate 接受 f64（JS Number），无 4GB u32 限制。
+        self.sah.truncate_with_f64(sz as f64).map_err(js_err)
     }
 }
 
