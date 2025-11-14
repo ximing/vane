@@ -15,7 +15,14 @@ vane-core = { workspace = true, features = ["zstd-decode"] }
 wasm-bindgen = "0.2"
 # web-sys / js-sys optional dep（feature-gated，本模块仅占位不启用浏览器 API）。
 # M2-02 启 opfs（SyncAccessHandle）；M2-03 启 idb；M2-04 启 worker。
-web-sys = { version = "0.3", optional = true }
+# web-sys features 仅启用 OPFS 相关子集（不启完整 FileSystemAccess，控制体积）。
+web-sys = { version = "0.3", optional = true, features = [
+    "FileSystemSyncAccessHandle",
+    "FileSystemReadWriteOptions",
+    "FileSystemFileHandle",
+    "FileSystemDirectoryHandle",
+    "Storage",
+] }
 js-sys = { version = "0.3", optional = true }
 serde_json = { workspace = true }
 
