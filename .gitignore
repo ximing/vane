@@ -4,3 +4,5 @@ node_modules/
 __pycache__/
 *.pyc
 .superpowers/
+# M2-05：wasm 双变体产物（构建脚本产出，不入库）
+target/wasm-variants/

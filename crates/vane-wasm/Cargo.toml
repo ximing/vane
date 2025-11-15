@@ -36,6 +36,10 @@ wasm-bindgen-test = "0.3"
 
 [features]
 default = []
+# M2-05：simd128 变体标注（marker feature，core 算法零 cfg——依赖 LLVM 自动向量化）。
+# 双产物由 scripts/build-wasm-variants.sh 用 RUSTFLAGS="-Ctarget-feature=+simd128" 区分，
+# 非 cargo feature 门控。本 feature 仅供下游标注/条件编译胶水（如探针日志），不进 core。
+simd128 = []
 # M2-02：OPFS VFS 后端（SyncAccessHandle，Worker 内同步）。
 opfs = ["dep:web-sys", "dep:js-sys"]
 # M2-03：IndexedDB 降级 VFS 后端（内存 Vec + 异步 checkpoint，sync best-effort）。
