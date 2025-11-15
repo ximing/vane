@@ -221,14 +221,16 @@ impl vane_core::vfs::Vfs for IdbVfs { /* 8 方法，委托 MemOverlay（全同�
 pub struct VaneWorker { /* 内部 Db/Collection 句柄 + Vfs 实例 */ }
 #[wasm_bindgen]
 impl VaneWorker {
-    #[wasm_bindgen(constructor)]
-    pub fn new(opts: serde_json::Value) -> Promise;  // init：选 Vfs（OPFS/IDB）+ 加载词典（CDN/内联/降级）
-    pub fn open(&self, path: String, opts: serde_json::Value) -> Promise;
-    pub fn collection(&self, name: String, schema: serde_json::Value, opts: serde_json::Value) -> Promise;
-    pub fn add(&self, col: u32, docs: serde_json::Value) -> Promise;
+    // 异步工厂（非 constructor——wasm-bindgen 构造器不能返 Promise）。
+    // JS 用 `const worker = await VaneWorker.create(opts)`。
+    #[wasm_bindgen(js_name = create)]
+    pub fn create(opts: JsValue) -> Promise;  // init：选 Vfs（OPFS/IDB）+ 加载词典（CDN/内联/降级）
+    pub fn open(&self, path: String, opts: JsValue) -> Promise;
+    pub fn collection(&self, name: String, schema: JsValue, opts: JsValue) -> Promise;
+    pub fn add(&self, col: u32, docs: JsValue) -> Promise;
     pub fn flush(&self, col: u32) -> Promise;
-    pub fn search(&self, col: u32, query: serde_json::Value) -> Promise;
-    pub fn delete(&self, col: u32, ids: serde_json::Value) -> Promise;
+    pub fn search(&self, col: u32, query: JsValue) -> Promise;
+    pub fn delete(&self, col: u32, ids: JsValue) -> Promise;
     pub fn compact(&self, col: u32) -> Promise;
     pub fn reindex(&self, col: u32) -> Promise;
     pub fn export(&self, dest: String) -> Promise;

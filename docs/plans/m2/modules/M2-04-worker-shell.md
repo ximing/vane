@@ -39,14 +39,16 @@ SPEC 节号：§4.1（WASM Worker 架构）、§11（core 同步 IO，异步只�
 pub struct VaneWorker { /* db: Option<Db>, collections: HashMap<u32, Collection>, vfs: Box<dyn Vfs> */ }
 #[wasm_bindgen]
 impl VaneWorker {
-    #[wasm_bindgen(constructor)]
-    pub fn new(opts: serde_json::Value) -> js_sys::Promise;  // init: 选 Vfs + 词典加载 + SIMD 探针
-    pub fn open(&self, path: String, opts: serde_json::Value) -> js_sys::Promise;
-    pub fn collection(&self, name: String, schema: serde_json::Value, opts: serde_json::Value) -> js_sys::Promise;
-    pub fn add(&self, col: u32, docs: serde_json::Value) -> js_sys::Promise;
+    // 异步工厂（非 constructor——wasm-bindgen 构造器不能返 Promise）。
+    // JS 用 `const worker = await VaneWorker.create(opts)`。
+    #[wasm_bindgen(js_name = create)]
+    pub fn create(opts: JsValue) -> js_sys::Promise;  // init: 选 Vfs + 词典加载 + SIMD 探针
+    pub fn open(&self, path: String, opts: JsValue) -> js_sys::Promise;
+    pub fn collection(&self, name: String, schema: JsValue, opts: JsValue) -> js_sys::Promise;
+    pub fn add(&self, col: u32, docs: JsValue) -> js_sys::Promise;
     pub fn flush(&self, col: u32) -> js_sys::Promise;
-    pub fn search(&self, col: u32, query: serde_json::Value) -> js_sys::Promise;
-    pub fn delete(&self, col: u32, ids: serde_json::Value) -> js_sys::Promise;
+    pub fn search(&self, col: u32, query: JsValue) -> js_sys::Promise;
+    pub fn delete(&self, col: u32, ids: JsValue) -> js_sys::Promise;
     pub fn compact(&self, col: u32) -> js_sys::Promise;
     pub fn reindex(&self, col: u32) -> js_sys::Promise;
     pub fn export(&self, dest: String) -> js_sys::Promise;  // M2-12 接入
