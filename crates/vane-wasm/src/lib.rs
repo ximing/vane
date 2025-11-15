@@ -25,8 +25,12 @@ use vane_core::types::{FieldDef, Metric, ScalarKind, Schema, VaneError};
 use vane_core::vfs::memory::MemoryVfs;
 use vane_core::vfs::Vfs;
 
+#[cfg(feature = "worker")]
+pub mod dict_loader;
 pub mod simd_probe;
 pub mod vfs;
+#[cfg(feature = "worker")]
+pub mod worker;
 
 // =========================================================================
 // 句柄注册表（与 vane-ffi 同构，wasm32 单线程，RwLock 即线程局部）

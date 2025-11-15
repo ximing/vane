@@ -9,13 +9,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # M2-08：wasm 启 zstd-decode（ruzstd 纯 Rust，读 v2 stored.bin）；不启 zstd-encode（zstd-sys C 库不进 wasm）。
-# 词典永不进 wasm（红线）：不启 jieba/dict-zh。
-# default features 不启 dict-zh（红线）。
+# 词典永不进 wasm（红线）：不启 dict-zh。worker feature 启 jieba 算法代码（DAT/HMM/seg，无词典数据），
+# 须过 800KB 门禁实测；dict-zh 红线永不启。
 vane-core = { workspace = true, features = ["zstd-decode"] }
 wasm-bindgen = "0.2"
-# web-sys / js-sys optional dep（feature-gated，本模块仅占位不启用浏览器 API）。
+# web-sys / js-sys optional dep（feature-gated）。
 # M2-02 启 opfs（SyncAccessHandle）；M2-03 启 idb；M2-04 启 worker。
-# web-sys features 仅启用 OPFS 相关子集（不启完整 FileSystemAccess，控制体积）。
+# web-sys features 仅启用最小子集（控制体积）。
 web-sys = { version = "0.3", optional = true, features = [
     "FileSystemSyncAccessHandle",
     "FileSystemReadWriteOptions",
@@ -24,6 +24,11 @@ web-sys = { version = "0.3", optional = true, features = [
     "Storage",
 ] }
 js-sys = { version = "0.3", optional = true }
+# M2-04：worker 异步 init（getDirectory/createSyncAccessHandle/fetch/IDB）经 JsFuture。
+# 体积预估 +5~15KB gzip（登记 README 全局约束表）。
+wasm-bindgen-futures = { version = "0.4", optional = true }
+# M2-04：词典 CDN sha256 校验（纯 Rust，wasm32 可用）。
+sha2 = { workspace = true, optional = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
@@ -43,5 +48,29 @@ idb = [
     "web-sys/IdbObjectStore",
     "web-sys/IdbTransaction",
 ]
-# M2-04：Dedicated Worker 胶水（postMessage Promise 边界）。
-worker = ["dep:web-sys", "dep:js-sys"]
+# jieba 算法代码（DAT/HMM/seg，无词典数据）——vane-core/jieba 的透传 feature。
+# 词典数据（dict-zh）红线永不启；jieba 算法代码可进 wasm 须过 800KB 门禁实测。
+# worker feature 启用本 feature；单独启用须自行过门禁。
+jieba = ["vane-core/jieba"]
+# M2-04：Dedicated Worker 壳（postMessage Promise 边界 + init 探针 + 词典加载）。
+# 启 jieba 算法代码 + wasm-bindgen-futures + web-sys 浏览器 API + sha2 词典校验 +
+# opfs/idb Vfs 后端。dict-zh 红线永不启（词典数据运行时 fetch/内联）。
+worker = [
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:wasm-bindgen-futures",
+    "dep:sha2",
+    "opfs",
+    "idb",
+    "jieba",
+    "web-sys/Navigator",
+    "web-sys/Request",
+    "web-sys/RequestInit",
+    "web-sys/Response",
+    "web-sys/console",
+    "web-sys/IdbFactory",
+    "web-sys/IdbRequest",
+    "web-sys/IdbOpenDbRequest",
+    "web-sys/IdbTransactionMode",
+    "web-sys/FileSystemGetFileOptions",
+]

@@ -887,8 +887,10 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "serde_json",
+ "sha2",
  "vane-core",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
 ]
