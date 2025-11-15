@@ -40,21 +40,37 @@ pub fn verify_sha256_prefix(bytes: &[u8], expected: &[u8; 8]) -> bool {
 
 /// 读 VFS 缓存（二次启动零网络）。返回缓存的词典字节。
 ///
-/// Vfs trait 无 `size` 方法——读入大缓冲区后按实际读取字节数截断。
-/// 词典 dict.bin 约 5MB，缓冲区设 16MB 上界（防御性）。
+/// Vfs trait 无 `size` 方法——按 chunk 增量读到 EOF，避免固定 16MB 分配。
 fn read_cache(cache_vfs: &dyn Vfs) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; 16 * 1024 * 1024];
-    let n = cache_vfs.read_at(DICT_CACHE_PATH, &mut buf, 0)?;
-    if n == 0 {
+    const CHUNK: usize = 256 * 1024;
+    let mut buf = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let mut chunk = [0u8; CHUNK];
+        let n = cache_vfs.read_at(DICT_CACHE_PATH, &mut chunk, offset)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        offset += n as u64;
+        if n < CHUNK {
+            break;
+        }
+    }
+    if buf.is_empty() {
         return Err(VaneError::NotFound("dict cache empty".into()));
     }
-    buf.truncate(n);
     Ok(buf)
 }
 
 /// 写 VFS 缓存（best-effort，失败不阻断）。
+///
+/// 覆盖写语义：先 delete 旧文件（忽略 not-found），再 create + write_at。
+/// 直接 create 对已存在文件返 Err（overlay.rs create 语义），词典更新时缓存
+/// 无法刷新 → 退化为恒走 CDN。delete+create 保证缓存可刷新（I-1 fix）。
 fn write_cache(cache_vfs: &dyn Vfs, bytes: &[u8]) -> Result<()> {
-    // 覆盖写：先 truncate 再 write_at。
+    // 先删旧缓存（不存在时忽略 Err）。
+    let _ = cache_vfs.delete(DICT_CACHE_PATH);
     cache_vfs.create(DICT_CACHE_PATH)?;
     cache_vfs.write_at(DICT_CACHE_PATH, bytes, 0)?;
     Ok(())
@@ -279,5 +295,58 @@ mod tests {
             Some(&vfs),
         ));
         assert!(result.is_none(), "缓存 sha256 不匹配 + fetch 失败 → None");
+    }
+
+    /// I-1：词典更新后缓存能刷新（delete+create 覆盖旧缓存）。
+    /// 首次缓存 v1 → 词典变更 v2 → write_cache 成功 → 二次启动命中 v2 缓存。
+    #[test]
+    fn cache_refresh_after_dict_update() {
+        let vfs = MemoryVfs::new();
+        let v1 = b"dict-version-1";
+        let v2 = b"dict-version-2-longer";
+
+        // 首次缓存 v1。
+        write_cache(&vfs, v1).unwrap();
+        let read1 = read_cache(&vfs).unwrap();
+        assert_eq!(read1, v1);
+
+        // 词典更新 → 覆盖写 v2（delete+create+write_at）。
+        write_cache(&vfs, v2).unwrap();
+        let read2 = read_cache(&vfs).unwrap();
+        assert_eq!(read2, v2, "缓存刷新后应读回 v2");
+
+        // 二次启动命中缓存（sha256 匹配，零网络）。
+        let v2_prefix = {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            h.update(v2);
+            let hash = h.finalize();
+            let mut p = [0u8; 8];
+            p.copy_from_slice(&hash[..8]);
+            p
+        };
+        let result = block_on(load_dict(
+            None,
+            Some("https://cdn.example/dict.bin"),
+            Some(&v2_prefix),
+            Some(&vfs),
+        ));
+        assert_eq!(
+            result,
+            Some(v2.to_vec()),
+            "二次启动应命中刷新后的缓存（sha256 匹配，零网络）"
+        );
+    }
+
+    /// M-6：read_cache 不固定分配 16MB——增量读到 EOF。
+    #[test]
+    fn read_cache_incremental_read() {
+        let vfs = MemoryVfs::new();
+        // 写入超过单 chunk（256KB）的数据，验证增量读。
+        let bytes = vec![0xABu8; 300 * 1024];
+        write_cache(&vfs, &bytes).unwrap();
+        let read = read_cache(&vfs).unwrap();
+        assert_eq!(read.len(), 300 * 1024);
+        assert!(read.iter().all(|&b| b == 0xAB));
     }
 }

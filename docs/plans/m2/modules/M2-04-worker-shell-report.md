@@ -92,3 +92,38 @@ cargo build --release --target wasm32-unknown-unknown -p vane-wasm --features wo
 - 词典永不进 wasm：dict-zh 红线永不启；jieba 算法代码进 wasm 过 800KB 门禁（399 KB）。
 - 降级不抛错：dict_loader 降级 + jieba 降级 bigram 单测守护。
 - core 同步 IO：异步只在 init + postMessage 边界。
+
+## 8. Fix Round 1（评审 PASS_WITH_FINDINGS 修复）
+
+### I-1（功能，必修）：dict cache 更新失败致"二次启动零网络"退化
+- **问题**：`write_cache` 用 `create()` 后 `write_at`，但 overlay `create` 对已存在文件返 Err。错误被 `let _ = write_cache(...)` 吞掉 → 词典更新时缓存永久停留首版 → 每次启动 sha256 不匹配 → 回退 CDN。
+- **修复**：`write_cache` 先 `delete(path)`（忽略 not-found Err）再 `create()` + `write_at`。保证词典更新后缓存可刷新。
+- **测试**：`cache_refresh_after_dict_update`——首次缓存 v1 → 词典变更 v2 → write_cache 成功刷新 → 二次启动命中 v2 缓存（sha256 匹配，零网络）。
+
+### M-1（契约同步）：计划/README create 工厂
+- `docs/plans/m2/modules/M2-04-worker-shell.md` §3 + `docs/plans/m2/README.md` M2-04 契约的 `#[wasm_bindgen(constructor)] new` 同步为实际 `VaneWorker.create(opts)` 静态工厂（`#[wasm_bindgen(js_name = create)]`），注明 JS 用 `await VaneWorker.create(opts)`。方法签名 `serde_json::Value` → `JsValue`。
+
+### M-6（分配）：read_cache 每次 init 分配 16MB
+- **问题**：`read_cache` 每次 init 固定分配 16MB 缓冲区。
+- **修复**：改为 256KB chunk 增量读到 EOF，避免固定 16MB 分配。
+- **测试**：`read_cache_incremental_read`——写入 300KB 数据验证增量读正确。
+
+### M-8（持久化）：close_sync 不 flush collections
+- **问题**：`close_sync` 不 flush 未落盘 collection → 丢未 flush 写入。
+- **修复**：`close_sync` 前 flush 所有 collection（best-effort，flush 失败不阻断 close）。
+- **测试**：`close_flushes_pending_collections`——add 不显式 flush → close 不抛错（隐式 flush）。
+
+### 自证门禁（fix round 1）
+| # | 门禁 | 结果 |
+|---|------|------|
+| 1 | `cargo check --target wasm32 -p vane-wasm --features worker` | ✅ PASS |
+| 2 | `cargo test --workspace --all-features` | ✅ 456 passed（453 + 3 新增） |
+| 3 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | ✅ clean |
+| 4 | `cargo fmt --all -- --check` | ✅ clean |
+| 5 | `bash scripts/check-no-std-fs.sh` | ✅ OK |
+| 6 | `cargo deny check` | ✅ all ok |
+| 7 | 800KB 体积（worker+jieba gzip） | ✅ 399 KB (409,397 bytes) |
+| 8 | dict cache 刷新测试 | ✅ `cache_refresh_after_dict_update` |
+
+### 接受不修（park，carry-forward）
+- M-2 §12.4 节号误引（实为 §12.3/§10）、M-3 worker.js pending Map 死代码、M-4 select_vfs persistence 降级 MemoryVfs、M-5 wasm-bindgen 无 catch_unwind、M-7 opfs_available 无 round-trip 探针——均非阻塞。

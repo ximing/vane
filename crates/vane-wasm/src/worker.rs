@@ -809,6 +809,11 @@ impl VaneWorker {
 
     fn close_sync(&self) -> Result<(), VaneError> {
         let mut inner = self.inner.borrow_mut();
+        // M-8：close 前 flush 所有未落盘 collection（数据持久化），
+        // 避免丢未 flush 的缓冲区写入。flush 失败不阻断 close（best-effort）。
+        for col in inner.collections.values() {
+            let _ = col.flush();
+        }
         if let Some(db) = inner.db.as_ref() {
             let _ = db.close();
         }
@@ -1070,6 +1075,25 @@ mod tests {
 
         let result = worker.open_sync("test-db", OpenOptions::default());
         assert!(result.is_err(), "close 后调用应失败（I-7）");
+    }
+
+    /// M-8：close 前 flush 所有 collection（未落盘写入不丢失）。
+    #[test]
+    fn close_flushes_pending_collections() {
+        let worker = VaneWorker::new_memory();
+        worker.open_sync("test-db", OpenOptions::default()).unwrap();
+
+        let schema = parse_schema(&serde_json::from_str(schema_json()).unwrap()).unwrap();
+        let col_id = worker
+            .collection_sync("docs", schema, CollectionOptions::default())
+            .unwrap();
+
+        // add 但不显式 flush（缓冲区有未落盘写入）。
+        let docs = parse_docs(&serde_json::from_str(docs_json()).unwrap()).unwrap();
+        worker.add_sync(col_id, docs).unwrap();
+
+        // close 应 flush 未落盘 collection，不抛错。
+        worker.close_sync().unwrap();
     }
 
     /// 测试门禁 10：opfs_available 逻辑分支（node 返 false → 选 IDB → 降级 memory）。
