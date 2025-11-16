@@ -22,6 +22,35 @@ use crate::vfs::Vfs;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+/// M2-09：暴力搜索分发——feature `sq8` 时优先 SQ8 量化路径（内存降 4 倍），
+/// 否则 f32 `brute_search`。SQ8 仅暴力回退路径（HNSW 导航仍用 f32，精度优先）。
+///
+/// I-5：`cfg(feature="sq8")` 在 segment/vector 编解码处（SPEC v1.2 释义允许）。
+/// 签名不变：`brute_search` 原签名保留；本函数是 additive 分发层。
+fn brute_search_dispatch(
+    reader: &SegmentReader,
+    qv: &[f32],
+    metric: crate::types::Metric,
+    want: usize,
+    merged_filter: Option<&roaring::RoaringBitmap>,
+    base: u64,
+) -> Vec<crate::types::ScoredDoc> {
+    let dim = reader.dim();
+    #[cfg(feature = "sq8")]
+    if let Some(bundle) = reader.sq8_vectors() {
+        return crate::vector::sq8::brute_search_sq8(
+            bundle,
+            dim,
+            qv,
+            metric,
+            want,
+            merged_filter,
+            base,
+        );
+    }
+    brute_search(reader.vectors(), dim, qv, metric, want, merged_filter, base)
+}
+
 pub struct Collection {
     pub(crate) inner: Arc<CollectionInner>,
 }
@@ -769,17 +798,15 @@ impl Collection {
                             // R-hnsw-vec：向量不进 hnsw.bin，由 SegmentReader.vectors() 传入共享单一副本。
                             hr.search(qv, want, ef, merged_filter, base, reader.vectors())
                         } else {
-                            brute_search(
-                                reader.vectors(),
-                                reader.dim(),
-                                qv,
-                                metric,
-                                want,
-                                merged_filter,
-                                base,
-                            )
+                            // M2-09：SQ8 暴力回退（feature sq8 时优先量化路径，否则 f32 brute_search）。
+                            brute_search_dispatch(reader, qv, metric, want, merged_filter, base)
                         }
+                    } else if allow_hnsw {
+                        // force_brute 路径（正常搜索低选择率回退）→ SQ8 量化路径降内存。
+                        brute_search_dispatch(reader, qv, metric, want, merged_filter, base)
                     } else {
+                        // baseline 路径（search_brute_baseline，allow_hnsw=false）→ f32 精确，
+                        // 不走 SQ8（基线是 recall 基准，必须精确，SPEC §13.2-1）。
                         brute_search(
                             reader.vectors(),
                             reader.dim(),

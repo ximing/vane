@@ -1051,3 +1051,114 @@ fn m2_08_stored_v2_normal_path_still_readable() {
     assert_eq!(map.get(&0).unwrap().text, "压缩成功路径");
     assert_eq!(map.get(&0).unwrap().meta_json, r#"{"ok":true}"#);
 }
+
+// ---------------------------------------------------------------------------
+// M2-09：SQ8 量化缓存懒加载测试（feature `sq8`）
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sq8")]
+#[test]
+fn sq8_vectors_lazy_load_returns_some() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let tok_id = TokenizerId([0x33; 32]);
+    let mut writer = SegmentWriter::new(vfs.clone(), "segments", &schema, &tok_id, 0).unwrap();
+    writer
+        .add_doc("a", Some(&[1.0, 2.0, 3.0, 4.0]), r#"{"x":1}"#)
+        .unwrap();
+    writer
+        .add_doc("b", Some(&[5.0, 6.0, 7.0, 8.0]), r#"{"x":2}"#)
+        .unwrap();
+    let meta = writer.finalize().unwrap();
+    let seg_dir = format!("segments/seg_{}", meta.ulid);
+    let reader = SegmentReader::open(&vfs, &seg_dir).unwrap();
+
+    // 首次调用触发编码，返回 Some
+    let bundle = reader.sq8_vectors();
+    assert!(bundle.is_some(), "sq8_vectors() should return Some for non-empty segment");
+    let b = bundle.unwrap();
+    assert_eq!(b.data.len(), 8); // 2 docs × 4 dim
+    assert_eq!(b.min.len(), 4);
+    assert_eq!(b.max.len(), 4);
+    // 验证 min/max 正确
+    assert_eq!(b.min, vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(b.max, vec![5.0, 6.0, 7.0, 8.0]);
+
+    // 二次调用幂等（同一引用）
+    let bundle2 = reader.sq8_vectors();
+    assert!(bundle2.is_some());
+    let b2 = bundle2.unwrap();
+    assert_eq!(b2.data, b.data);
+}
+
+#[cfg(feature = "sq8")]
+#[test]
+fn sq8_vectors_empty_segment_returns_none() {
+    // 空段（doc_count==0）→ sq8_vectors() 返回 None
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let tok_id = TokenizerId([0x44; 32]);
+    let writer = SegmentWriter::new(vfs.clone(), "segments", &schema, &tok_id, 0).unwrap();
+    let meta = writer.finalize().unwrap();
+    let seg_dir = format!("segments/seg_{}", meta.ulid);
+    let reader = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    assert_eq!(reader.doc_count(), 0);
+    assert!(reader.sq8_vectors().is_none());
+}
+
+#[cfg(feature = "sq8")]
+#[test]
+fn sq8_vectors_does_not_write_segment_files() {
+    // I-1 守护：SQ8 是内存缓存，不写段文件（vectors.bin 仍 f32 落盘）
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let tok_id = TokenizerId([0x55; 32]);
+    let mut writer = SegmentWriter::new(vfs.clone(), "segments", &schema, &tok_id, 0).unwrap();
+    writer
+        .add_doc("a", Some(&[1.0, 2.0, 3.0, 4.0]), r#"{}"#)
+        .unwrap();
+    let meta = writer.finalize().unwrap();
+    let seg_dir = format!("segments/seg_{}", meta.ulid);
+
+    // 记录 finalize 后的文件列表
+    let files_before = vfs.list(&seg_dir).unwrap();
+
+    let reader = SegmentReader::open(&vfs, &seg_dir).unwrap();
+    // 触发 sq8_vectors 编码
+    let _ = reader.sq8_vectors();
+    // 也触发 vectors 加载
+    let _ = reader.vectors();
+
+    // 文件列表不变（SQ8 不写段文件）
+    let files_after = vfs.list(&seg_dir).unwrap();
+    assert_eq!(
+        files_before, files_after,
+        "SQ8 encoding must not write segment files (I-1)"
+    );
+    // 不应有 sq8 相关文件
+    assert!(
+        !files_after.iter().any(|f| f.contains("sq8")),
+        "no sq8 files should exist in segment dir"
+    );
+}

@@ -338,6 +338,10 @@ pub struct SegmentReader {
     // M2-07：stored 首次访问按需加载（OnceLock）。open 不读 stored.bin payload（仅头探测）。
     // key 为段内局部 docid（0 起，与 id_map 同一 key 空间）。
     stored: OnceLock<std::collections::HashMap<u64, StoredReadEntry>>,
+    // M2-09：SQ8 量化缓存（feature `sq8`）。首次 sq8_vectors() 调用时从 vectors() 编码。
+    // 不写段文件（I-1：段不可变；vectors.bin 仍 f32 落盘，SQ8 仅内存缓存）。
+    #[cfg(feature = "sq8")]
+    sq8_vectors: OnceLock<Option<crate::vector::sq8::Sq8Bundle>>,
 }
 
 /// 模块级辅助：循环 read_at 直到 EOF，拼出完整文件字节。
@@ -438,6 +442,8 @@ impl SegmentReader {
             v2_header_dim,
             id_map,
             stored: OnceLock::new(),
+            #[cfg(feature = "sq8")]
+            sq8_vectors: OnceLock::new(),
         })
     }
 
@@ -503,6 +509,29 @@ impl SegmentReader {
                 Self::load_vectors(self.vfs.as_ref(), &self.segment_dir).unwrap_or_default()
             })
             .as_slice()
+    }
+    /// M2-09：SQ8 量化缓存（feature `sq8`，SPEC §13.1）。
+    ///
+    /// 首次调用从 `vectors()` 编码为 SQ8（每维 1 字节，内存降 4 倍），后续幂等返回同一引用。
+    /// 空段（doc_count==0 或 dim==0）返回 `None`。
+    ///
+    /// 不变量 I-1：SQ8 是内存缓存，不写段文件（vectors.bin 仍 f32 落盘）。
+    /// 不变量 I-5：`cfg(feature="sq8")` 在 segment 编解码处（允许）。
+    /// 签名不变：`vectors()` 仍返回 `&[f32]`，本方法是 additive 扩展。
+    #[cfg(feature = "sq8")]
+    pub fn sq8_vectors(&self) -> Option<&crate::vector::sq8::Sq8Bundle> {
+        let bundle = self.sq8_vectors.get_or_init(|| {
+            let dim = self.dim();
+            if dim == 0 || self.meta.doc_count == 0 {
+                return None;
+            }
+            let vecs = self.vectors();
+            if vecs.is_empty() {
+                return None;
+            }
+            Some(crate::vector::sq8::encode_sq8(vecs, dim))
+        });
+        bundle.as_ref()
     }
     /// 返回向量维度。M2-07：首次调用按需计算（OnceLock）。
     /// - v2 头（version==2）：用 open 期预存的 `v2_header_dim`（已校验），不触发 vectors 加载、不再 read_at。
