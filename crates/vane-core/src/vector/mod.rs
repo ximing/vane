@@ -208,6 +208,37 @@ pub fn brute_search(
     out
 }
 
+// ---------------------------------------------------------------------------
+// M2-09：暴力搜索分发层（I-5 B-1 fix：cfg(feature="sq8") 下沉到 vector 模块）
+// ---------------------------------------------------------------------------
+
+/// 暴力搜索分发——feature `sq8` 时优先 SQ8 量化路径（内存降 4 倍），
+/// 否则/空段时 f32 `brute_search`。
+///
+/// **I-5 fix round 1**：`cfg(feature="sq8")` 仅出现在 vector 模块（编解码处），
+/// api/collection.rs search 路径零 cfg 属性——调用本函数时不感知 feature。
+///
+/// - feature on + reader.sq8_vectors() 返回 Some → `brute_search_sq8`（SQ8 量化路径）
+/// - feature off / 空段（None） → `brute_search`（f32 精确路径）
+///
+/// SQ8 仅用于暴力回退路径（HNSW 导航仍用 f32，精度优先，首选方案）。
+/// `brute_search` 原签名不变；本函数是 additive 分发层。
+pub fn brute_search_dispatch(
+    reader: &crate::segment::SegmentReader,
+    qv: &[f32],
+    metric: Metric,
+    want: usize,
+    merged_filter: Option<&roaring::RoaringBitmap>,
+    base: u64,
+) -> Vec<ScoredDoc> {
+    let dim = reader.dim();
+    #[cfg(feature = "sq8")]
+    if let Some(bundle) = reader.sq8_vectors() {
+        return sq8::brute_search_sq8(bundle, dim, qv, metric, want, merged_filter, base);
+    }
+    brute_search(reader.vectors(), dim, qv, metric, want, merged_filter, base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

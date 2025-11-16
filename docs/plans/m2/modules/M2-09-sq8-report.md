@@ -108,3 +108,34 @@ HnswReader::search(          → crates/vane-core/src/hnsw/mod.rs:624
 3. **baseline 精确性**：`search_brute_baseline` 恒用 f32 `brute_search`（不走 SQ8），保证 recall 基准精确。正常搜索的暴力回退走 SQ8（降内存）。
 
 4. **HNSW 不用 SQ8**：首选方案。100万规模内存估算：SQ8 暴力回退 38MB + HNSW f32 60MB + 倒排 + stored ≈ <200MB。若 100万实测仍超，需评估 HNSW 也用 SQ8 → 改 HnswReader::search 签名 → 需 SPEC 修订。
+
+## 7. Fix Round 1（B-1 I-5 违规修复）
+
+**问题**：`brute_search_dispatch` 原位于 `api/collection.rs`，函数体内含 `#[cfg(feature = "sq8")]`。该函数被 search 路径直接调用，SPEC v1.2 I-5 释义仅允许 cfg(feature=sq8) 在 segment/vector 编解码处——api search 路径出现实际 cfg 属性 = I-5 违规。
+
+**修复（dispatch 下沉到 vector 模块）**：
+1. `brute_search_dispatch` 从 `api/collection.rs` 移至 `crates/vane-core/src/vector/mod.rs`（`pub fn brute_search_dispatch(reader: &SegmentReader, qv, metric, want, filter, base) -> Vec<ScoredDoc>`）。
+2. `cfg(feature="sq8")` 下沉到该函数内部——feature on 时优先 `sq8::brute_search_sq8(reader.sq8_vectors()?, ...)`，否则/None 时 `brute_search(reader.vectors(), ...)`。
+3. `api/collection.rs` search 路径改为调 `crate::vector::brute_search_dispatch(reader, qv, metric, want, merged_filter, base)`——**api/collection.rs 零 `#[cfg(feature = "sq8")]` 属性**。
+4. baseline 路径（`allow_hnsw=false`）仍恒用 f32 `brute_search`（精确基准，不走 dispatch）。
+
+**验证**：
+```
+$ grep -n 'cfg(feature = "sq8")\|cfg(feature="sq8")' crates/vane-core/src/api/collection.rs
+ZERO sq8 cfg in api/collection.rs (I-5 OK)
+```
+
+**自证门禁（fix round 1）**：
+| 门禁 | 结果 |
+|------|------|
+| `cargo test --workspace --all-features` | 480 passed, 0 failed, 1 ignored（不回退） |
+| `cargo test -p vane-core --features sq8` | 332 passed, 0 failed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
+| `cargo fmt --all -- --check` | clean |
+| `cargo check --target wasm32-unknown-unknown -p vane-core --features sq8` | 通过 |
+| `bash scripts/check-no-std-fs.sh` | OK |
+| `cargo deny check` | ok |
+| grep api/collection.rs 无 `#[cfg(feature = "sq8")]` | ZERO（I-5 严格读法满足） |
+| recall_regression 五档三模式 | 全绿 |
+| 内存 <200MB | 通过 |
+
