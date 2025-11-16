@@ -235,3 +235,23 @@ jobs:
         run: |
           find target/ -name "libvane_ffi.a" -path "*${{ matrix.zig_target }}*" | head -1
           ls -lh target/${{ matrix.zig_target }}/release/libvane_ffi.a || true
+
+  wasm-recall:
+    # M2-06 §8.4：SIMD/scalar 双变体召回回归（wasm32，node）。
+    # 双产物构建（RUSTFLAGS=+simd128 / 默认）+ wasm-bindgen-test-runner 跑
+    # 五档×三模式 recall@10≥0.95 + 跨变体 Jaccard≥0.99 硬断言。
+    # node v20 支持 simd128（两产物均可在 node 跑）。
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --locked --version 0.2.127
+      - name: Run dual-variant recall regression (simd + scalar + Jaccard)
+        run: bash scripts/run-wasm-recall.sh

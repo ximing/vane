@@ -1,0 +1,4 @@
+# M2-06：wasm32 测试运行器（wasm-bindgen-test-runner，node）。
+# 仅 `cargo test/run --target wasm32-unknown-unknown` 生效，不影响 `cargo build`。
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"
