@@ -45,6 +45,10 @@ jieba = ["zstd-decode"]
 # dict-zh：启用 jieba + 捆绑 vane-dict-zh 数据包，Db::open 自动加载词典。
 # vane-node 启用此 feature；vane-core 默认不启用（wasm32 check 不涉）。
 dict-zh = ["jieba", "dep:vane-dict-zh"]
+# sq8：SQ8 标量量化（SPEC §13.1，M2-09）。每维 1 字节，内存降 4 倍。
+# 纯算术，无新依赖，wasm32 可编译。仅用于暴力回退路径（HNSW 导航仍用 f32）。
+# I-5：cfg(feature="sq8") 是存储编解码能力开关，允许在 segment/vector 编解码处。
+sq8 = []
 
 [dev-dependencies]
 criterion = "0.5"

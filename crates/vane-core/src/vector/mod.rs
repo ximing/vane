@@ -7,13 +7,19 @@ use std::collections::BinaryHeap;
 
 use crate::types::{Metric, ScoredDoc, DIM_MAX};
 
+// M2-09：SQ8 标量量化（feature `sq8`，纯算术，wasm32 可编译）。
+#[cfg(feature = "sq8")]
+pub mod sq8;
+
 /// f32 的全序包装：NaN 视为 -∞（最小），保证 BinaryHeap 可用。
 /// 这是 score 排序的唯一真相源，避免 f32 无 Ord 导致堆污染。
+///
+/// M2-09：`pub(crate)` 供 `vector::sq8` 模块复用同一排序逻辑（避免重复实现 NaN 处理）。
 #[derive(Debug, Clone, Copy)]
-struct Keyf32(f32);
+pub(crate) struct Keyf32(f32);
 
 impl Keyf32 {
-    fn val(self) -> f32 {
+    pub(crate) fn val(self) -> f32 {
         self.0
     }
 }
