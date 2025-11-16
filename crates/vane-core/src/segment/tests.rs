@@ -1082,7 +1082,10 @@ fn sq8_vectors_lazy_load_returns_some() {
 
     // 首次调用触发编码，返回 Some
     let bundle = reader.sq8_vectors();
-    assert!(bundle.is_some(), "sq8_vectors() should return Some for non-empty segment");
+    assert!(
+        bundle.is_some(),
+        "sq8_vectors() should return Some for non-empty segment"
+    );
     let b = bundle.unwrap();
     assert_eq!(b.data.len(), 8); // 2 docs × 4 dim
     assert_eq!(b.min.len(), 4);
