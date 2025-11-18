@@ -70,6 +70,9 @@ pub(crate) struct CollectionInner {
     // reindex 重建分词器时用（run_reindex 不持有 DbInner）。
     #[cfg(feature = "jieba")]
     jieba_dict: Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>,
+    // M2-10：Executor（从 DbInner 克隆 Arc）。search 路径用 Executor::scope 并行搜各段。
+    // 平台分支在 executor/mod.rs（I-5），此处零 cfg。
+    pub(crate) executor: Arc<dyn crate::executor::Executor>,
 }
 
 struct WriteState {
@@ -196,6 +199,7 @@ impl CollectionInner {
             pending_dict: RwLock::new(Vec::new()),
             #[cfg(feature = "jieba")]
             jieba_dict: jieba_dict_snapshot,
+            executor: db.executor.clone(),
         })
     }
 
@@ -744,83 +748,144 @@ impl Collection {
             None => false,
         };
 
+        // M2-10：Executor 并行搜索各段 → 归并（SPEC §11/§8.1）。
+        // per-segment 结果槽：每段一对 (vec_hits, text_hits)，join_all 后串行归并。
+        // I-2 双索引原子：段内 vector/text 在同任务产出，跨段归并在 join_all 后串行合并，
+        // 不破坏双索引一致性（段快照在 flush 时原子切换，搜索期只读不变）。
+        //
+        // join_all 接收 owned tasks（Box<dyn FnOnce() + Send>），任务经 Arc clone 持有
+        // 数据（reader/inv_reader/hnsw_reader/query_vec/query_text/filter/tokenizer）。
+        type SegResult =
+            Arc<std::sync::Mutex<(Vec<crate::types::ScoredDoc>, Vec<crate::types::ScoredDoc>)>>;
+        let n_segs = snap.len();
+        let seg_results: Vec<SegResult> = (0..n_segs)
+            .map(|_| Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new()))))
+            .collect();
+
+        // 共享数据 Arc 化（避免 per-task 深拷贝）
+        let query_vec: Option<Arc<[f32]>> = query.vector.as_ref().map(|v| v.as_slice().into());
+        let query_text: Option<Arc<str>> = query.text.as_ref().map(|s| s.as_str().into());
+        let filter_bm_arc: Option<Arc<roaring::RoaringBitmap>> = filter_bm_owned.map(Arc::new);
+        let tokenizer_arc: Arc<dyn crate::tokenizer::Tokenizer> =
+            self.inner.tokenizer.read().unwrap().clone();
+
         // snap/inv_readers/hnsw_readers 在 flush/restore 中成对维护，zip 迭代对齐
-        for ((reader, inv_reader), hnsw_reader) in
-            snap.iter().zip(inv_readers.iter()).zip(hnsw_readers.iter())
+        let mut tasks: Vec<Box<dyn FnOnce() + Send>> = Vec::with_capacity(n_segs);
+        for (i, ((reader, inv_reader), hnsw_reader)) in snap
+            .iter()
+            .zip(inv_readers.iter())
+            .zip(hnsw_readers.iter())
+            .enumerate()
         {
             let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
-            // 03-pre-filter：filter_bm 已含 tombstone 排除，直接透传各段 search。
-            let merged_filter: Option<&roaring::RoaringBitmap> = filter_bm;
-            // vector 路
-            if matches!(mode, SearchMode::Hybrid | SearchMode::Vector) {
-                if let (Some(qv), Some(metric)) = (&query.vector, vf) {
-                    let want = if matches!(mode, SearchMode::Hybrid) {
-                        cand
-                    } else {
-                        topk
-                    };
-                    // 01-hnsw：有 HnswReader 且无需强制暴力 → HNSW 搜索；
-                    // 否则 fallback brute_search（M0 段无 hnsw.bin / 低选择率回退 / 写失败 /
-                    // search_brute_baseline 基线口径强制 brute）。
-                    let use_hnsw = allow_hnsw && !force_brute;
-                    let mut hits = if use_hnsw {
-                        if let Some(hr) = hnsw_reader {
-                            let ef = hr.ef_construction().max(want as u32 * 4) as usize;
-                            // R-hnsw-vec：向量不进 hnsw.bin，由 SegmentReader.vectors() 传入共享单一副本。
-                            hr.search(qv, want, ef, merged_filter, base, reader.vectors())
+            let reader = reader.clone();
+            let inv_reader = inv_reader.clone();
+            let hnsw_reader = hnsw_reader.clone();
+            let results_slot = seg_results[i].clone();
+            let qv = query_vec.clone();
+            let qt = query_text.clone();
+            let metric_opt = vf;
+            let mode_local = mode;
+            let force_brute_local = force_brute;
+            let allow_hnsw_local = allow_hnsw;
+            let cand_local = cand;
+            let topk_local = topk;
+            let merged_filter = filter_bm_arc.clone();
+            let tokenizer = tokenizer_arc.clone();
+            tasks.push(Box::new(move || {
+                let mut vec_hits = Vec::new();
+                let mut text_hits = Vec::new();
+                // vector 路
+                if matches!(mode_local, SearchMode::Hybrid | SearchMode::Vector) {
+                    if let (Some(qv), Some(metric)) = (qv.as_deref(), metric_opt) {
+                        let want = if matches!(mode_local, SearchMode::Hybrid) {
+                            cand_local
                         } else {
-                            // M2-09：SQ8 暴力回退（dispatch 在 vector 模块，api 零 cfg，I-5）。
+                            topk_local
+                        };
+                        // 01-hnsw：有 HnswReader 且无需强制暴力 → HNSW 搜索；
+                        // 否则 fallback brute_search（M0 段无 hnsw.bin / 低选择率回退 / 写失败 /
+                        // search_brute_baseline 基线口径强制 brute）。
+                        let use_hnsw = allow_hnsw_local && !force_brute_local;
+                        let hits = if use_hnsw {
+                            if let Some(hr) = &hnsw_reader {
+                                let ef = hr.ef_construction().max(want as u32 * 4) as usize;
+                                // R-hnsw-vec：向量不进 hnsw.bin，由 SegmentReader.vectors() 传入共享单一副本。
+                                hr.search(
+                                    qv,
+                                    want,
+                                    ef,
+                                    merged_filter.as_deref(),
+                                    base,
+                                    reader.vectors(),
+                                )
+                            } else {
+                                // M2-09：SQ8 暴力回退（dispatch 在 vector 模块，api 零 cfg，I-5）。
+                                crate::vector::brute_search_dispatch(
+                                    &reader,
+                                    qv,
+                                    metric,
+                                    want,
+                                    merged_filter.as_deref(),
+                                    base,
+                                )
+                            }
+                        } else if allow_hnsw_local {
+                            // force_brute 路径（正常搜索低选择率回退）→ SQ8 量化路径降内存。
                             crate::vector::brute_search_dispatch(
-                                reader,
+                                &reader,
                                 qv,
                                 metric,
                                 want,
-                                merged_filter,
+                                merged_filter.as_deref(),
                                 base,
                             )
-                        }
-                    } else if allow_hnsw {
-                        // force_brute 路径（正常搜索低选择率回退）→ SQ8 量化路径降内存。
-                        crate::vector::brute_search_dispatch(
-                            reader,
-                            qv,
-                            metric,
-                            want,
-                            merged_filter,
-                            base,
-                        )
-                    } else {
-                        // baseline 路径（search_brute_baseline，allow_hnsw=false）→ f32 精确，
-                        // 不走 SQ8（基线是 recall 基准，必须精确，SPEC §13.2-1）。
-                        brute_search(
-                            reader.vectors(),
-                            reader.dim(),
-                            qv,
-                            metric,
-                            want,
-                            merged_filter,
-                            base,
-                        )
-                    };
-                    vec_candidates.append(&mut hits);
-                }
-            }
-            // text 路
-            if matches!(mode, SearchMode::Hybrid | SearchMode::Text) {
-                if let Some(qt) = &query.text {
-                    let tokens = self.inner.tokenizer.read().unwrap().tokenize(qt);
-                    let mut hits = inv_reader.search(
-                        &tokens,
-                        if matches!(mode, SearchMode::Hybrid) {
-                            cand
                         } else {
-                            topk
-                        },
-                        merged_filter,
-                    );
-                    text_candidates.append(&mut hits);
+                            // baseline 路径（search_brute_baseline，allow_hnsw=false）→ f32 精确，
+                            // 不走 SQ8（基线是 recall 基准，必须精确，SPEC §13.2-1）。
+                            brute_search(
+                                reader.vectors(),
+                                reader.dim(),
+                                qv,
+                                metric,
+                                want,
+                                merged_filter.as_deref(),
+                                base,
+                            )
+                        };
+                        vec_hits = hits;
+                    }
                 }
-            }
+                // text 路
+                if matches!(mode_local, SearchMode::Hybrid | SearchMode::Text) {
+                    if let Some(qt) = qt.as_deref() {
+                        let tokens = tokenizer.tokenize(qt);
+                        let hits = inv_reader.search(
+                            &tokens,
+                            if matches!(mode_local, SearchMode::Hybrid) {
+                                cand_local
+                            } else {
+                                topk_local
+                            },
+                            merged_filter.as_deref(),
+                        );
+                        text_hits = hits;
+                    }
+                }
+                let mut slot = results_slot.lock().unwrap();
+                slot.0 = vec_hits;
+                slot.1 = text_hits;
+            }));
+        }
+
+        // 并行执行（native: rayon；wasm/serial: 串行）
+        self.inner.executor.join_all(tasks);
+
+        // 归并多段结果（join_all 结束后串行）
+        for sr in &seg_results {
+            let slot = sr.lock().unwrap();
+            vec_candidates.extend_from_slice(&slot.0);
+            text_candidates.extend_from_slice(&slot.1);
         }
 
         // 归并多段 topK（取全局 topK/cand）

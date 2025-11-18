@@ -835,6 +835,7 @@ name = "vane-core"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rayon",
  "roaring",
  "rust-stemmers",
  "ruzstd",

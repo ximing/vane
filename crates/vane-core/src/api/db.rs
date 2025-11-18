@@ -19,6 +19,9 @@ pub(crate) struct DbInner {
     pub(crate) db_path: String,
     pub(crate) manifest_store: ManifestStore,
     pub(crate) collections: RwLock<HashMap<String, Arc<CollectionInner>>>,
+    // M2-10：Executor（SPEC §11）。open 时经 executor::default_executor() 工厂构造，
+    // 平台分支集中在 executor/mod.rs（I-5）。search 路径用 Executor::scope 并行搜各段。
+    pub(crate) executor: Arc<dyn crate::executor::Executor>,
     // I3：Db 级 fallback，restore 时用（M0 restore 直接用 opts.auto_commit 传入参数；
     // 此字段保留供未来 reopen/动态配置场景，故 allow dead_code）
     #[allow(dead_code)]
@@ -43,11 +46,14 @@ impl Db {
         // 加载失败不抛错（SPEC §13.2-2 ④）：jieba_dict=None → collection 创建时降级 CjkBigram。
         #[cfg(feature = "jieba")]
         let jieba_dict = load_default_jieba_dict();
+        // M2-10：Executor 工厂构造（平台分支在 executor/mod.rs，I-5）。
+        let executor = crate::executor::default_executor();
         let inner = Arc::new(DbInner {
             vfs: vfs.clone(),
             db_path: path.to_string(),
             manifest_store,
             collections,
+            executor,
             auto_commit: opts.auto_commit.clone(),
             #[cfg(feature = "jieba")]
             jieba_dict: std::sync::RwLock::new(jieba_dict),
