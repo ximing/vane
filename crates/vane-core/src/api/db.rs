@@ -169,9 +169,10 @@ impl Db {
             .collect()
     }
 
-    // I1 裁决：M0 占位
-    pub fn export(&self, _dest: &str) -> Result<()> {
-        Err(VaneError::Unsupported)
+    // M2-12：实装快照导出（SPEC §4.1 / §15）。签名不变（M0 冻结）。
+    // 调 write_snapshot 打包 VANE_SNAP 单文件；只读遍历原库 + 写 dest（I-6）。
+    pub fn export(&self, dest: &str) -> Result<()> {
+        super::snapshot::write_snapshot(self.inner.vfs.as_ref(), &self.inner.db_path, dest)
     }
 
     pub fn close(&self) -> Result<()> {

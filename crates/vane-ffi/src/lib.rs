@@ -885,7 +885,7 @@ pub extern "C" fn vane_dict_version(out_ptr: *mut *mut u8, out_len: *mut usize) 
     })
 }
 
-/// 导出数据库快照（M2-12 接入；当前返 E_UNSUPPORTED）。
+/// 导出数据库快照（M2-12 接入；调 db.export 写 VANE_SNAP 单文件到 dest）。
 #[no_mangle]
 pub extern "C" fn vane_export(db_h: u64, dest_ptr: *const u8, dest_len: usize) -> i32 {
     catch_unwind_code(|| {
@@ -1115,16 +1115,41 @@ mod tests {
     }
 
     #[test]
-    fn export_returns_unsupported() {
+    fn export_succeeds_m2_12() {
         let dir = tmp_dir();
         let path = dir.to_str().unwrap();
         let mut db_h: u64 = 0;
         let (p, pl) = json_ptr(path);
         assert_eq!(vane_open(p, pl, std::ptr::null(), 0, &mut db_h), 0);
-        let dest = "/tmp/vane-ffi-export-test";
-        let (dp, dl) = json_ptr(dest);
-        let rc = vane_export(db_h, dp, dl);
-        assert_eq!(rc, -10, "export should return E_UNSUPPORTED before M2-12");
+
+        // collection + add + flush，确保有段文件
+        let mut col_h: u64 = 0;
+        let schema = r#"{"fields":[{"name":"vec","type":"vector","dim":2,"metric":"cosine"}]}"#;
+        let (sp, sl) = json_ptr(schema);
+        let (np, nl) = json_ptr("docs");
+        assert_eq!(
+            vane_collection(db_h, np, nl, sp, sl, std::ptr::null(), 0, &mut col_h),
+            0
+        );
+        let docs = r#"[{"id":"a","vector":[1.0,0.0]}]"#;
+        let (dp, dl) = json_ptr(docs);
+        assert_eq!(vane_add(col_h, dp, dl), 0);
+        assert_eq!(vane_flush(col_h), 0);
+
+        // export 到 dest（同目录单文件快照）
+        let dest = format!("{}/backup.vane", path);
+        let (dp2, dl2) = json_ptr(&dest);
+        let rc = vane_export(db_h, dp2, dl2);
+        assert_eq!(rc, 0, "export should succeed (M2-12)");
+        assert!(
+            std::path::Path::new(&dest).exists(),
+            "dest file should exist"
+        );
+        // 校验 magic
+        let bytes = std::fs::read(&dest).unwrap();
+        assert!(bytes.starts_with(b"VANE_SNAP"));
+
+        vane_close(col_h);
         vane_close(db_h);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -73,12 +73,36 @@ fn delete_returns_count_for_unknown_id() {
 }
 
 #[test]
-fn export_rejects_unsupported() {
-    let vfs = Arc::new(MemoryVfs::new());
-    let db = Db::open(vfs, "mem3", OpenOptions::default()).unwrap();
-    let r = db.export("/tmp/whatever");
-    assert!(matches!(r, Err(vane_core::types::VaneError::Unsupported)));
-    assert_eq!(r.unwrap_err().code(), -10);
+fn export_succeeds_m2_12() {
+    // M2-12：export 从 Unsupported 占位变真实导出。
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn vane_core::vfs::Vfs>;
+    let db = Db::open(vfs.clone(), "mem3", OpenOptions::default()).unwrap();
+    let schema = vane_core::types::Schema::new(vec![(
+        "v".into(),
+        vane_core::types::FieldDef::Vector {
+            dim: 2,
+            metric: vane_core::types::Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let col = db
+        .collection("c", schema, vane_core::api::CollectionOptions::default())
+        .unwrap();
+    let docs = vec![vane_core::api::Doc {
+        id: "a".into(),
+        text: None,
+        vector: Some(vec![1.0, 0.0]),
+        meta: None,
+    }];
+    col.add(&docs).unwrap();
+    col.flush().unwrap();
+    let r = db.export("backup.vane");
+    assert!(r.is_ok(), "export should succeed: {:?}", r);
+    // dest 存在且 magic 正确
+    let mut buf = [0u8; 9];
+    let n = vfs.read_at("backup.vane", &mut buf, 0).unwrap();
+    assert_eq!(n, 9);
+    assert_eq!(&buf, b"VANE_SNAP");
 }
 
 #[test]
