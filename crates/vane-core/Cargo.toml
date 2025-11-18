@@ -31,6 +31,10 @@ vane-dict-zh = { path = "../vane-dict-zh", optional = true }
 # 必要因：std::time::Instant::now() 在 wasm32-unknown-unknown panic（无单调时钟），
 # AutoCommitter 需 Instant 做 auto-commit 时间触发。
 web-time = "1"
+# rayon：native 并行搜索（SPEC §11，M2-10 Executor）。
+# 仅 executor-native feature 启用；wasm32 永不启用（无线程模型，红线）。
+# rayon 非依赖黑名单；传递依赖无黑名单项（cargo deny 守护）。
+rayon = { version = "1", optional = true }
 
 [features]
 # zstd-decode：启用 ruzstd 读期解码（stored.bin v2 + jieba dict.bin）。
@@ -49,6 +53,11 @@ dict-zh = ["jieba", "dep:vane-dict-zh"]
 # 纯算术，无新依赖，wasm32 可编译。仅用于暴力回退路径（HNSW 导航仍用 f32）。
 # I-5：cfg(feature="sq8") 是存储编解码能力开关，允许在 segment/vector 编解码处。
 sq8 = []
+# executor-native：启用 rayon 并行搜索（SPEC §11，M2-10）。
+# 仅 native 启用（vane-ffi/vane-node）；wasm32 不启（rayon 不进 wasm，红线）。
+# default_executor() 在 executor-native off 时返 SerialExecutor（串行，等价 M1）。
+# cfg(target_arch) 仅在 executor/mod.rs（I-5 不变量核心）。
+executor-native = ["dep:rayon"]
 
 [dev-dependencies]
 criterion = "0.5"
