@@ -7,6 +7,8 @@ pub mod collection;
 pub use collection::*;
 pub mod reindex;
 pub use reindex::*;
+pub mod snapshot;
+pub use snapshot::{read_snapshot, write_snapshot};
 
 #[cfg(test)]
 mod reindex_tests;
