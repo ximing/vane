@@ -46,6 +46,7 @@
 | 06 | SIMD 双变体召回回归 | ✅ | 311e2da | simd/scalar 双变体五档×三模式 recall@10 全 1.000 + 跨变体 min Jaccard=1.000000（≥0.99 硬断言，证实 f32 未向量化两变体数值一致）；CI wasm-recall job + 本地 node 路径跑通；459 测试。§8.4 双变体召回回归满足。carry-forward：CI 远程 wasm-bindgen-cli 编译耗时待验证 |
 | 09 | SQ8 量化 | ✅ | 0644abe/c2d2ac6 | SQ8 编解码（per-dim min/max+256 级）+ 三 metric 距离（cosine/L2/dot on-the-fly dequant）+ brute_search_sq8（对齐 metric+docid_base）+ segment sq8_vectors 懒加载（OnceLock）+ HNSW 不改（首选）；内存 10万×384=38.4MB<200MB；recall Jaccard≥0.95；480 测试；fix round 1: brute_search_dispatch 下沉 vector 模块（B-1 I-5：api/collection.rs sq8 cfg=0）。**carry-forward**：100万若 >200MB 需 HNSW 用 SQ8 → 改 HnswReader::search 签名 → SPEC 修订（M2-10 评估） |
 | 10 | 100万 + Executor | ✅ | da4abf5 | Executor trait + RayonExecutor（cfg(not(wasm32))+executor-native feature，rayon）+ SerialExecutor（cfg(wasm32)）+ default_executor 工厂（cfg 集中 executor/mod.rs）+ Db 持有 Arc<dyn Executor> + 多段并行搜索归并（每段 Arc<Mutex> 槽 + join_all 后串行归并，与 M1 串行等价，无数据竞争，I-2 不破）+ 100万 #[ignore] 压测；487 测试；I-5 cfg 隔离 PASS（cfg 仅 executor/mod.rs）。**接口偏差**：scope<R>→join_all（dyn-compatibility，Arc<dyn Executor> 不可持 generic R）。**carry-forward**：契约同步（M-1）；vane-ffi/node 未启 executor-native 默认串行（M-2）；100万 recall≥0.95 门禁延后 CI（M-3） |
+| 12 | export 快照 | ✅ | f8795c9 | Db::export 实装（VANE_SNAP 单文件格式 + write_snapshot/read_snapshot 遍历 manifest+segments+wal）+ vane-ffi vane_export + vane-node ExportTask 接入 + export→read_snapshot→open→search 闭环（P0-3 数据主权）；签名不变；493 测试。**carry-forward**：spec magic(4)="VANE_SNAP" 笔误（9 字节，实装取 9 字节，格式非冻结可接受）；read_snapshot 全量入内存（恢复低频可接受） |
 
 ## 最终指标
 
