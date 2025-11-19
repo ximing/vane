@@ -1,0 +1,252 @@
+[
+{
+"qid": "q01",
+"text": "人工智能",
+"type": "boundary"
+},
+{
+"qid": "q02",
+"text": "太阳能",
+"type": "boundary"
+},
+{
+"qid": "q03",
+"text": "计算机科学",
+"type": "boundary"
+},
+{
+"qid": "q04",
+"text": "进化论",
+"type": "boundary"
+},
+{
+"qid": "q05",
+"text": "量子力学",
+"type": "boundary"
+},
+{
+"qid": "q06",
+"text": "相对论",
+"type": "boundary"
+},
+{
+"qid": "q07",
+"text": "核反应堆",
+"type": "boundary"
+},
+{
+"qid": "q08",
+"text": "无人机",
+"type": "boundary"
+},
+{
+"qid": "q09",
+"text": "互联网",
+"type": "boundary"
+},
+{
+"qid": "q10",
+"text": "万维网",
+"type": "boundary"
+},
+{
+"qid": "q11",
+"text": "数据中心",
+"type": "boundary"
+},
+{
+"qid": "q12",
+"text": "工业革命",
+"type": "boundary"
+},
+{
+"qid": "q13",
+"text": "文艺复兴",
+"type": "boundary"
+},
+{
+"qid": "q14",
+"text": "丝绸之路",
+"type": "boundary"
+},
+{
+"qid": "q15",
+"text": "第一次世界大战",
+"type": "boundary"
+},
+{
+"qid": "q16",
+"text": "第二次世界大战",
+"type": "boundary"
+},
+{
+"qid": "q17",
+"text": "万里长城",
+"type": "boundary"
+},
+{
+"qid": "q18",
+"text": "珠穆朗玛峰",
+"type": "boundary"
+},
+{
+"qid": "q19",
+"text": "青藏高原",
+"type": "boundary"
+},
+{
+"qid": "q20",
+"text": "撒哈拉沙漠",
+"type": "boundary"
+},
+{
+"qid": "q21",
+"text": "喜马拉雅山脉",
+"type": "boundary"
+},
+{
+"qid": "q22",
+"text": "自然保护区",
+"type": "boundary"
+},
+{
+"qid": "q23",
+"text": "太阳系",
+"type": "boundary"
+},
+{
+"qid": "q24",
+"text": "委员会",
+"type": "boundary"
+},
+{
+"qid": "q25",
+"text": "思想家",
+"type": "boundary"
+},
+{
+"qid": "q26",
+"text": "文学家",
+"type": "boundary"
+},
+{
+"qid": "q27",
+"text": "哲学家",
+"type": "boundary"
+},
+{
+"qid": "q28",
+"text": "唐朝",
+"type": "entity"
+},
+{
+"qid": "q29",
+"text": "宋朝",
+"type": "entity"
+},
+{
+"qid": "q30",
+"text": "明朝",
+"type": "entity"
+},
+{
+"qid": "q31",
+"text": "秦始皇",
+"type": "entity"
+},
+{
+"qid": "q32",
+"text": "汉武帝",
+"type": "entity"
+},
+{
+"qid": "q33",
+"text": "成吉思汗",
+"type": "entity"
+},
+{
+"qid": "q34",
+"text": "孔子",
+"type": "entity"
+},
+{
+"qid": "q35",
+"text": "李白",
+"type": "entity"
+},
+{
+"qid": "q36",
+"text": "孙中山",
+"type": "entity"
+},
+{
+"qid": "q37",
+"text": "毛泽东",
+"type": "entity"
+},
+{
+"qid": "q38",
+"text": "长江",
+"type": "entity"
+},
+{
+"qid": "q39",
+"text": "黄河",
+"type": "entity"
+},
+{
+"qid": "q40",
+"text": "太平洋",
+"type": "entity"
+},
+{
+"qid": "q41",
+"text": "北京",
+"type": "entity"
+},
+{
+"qid": "q42",
+"text": "上海",
+"type": "entity"
+},
+{
+"qid": "q43",
+"text": "东京",
+"type": "entity"
+},
+{
+"qid": "q44",
+"text": "拿破仑",
+"type": "entity"
+},
+{
+"qid": "q45",
+"text": "电池",
+"type": "entity"
+},
+{
+"qid": "q46",
+"text": "长城",
+"type": "entity"
+},
+{
+"qid": "q47",
+"text": "故宫",
+"type": "entity"
+},
+{
+"qid": "q48",
+"text": "5G",
+"type": "entity"
+},
+{
+"qid": "q49",
+"text": "C语言",
+"type": "entity"
+},
+{
+"qid": "q50",
+"text": "3D打印",
+"type": "entity"
+}
+]
