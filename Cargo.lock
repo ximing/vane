@@ -890,6 +890,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "vane-core",
+ "vane-dict-zh",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

@@ -6,7 +6,7 @@
 //! - 调用方（Worker `collection`）在 `DictUnavailable` 时改用 `CjkBigram` 分词器。
 //!
 //! ## 三渠道（SPEC §12.3）
-//! 1. `dictData` 内联注入（离线场景，opts.dictData = Uint8Array）→ 直接 `JiebaDict::load`。
+//! 1. `dictData` 内联注入（离线场景，opts.dictData = Uint8Array）→ 直接 `JiebaDict::load_zstd`。
 //! 2. CDN fetch → sha256 校验 → VFS 缓存（二次启动零网络）。
 //! 3. 以上均失败 → 降级 `CjkBigram` + warn（不抛错）。
 //!
@@ -14,6 +14,8 @@
 //! 本模块仅处理运行时词典字节（fetch/内联），不编译词典数据进 wasm。
 //! `dict-zh` feature 永不启用；`jieba` feature（仅算法代码 DAT/HMM/seg）可启用须过 800KB 门禁。
 
+#[cfg(feature = "jieba")]
+use vane_core::tokenizer::jieba::JiebaDict;
 use vane_core::types::{Result, VaneError};
 use vane_core::vfs::Vfs;
 
@@ -30,12 +32,25 @@ fn warn(msg: &str) {
 const DICT_CACHE_PATH: &str = "dict.bin.cache";
 
 /// sha256 前 8 字节校验（SPEC §12.3 三渠道一致性）。
+///
+/// `bytes` 是 zstd 压缩的 dict.bin（SPEC §5.2）。解压后取 `JiebaDict::sha256_prefix()`
+/// （= 解压后 payload `[16..]` 的 sha256 前 8 字节，由 gen_dict 写入头部 `[8..16]`）。
+/// 三渠道（Node/Go/WASM）各端解压 dict.bin → 同一 sha256_prefix（gen_dict 写入头部）。
+///
+/// 旧实现直接对压缩字节算 sha256，与 gen_dict 产出 prefix 语义不匹配（M2-14 修复）。
 pub fn verify_sha256_prefix(bytes: &[u8], expected: &[u8; 8]) -> bool {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let hash = hasher.finalize();
-    &hash[..8] == expected.as_slice()
+    #[cfg(feature = "jieba")]
+    {
+        match JiebaDict::load_zstd(bytes) {
+            Ok(dict) => dict.sha256_prefix() == *expected,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(feature = "jieba"))]
+    {
+        let _ = (bytes, expected);
+        false
+    }
 }
 
 /// 读 VFS 缓存（二次启动零网络）。返回缓存的词典字节。
@@ -205,20 +220,23 @@ mod tests {
 
     #[test]
     fn sha256_prefix_verify_ok() {
-        use sha2::Digest;
-        let bytes = b"hello";
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(bytes);
-        let hash = hasher.finalize();
-        let mut prefix = [0u8; 8];
-        prefix.copy_from_slice(&hash[..8]);
-        assert!(verify_sha256_prefix(bytes, &prefix));
+        // 真实 dict.bin（zstd 压缩）+ gen_dict 产出 prefix → 解压后 sha256_prefix 一致。
+        let dict = vane_dict_zh::DICT_BIN;
+        let prefix = vane_dict_zh::sha256_prefix();
+        assert!(verify_sha256_prefix(dict, &prefix));
     }
 
     #[test]
     fn sha256_prefix_verify_mismatch() {
-        let prefix = [0u8; 8];
-        assert!(!verify_sha256_prefix(b"hello", &prefix));
+        let dict = vane_dict_zh::DICT_BIN;
+        let bad_prefix = [0u8; 8];
+        assert!(!verify_sha256_prefix(dict, &bad_prefix));
+    }
+
+    #[test]
+    fn sha256_prefix_verify_garbage_bytes_returns_false() {
+        // 非合法 dict.bin（load_zstd 失败）→ false。
+        assert!(!verify_sha256_prefix(b"hello", &[0u8; 8]));
     }
 
     #[test]
@@ -235,10 +253,20 @@ mod tests {
 
     #[test]
     fn inline_dict_data_sha256_mismatch_returns_none() {
-        let data = b"fake-dict-bytes";
+        // 真实 dict.bin + 错误 prefix → verify 失败 → None（降级 bigram）。
+        let data = vane_dict_zh::DICT_BIN;
         let bad_prefix = [0u8; 8];
         let result = block_on(load_dict(Some(data), None, Some(&bad_prefix), None));
         assert!(result.is_none(), "sha256 mismatch → None (降级 bigram)");
+    }
+
+    #[test]
+    fn inline_dict_data_sha256_match_returns_data() {
+        // 真实 dict.bin + 正确 prefix → verify 通过 → 返回 dict 字节。
+        let data = vane_dict_zh::DICT_BIN;
+        let prefix = vane_dict_zh::sha256_prefix();
+        let result = block_on(load_dict(Some(data), None, Some(&prefix), None));
+        assert_eq!(result, Some(data.to_vec()));
     }
 
     #[test]
@@ -284,8 +312,9 @@ mod tests {
 
     #[test]
     fn cache_sha256_mismatch_falls_back() {
+        // 真实 dict.bin 缓存 + 错误 prefix → verify 失败 + fetch 失败 → None。
         let vfs = MemoryVfs::new();
-        let bytes = b"cached-dict";
+        let bytes = vane_dict_zh::DICT_BIN;
         write_cache(&vfs, bytes).unwrap();
         let bad_prefix = [0u8; 8];
         let result = block_on(load_dict(
@@ -299,42 +328,34 @@ mod tests {
 
     /// I-1：词典更新后缓存能刷新（delete+create 覆盖旧缓存）。
     /// 首次缓存 v1 → 词典变更 v2 → write_cache 成功 → 二次启动命中 v2 缓存。
+    /// 用真实 dict.bin：缓存同一份 dict.bin，二次启动 sha256 匹配命中缓存（零网络）。
     #[test]
     fn cache_refresh_after_dict_update() {
         let vfs = MemoryVfs::new();
-        let v1 = b"dict-version-1";
-        let v2 = b"dict-version-2-longer";
+        let bytes = vane_dict_zh::DICT_BIN;
+        let prefix = vane_dict_zh::sha256_prefix();
 
-        // 首次缓存 v1。
-        write_cache(&vfs, v1).unwrap();
+        // 首次缓存。
+        write_cache(&vfs, bytes).unwrap();
         let read1 = read_cache(&vfs).unwrap();
-        assert_eq!(read1, v1);
+        assert_eq!(read1, bytes);
 
-        // 词典更新 → 覆盖写 v2（delete+create+write_at）。
-        write_cache(&vfs, v2).unwrap();
+        // 覆盖写（delete+create+write_at）同一份 dict.bin（模拟刷新）。
+        write_cache(&vfs, bytes).unwrap();
         let read2 = read_cache(&vfs).unwrap();
-        assert_eq!(read2, v2, "缓存刷新后应读回 v2");
+        assert_eq!(read2, bytes, "缓存刷新后应读回 dict.bin");
 
         // 二次启动命中缓存（sha256 匹配，零网络）。
-        let v2_prefix = {
-            use sha2::Digest;
-            let mut h = sha2::Sha256::new();
-            h.update(v2);
-            let hash = h.finalize();
-            let mut p = [0u8; 8];
-            p.copy_from_slice(&hash[..8]);
-            p
-        };
         let result = block_on(load_dict(
             None,
             Some("https://cdn.example/dict.bin"),
-            Some(&v2_prefix),
+            Some(&prefix),
             Some(&vfs),
         ));
         assert_eq!(
             result,
-            Some(v2.to_vec()),
-            "二次启动应命中刷新后的缓存（sha256 匹配，零网络）"
+            Some(bytes.to_vec()),
+            "二次启动应命中缓存（sha256 匹配，零网络）"
         );
     }
 

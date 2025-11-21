@@ -687,10 +687,10 @@ impl VaneWorker {
             .clone()
             .ok_or_else(|| VaneError::InvalidArg("vfs not initialized".into()))?;
         let db = Db::open(vfs, path, opts)?;
-        // 词典注入（若 init 阶段加载成功）。
+        // 词典注入（若 init 阶段加载成功）。dict.bin 是 zstd 压缩 → load_zstd。
         #[cfg(feature = "jieba")]
         if let Some(bytes) = inner.dict_bytes.as_ref() {
-            match JiebaDict::load(bytes) {
+            match JiebaDict::load_zstd(bytes) {
                 Ok(dict) => db.set_jieba_dict(Arc::new(dict)),
                 Err(e) => {
                     warn(&format!(

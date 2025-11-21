@@ -33,6 +33,9 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# M2-14：dict_loader 测试需真实 dict.bin（zstd 压缩）验证 sha256 校验语义。
+# dev-dependency 不进 wasm 产物（词典永不进 wasm 红线）。
+vane-dict-zh = { path = "../vane-dict-zh" }
 
 [features]
 default = []
