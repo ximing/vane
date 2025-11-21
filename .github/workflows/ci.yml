@@ -161,15 +161,18 @@ jobs:
         run: cargo test --test jieba_compat -p vane-core --features dict-zh --release
 
   ndcg-wiki:
-    # SPEC §13.2-2 ②：nDCG@10 jieba-lite vs bigram（合成语料降级，报告值不阻断 merge）。
+    # SPEC §13.2-2 ②：nDCG@10 jieba-lite vs bigram。
+    # M1 合成边界歧义语料（+84% 硬门禁）+ M2 真实维基 corpus（现实鲁棒性）。
     # jieba-rs <2% 差异由 jieba-compat job 200 句 100% 一致覆盖。
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run nDCG regression (合成语料降级)
+      - name: Run nDCG regression (M1 合成边界歧义语料, +84% 硬门禁)
         run: cargo test --test ndcg_wiki -p vane-core --features dict-zh --release -- --nocapture
+      - name: Run nDCG real wiki corpus (M2 真实维基 500 篇)
+        run: cargo test --test ndcg_wiki_zh -p vane-core --features dict-zh --release -- --nocapture
 
   # M2-11：Go cgo 绑定——host 平台 build + test + demo（darwin/arm64 本地可跑）。
   # 远程 CI（ubuntu-latest）需先 cargo build --release -p vane-ffi 再 go build/test。
