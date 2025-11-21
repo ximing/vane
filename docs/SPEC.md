@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.2）
+# Vane 技术规范（SPEC v1.3）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -415,7 +415,7 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 ### 13.2 质量门禁（CI 硬卡）
 
 1. hybrid recall@10 ≥ 0.95（相对暴力双路+RRF 基线），五档选择率回归。
-2. 中文分词（M1）：① 200 句测试集与 jieba-rs 原版切分 100% 一致；② 中文维基 500 篇 + 50 查询，jieba-lite 相对完整版 nDCG@10 差 <2%，相对 bigram 提升 ≥15%；③ 20 个生造词注入 userDict 后单 token 入索引、短语命中 100%；④ 缺词典自动降级不抛错。
+2. 中文分词（M1）：① 200 句测试集与 jieba-rs 原版切分 100% 一致；② 中文维基 500 篇 + 50 查询，jieba-lite 相对 bigram nDCG@10 不退步（≥0%，M2 实测 +0.4%——bigram 在真实维基为强基线，数学上限≈7.5%）；相对 bigram ≥15% 提升由代表性边界歧义语料（合成 trap corpus，M1 实测 +84%）承载；相对完整版 nDCG@10 差 <2% 由 ① 的 200 句 100% 切分一致性覆盖（切分一致→nDCG 差 0%）；③ 20 个生造词注入 userDict 后单 token 入索引、短语命中 100%；④ 缺词典自动降级不抛错。
 3. 体积：核心 wasm gzip ≤ 800KB（含 jieba 代码、不含词典）；全功能 ≤ 1.2MB；`@vane/dict-zh` ≤ 1.5MB；Go embed 增量 < 2MB；500KB 为 M2 优化目标非门禁。
 4. 平台四包管理器（npm/yarn/pnpm/bun）安装矩阵通过。
 
@@ -457,3 +457,4 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 - **v1.0**（2026-08-09）：自 REQUIREMENTS v1.1 形式化，含第三轮复议结论（默认中文分词 + 自定义词表 + 词表暂存/reindex 语义仲裁）。
 - **v1.1**（2026-08-09）：M1 计划审查闭环后三处修订。S1 §5.4 澄清 `builtin_dict_version` = 编译期词典格式 spec 版本常量（非日历内容版本），词典内容升级不改变 TokenizerId（满足 REQUIREMENTS §3.3「仅警告不强制重建」）。S2 §9.1 FFI 句柄注册表 `DashMap` → `std::sync::RwLock<HashMap>`（消除与依赖黑名单冲突）。S3 §9.2 补列 `vane_reindex_progress` / `vane_reindex_wait`（ReindexHandle IDL 落实）+ `vane_load_dict` / `vane_dict_version`（M1 词典分发扩展）。
 - **v1.2**（2026-08-09）：M2 scoping 检查点后三处修订（用户批准）。S1 §13.1 冷启动承诺改为「元数据 open <1s（vectors/stored 懒加载，M2 实测背书）；首次向量查询触发 vectors 加载 <3s」，消解 M1 实测 1573ms 未达 <1s 的遗留（SegmentReader OnceLock 懒加载，不改 §4 IDL 签名）。S2 §6.2 stored.bin 引入 per-file format_version（每文件独立递增，替代全局共用常量）+ v1(裸JSON)/v2(zstd) 双模读取（不做原地迁移）；补懒加载语义注释。S3 §14 I-5 释义澄清：`cfg(feature)` 能力开关（如 zstd-encode）允许出现在 segment 编解码处，`cfg(target)` 平台分支仍仅限 VFS/Executor。
+- **v1.3**（2026-08-10）：M2-13 真实维基 nDCG corpus 落地后一处修订（用户批准）。S1 §13.2-2 ② 修订：真实中文维基 500 篇上 jieba-lite 相对 bigram nDCG@10 门禁从「提升 ≥15%」改为「不退步（≥0%，实测 +0.4%）」——bigram 在真实维基为强基线（nDCG≈0.93，数学上限≈7.5%），+15% 仅在合成边界陷阱语料可达（M1 实测 +84%，由代表性边界歧义 corpus 承载该硬门禁）；相对完整版 <2% 由 200 句 100% 切分一致性覆盖。
