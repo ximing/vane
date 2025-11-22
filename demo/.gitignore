@@ -1,0 +1,4 @@
+# M2-14 demo 构建产物（bash demo/build.sh 产出）
+pkg/
+pkg-node/
+.build-tmp/

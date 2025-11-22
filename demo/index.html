@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vane Demo — 纯前端 Markdown 搜索</title>
+  <style>
+    :root {
+      --bg: #fafafa;
+      --fg: #222;
+      --border: #ddd;
+      --accent: #4a90d9;
+      --muted: #888;
+      --hit-bg: #fff;
+      --code: #f4f4f4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1a1a1a;
+        --fg: #e0e0e0;
+        --border: #333;
+        --accent: #6ab0f3;
+        --muted: #888;
+        --hit-bg: #242424;
+        --code: #2a2a2a;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { margin: 0; font-size: 20px; }
+    header .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    main { max-width: 900px; margin: 0 auto; padding: 24px; }
+
+    #dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 48px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    #dropzone.drag { border-color: var(--accent); background: rgba(74, 144, 217, 0.08); }
+    #dropzone .icon { font-size: 36px; }
+    #dropzone p { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
+
+    .bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 16px 0;
+    }
+    #search {
+      flex: 1;
+      padding: 10px 14px;
+      font-size: 15px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--hit-bg);
+      color: var(--fg);
+    }
+    #export {
+      padding: 10px 16px;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--hit-bg);
+      color: var(--fg);
+      cursor: pointer;
+    }
+    #export:hover { border-color: var(--accent); }
+
+    #status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      background: var(--code);
+    }
+    #status[data-status="ready"] { color: #2a8; }
+    #status[data-status="indexing"] { color: #d93; }
+    #status[data-status="error"] { color: #d44; }
+
+    #results {
+      list-style: none;
+      padding: 0;
+      margin: 16px 0;
+    }
+    #results .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    #results .empty { color: var(--muted); padding: 16px 0; }
+    .hit {
+      background: var(--hit-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }
+    .hit-head { display: flex; gap: 8px; align-items: baseline; }
+    .hit .rank { color: var(--muted); font-size: 12px; min-width: 24px; }
+    .hit .id { font-weight: 600; flex: 1; word-break: break-all; }
+    .hit .score { color: var(--accent); font-size: 12px; font-family: monospace; }
+    .hit .snippet {
+      margin-top: 4px;
+      font-size: 13px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    #log {
+      margin-top: 24px;
+      padding: 12px;
+      background: var(--code);
+      border-radius: 6px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    #log .log-error { color: #d44; }
+    #log .log-warn { color: #d93; }
+
+    footer { padding: 16px 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Vane Demo — 纯前端 Markdown 搜索</h1>
+    <div class="sub">拖入 markdown 文件夹 → 本地混合检索（jieba + OPFS 持久化 + SIMD 双产物）</div>
+  </header>
+  <main>
+    <div id="dropzone">
+      <div class="icon">📁</div>
+      <p>拖入含 .md 文件的文件夹到这里</p>
+    </div>
+
+    <div class="bar">
+      <input id="search" type="search" placeholder="搜索中文或英文（如：人工智能 / vector search）..." disabled />
+      <button id="samples" title="加载示例 markdown">加载示例</button>
+      <button id="export" title="导出快照到 OPFS">导出备份</button>
+      <span id="status" data-status="init">init</span>
+    </div>
+
+    <ul id="results"></ul>
+
+    <div id="log"></div>
+  </main>
+  <footer>
+    纯前端，无后端。OPFS 持久化（刷新数据保留）。vector 用占位 hash 向量（SPEC Won't-have：Vane 不内置 embedding）。
+  </footer>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
