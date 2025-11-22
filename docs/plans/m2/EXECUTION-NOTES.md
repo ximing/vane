@@ -50,10 +50,39 @@
 | 13 | 真实维基 nDCG corpus | ✅ | 3e19c93 | 真实中文维基 500 篇（API 抓取，title 可溯源）+ 50 查询 + jieba-aware qrels + ndcg_wiki_zh.rs；jieba=0.9295 vs bigram=0.9255=+0.4%（不退步）；M1 边界歧义语料回归 +84% 保留；496 测试。**SPEC v1.3 修订**（用户批准 §13.2-2②）：真实维基门禁 ≥0% 不退步（实测 +0.4%，bigram 强基线上限≈7.5%），+15% 由 M1 合成 trap corpus 承载。**carry-forward**：qrels 为 jieba-aware 自动标注非人工 gold-standard |
 | 14 | Demo 纯前端搜索 | ✅ | 126451a/d4d09ce | 纯前端 markdown 搜索 demo（拖入→jieba 中文混合搜索→OPFS 持久化→SIMD 双产物→export）+ e2e 7/9 + node smoke 12/12；498 测试；双产物 312KB。**M2-04 binding bug 修复**（M2-14 发现）：JiebaDict::load→load_zstd + dict_loader sha256 语义（原 bug 致 jieba 词典永远加载失败→永远降级 bigram，M2-04 review 漏查成功路径）。**carry-forward**：Playwright CI job；export 下载需 worker.js readFile op |
 
-## 最终指标
+## 最终指标（DoD 2026-08-10）
 
-（DoD 时填充）
+| 指标 | 实测 | M2 承诺 | 状态 |
+|---|---|---|---|
+| 测试总量 | 498 passed / 0 failed / 4 ignored | — | ✅ |
+| clippy --all-targets --all-features | clean | -D warnings | ✅ |
+| fmt --check | OK | clean | ✅ |
+| wasm32 check（core + vane-wasm worker） | 通过 | core 出现 std::fs 即失败 | ✅ |
+| check-no-std-fs.sh | OK | — | ✅ |
+| cargo deny check | advisories/bans/licenses/sources all ok | -D warnings | ✅ |
+| wasm gzip（default） | 349KB | ≤800KB | ✅ |
+| wasm gzip（worker+jieba） | 399KB | ≤800KB（含 jieba 算法不含词典） | ✅ |
+| wasm gzip（simd 双产物） | simd 408KB / scalar 411KB | 双 ≤800KB | ✅ |
+| recall@10（五档×三模式） | 1.000（HNSW） | ≥0.95 | ✅ 远超 |
+| SIMD 双变体召回回归 | recall 1.000 + Jaccard 1.000000 | §8.4 各跑一遍 | ✅ |
+| 真实维基 nDCG（jieba vs bigram） | +0.4%（不退步） | ≥0%（SPEC v1.3 修订） | ✅ |
+| M1 边界歧义语料 nDCG | +84% | ≥15%（15% 门禁承载） | ✅ |
+| corpus 兼容 | 3 passed（v1/v2 双模） | 冻结兼容 | ✅ |
+| 冷启动 open 10万库 | 752ms（M2-07 懒加载，1573ms→752ms） | 元数据 open <1s | ✅ |
+| SQ8 内存（10万×384） | 38.4MB（f32 154MB） | <200MB | ✅ |
+| Go cgo（host） | 7 Go 测试 + demo 端到端 | 4 平台 prebuilt 配置 | ✅（多平台交叉待 CI） |
+| JS（vane-node） | 17 passed | — | ✅ |
+| export 快照 | 闭环 PASS（export→read_snapshot→open→search） | 实装 | ✅ |
+| 浏览器 Demo | e2e 7/9 + node smoke 12/12 | 纯前端 markdown 搜索含中文 | ✅ |
 
-## M2 遗留
+## M2 遗留（post-M2 / CI 待触发）
 
-（DoD 时填充）
+1. **f32 距离 SIMD 未向量化**（M2-05）：LLVM 无 fast-math 拒绝 FP 归约向量化（f32x4=0），SIMD 仅加速 roaring 位图。post-M2 可选 trait Distance 抽象（cfg 在 impl）手写 SIMD → 需 SPEC 修订（I-5）。
+2. **100万规模 recall≥0.95 + 完整压测**（M2-10）：100万 #[ignore] 未本地完整跑（1万默认证并行+不崩），延后 CI heavy。
+3. **浏览器 5万文档验收 + Playwright CI**（M2-14）：e2e 经真实 Chrome（非 CI 可重复），Playwright CI job 待加；export 下载需 worker.js readFile op。
+4. **Go cgo 多平台 zig cc 交叉**（M2-11）：本地 zig 不可用，4 平台 .a 矩阵仅 CI workflow 配置，待远程触发；wazero 仅骨架。
+5. **executor-native 未在 vane-ffi/node 默认启用**（M2-10）：wrappers 默认 SerialExecutor，native 并行可选 feature。
+6. **CI wasm-bindgen-test job**（M2-01）：本地跑通，CI job 未加（需 wasm-bindgen-cli）。
+7. **M2-04 浏览器异步路径手动验证**：OPFS init/IDB/CDN fetch/postMessage 浏览器运行时验证（node 测逻辑路径）。
+8. **parked minors**：M2-03 I-1 注释 nit；M2-04 M-2/M-3/M-4/M-5/M-7；M2-08 inverted per-file / dict.rs 改名；M2-10 契约同步 scope<R>→join_all。
+9. **SPEC magic(4)="VANE_SNAP" 笔误**（M2-12）：实装取 9 字节，格式非冻结。
