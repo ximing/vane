@@ -5,37 +5,50 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Rustfmt check
         run: cargo fmt --all -- --check
 
   clippy:
     needs: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Clippy (-D warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     needs: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Test workspace
         run: cargo test --workspace --all-features
 
@@ -45,9 +58,11 @@ jobs:
     # M0 recall.rs 保留作冒烟（trivially 1.0）；recall_regression 为 M1 硬门禁。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run recall smoke (M0)
         run: cargo test --test recall -p vane-core
       - name: Run recall regression gate (M1, §13.2-1)
@@ -58,11 +73,13 @@ jobs:
     # 不变量 I-5：核心算法零平台分支。M2-01：vane-wasm 同禁 std::fs/std::net/mmap。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       - name: cargo check wasm32 (vane-core)
         run: cargo check --target wasm32-unknown-unknown -p vane-core
       - name: cargo check wasm32 (vane-wasm)
@@ -79,13 +96,15 @@ jobs:
     # core/wasm 运行时路径引入 regex 仍被 ban（wasm32-check + check-no-std-fs.sh 双保险）。
     needs: wasm32-check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-deny
         # cargo-deny 0.18.6+ 支持 CVSS 4.0 advisory（RUSTSEC-2026-0073 等），
-        # 0.16.4 解析 CVSS 4.0 会崩。锁 ^0.19 取最新 0.19.x。
-        run: cargo install cargo-deny --locked --version ^0.19
+        # 0.16.4 解析 CVSS 4.0 会崩。pin 0.19.9（0.19.x 最新，2026.06 发布）。
+        run: cargo install cargo-deny --locked --version 0.19.9
       - name: cargo deny check
         run: cargo deny check
 
@@ -95,9 +114,11 @@ jobs:
     # FORMAT_VERSION + 提供迁移器/双模读取（SPEC §6.2）。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Corpus compat test
         run: cargo test --test corpus_compat -p vane-core
 
@@ -108,9 +129,11 @@ jobs:
     # gate 标 #[ignore]（fixture 生成慢），由本 job 专门 --ignored 运行。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Cold-start gate (SPEC §13.1)
         run: cargo test --test cold_start_gate -p vane-core -- --ignored --nocapture
       - name: Bench compile check
@@ -121,11 +144,13 @@ jobs:
     # M2-01：双口径测量——vane-wasm default（真实 deliverable）+ vane-core --export-all（保守上界）。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get install -y binaryen
       - name: Check wasm32 gzip size ≤800KB (vane-wasm + vane-core --export-all)
@@ -135,6 +160,7 @@ jobs:
     # SPEC §13.2-3：@vane/dict-zh dict.bin gzip ≤1.5MB；Go embed <2MB（08 deferred）。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Check dict size gates
@@ -144,8 +170,13 @@ jobs:
     # SPEC §12.3：三渠道词典版本哈希一致性校验（Go 08 deferred）。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # check-dict-hash.sh 用 xxd -p；ubuntu-latest 默认不含 xxd，预装避免
+      # 未来 Go dict hash 文件加入后 xxd 路径失败。
+      - name: Install xxd
+        run: sudo apt-get install -y xxd
       - name: Check dict hash consistency
         run: bash scripts/check-dict-hash.sh
 
@@ -154,9 +185,11 @@ jobs:
     # fixture 由 scripts/gen_jieba_fixture.rs 离线生成（jieba-rs 不作 dev-dep）。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run jieba 200-sentence compatibility test
         run: cargo test --test jieba_compat -p vane-core --features dict-zh --release
 
@@ -166,9 +199,11 @@ jobs:
     # jieba-rs <2% 差异由 jieba-compat job 200 句 100% 一致覆盖。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run nDCG regression (M1 合成边界歧义语料, +84% 硬门禁)
         run: cargo test --test ndcg_wiki -p vane-core --features dict-zh --release -- --nocapture
       - name: Run nDCG real wiki corpus (M2 真实维基 500 篇)
@@ -179,9 +214,11 @@ jobs:
   go-host:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
@@ -206,6 +243,7 @@ jobs:
   go-cross:
     needs: go-host
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -227,17 +265,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # Z1 修复（Z0 必炸 #1）：zig 0.13.0 过旧 + cargo-zigbuild 未 pin。
+      # pin zig 0.15.2（2025.11 最新 stable）+ cargo-zigbuild 0.21.4
+      # （v0.21.4 changelog 明确修复 zig 0.15 macOS 交叉编译 + libc++ defines，
+      #  直接覆盖本 matrix 的 darwin-amd64/darwin-arm64 两个 target）。
+      # 待 CI 首跑验证；若 0.21.4 有 zig 0.15.2 兼容问题，回退尝试 0.22.3/0.23.0。
       - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: '0.13.0'
+          version: '0.15.2'
       - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked
+        run: cargo install cargo-zigbuild --locked --version 0.21.4
       - name: Cross-compile vane-ffi staticlib (zig cc)
         run: cargo zigbuild --release -p vane-ffi --target ${{ matrix.zig_target }}
       - name: Verify staticlib produced
+        # Z1 修复（改进 6）：移除 || true，改 test -f 断言——产物缺失即失败。
         run: |
-          find target/ -name "libvane_ffi.a" -path "*${{ matrix.zig_target }}*" | head -1
-          ls -lh target/${{ matrix.zig_target }}/release/libvane_ffi.a || true
+          test -f target/${{ matrix.zig_target }}/release/libvane_ffi.a
+          ls -lh target/${{ matrix.zig_target }}/release/libvane_ffi.a
 
   wasm-recall:
     # M2-06 §8.4：SIMD/scalar 双变体召回回归（wasm32，node）。
@@ -246,11 +291,13 @@ jobs:
     # node v20 支持 simd128（两产物均可在 node 跑）。
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

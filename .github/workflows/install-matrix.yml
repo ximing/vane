@@ -11,6 +11,9 @@ on:
         required: true
         default: '0.1.0'
 
+permissions:
+  contents: read
+
 jobs:
   install:
     strategy:
@@ -19,6 +22,7 @@ jobs:
         pkg_manager: [npm, yarn, pnpm, bun]
         os: [ubuntu-latest, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     # 注：bun 在 windows 上的支持仍在演进，该组合为软门禁（报警但不阻断）。
     # SPEC §13.2-4：npm/yarn/pnpm × 三平台 + bun × (linux+macos) 共 11 个组合硬通过。
     continue-on-error: ${{ matrix.os == 'windows-latest' && matrix.pkg_manager == 'bun' }}
