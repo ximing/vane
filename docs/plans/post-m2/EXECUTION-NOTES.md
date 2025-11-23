@@ -31,3 +31,8 @@
 - 暂不修（裁决）：rust-toolchain pin(接受stable浮动)、百万heavy job(CI绿后)、双变体体积门禁(可选)。
 - **用户决策(AskUserQuestion)**：①Go/WASM发布=补全三端（建仓先进行，CI绿后补Go4平台.a+WASM双产物）；②AGENTS.md=进仓并修正指向(.Codex→.claude, crates/*/AGENTS.md→CLAUDE.md)；③建仓=vane/private 起步。
 - AGENTS.md 修正 SubAgent(haiku) 进行中。完成后 commit → gh repo create vane --private --source=. --remote=origin --push → 进阶段一。
+- **建仓完成**：https://github.com/ximing/vane（private），commit 528855e push origin main。
+- **CI 首跑 run 31364131339**：14 job success + go-cross 4 failure + cold-start cancelled。远好于预期，Z1 预修奏效。
+  - go-cross 根因：`cargo zigbuild --target ${{ matrix.zig_target }}` 传 zig-style target，rustc 不认（Z0 标注的 zig_target ⚠️ 隐患，Z1 保留待验证→现验证失败）。修：--target 改用 matrix.target（Rust triple）+ cargo-zigbuild 0.21.4→0.23.0（WebSearch 验证 zig0.15.2 配对）。
+  - cold-start 根因：10万 HNSW fixture 用 debug 模式跑（无 --release），卡死 30min timeout。修：加 --release（与 jieba/ndcg 一致）+ timeout 30→60min。
+  - 修复 SubAgent(sonnet) 进行中。完成后 commit → push 重跑 → 监控。
