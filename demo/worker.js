@@ -17,7 +17,7 @@
  *     opts: { vfs: "opfs"|"idb"|"memory", dbPath, dictUrl, dictSha256, dictData }
  *   open(path, opts) / collection(name, schema, opts) / add(col, docs) /
  *   flush(col) / search(col, query) / delete(col, ids) / compact(col) /
- *   reindex(col) / export(dest) / close()
+ *   reindex(col) / export(dest) / readFile(path) / close()
  */
 
 import init, { VaneWorker } from "./pkg/vane_wasm.js";
@@ -118,6 +118,10 @@ self.onmessage = async (e) => {
       case "export":
         await worker.export(msg.dest ?? "backup.vane");
         result = true;
+        break;
+      case "readFile":
+        // 读 VFS 容器内虚拟路径的文件字节，返回 Uint8Array（post-M2 P1 下载闭环）。
+        result = await worker.readFile(msg.path ?? "backup.vane");
         break;
       case "close":
         await worker.close();

@@ -217,9 +217,22 @@ async function search(query) {
 
 async function exportBackup() {
   if (!colId) throw new Error("collection not ready");
-  log("[export] 导出快照 backup.vane → OPFS...");
-  await call("export", { dest: "backup.vane" });
-  log("[export] 快照已写入 OPFS（backup.vane）");
+  const dest = "backup.vane";
+  log(`[export] 导出快照 ${dest} → VFS 容器...`);
+  await call("export", { dest });
+  log(`[export] 快照已写入容器（${dest}），读回字节触发下载...`);
+  // readFile 读回快照字节（Uint8Array）→ Blob → <a download> 触发浏览器下载。
+  const bytes = await call("readFile", { path: dest });
+  const blob = new Blob([bytes], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = dest;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  log(`[export] 已触发下载 ${dest}（${bytes.byteLength} 字节）`);
 }
 
 // =========================================================================
