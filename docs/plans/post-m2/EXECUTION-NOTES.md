@@ -12,18 +12,22 @@
 
 | 阶段 | 模块 | 状态 | 备注 |
 |------|------|------|------|
-| 零 | Z0 CI 静态预审 | 进行中 | 只读 SubAgent |
-| 零 | Z1 预修 + gitignore | 待 | 依赖 Z0 |
-| 零 | Z2 release.yml 确认 | 待 | |
-| 零 | Z3 建仓+push | 待 | 需用户确认仓库名/可见性 |
+| 零 | Z0 CI 静态预审 | ✅完成 | 1必炸+14隐患，z0-ci-preaudit-report.md |
+| 零 | Z1 预修 + gitignore | ✅完成 | commit 708e88d；go-cross pin zig0.15.2+czb0.21.4；8隐患修齐 |
+| 零 | Z2 release.yml 确认 | 进行中 | Z0已确认Node就绪；用户决策补全三端，CI绿后补Go/WASM发布 |
+| 零 | Z3 建仓+push | 待 | vane/private，用户已授权 gh |
 | 一 | CI 首跑+修复循环 | 待 | 依赖 Z3 |
 | 二 | P1 export 下载 | 待 | |
 | 二 | P2 5万 Playwright CI | 待 | |
 | 二 | P3 词典 CDN 部署 | 待 | |
+| 二 | Z2-补 Go/WASM 发布 | 待 | CI绿后，发版前补 Go4平台.a+WASM双产物到release |
 | 三 | R1 version 同步 | 待 | |
 | 三 | R2 tag+prebuilt | 待 | |
 | 三 | R3 发版 | 待 | 需用户确认 |
 
 ## 裁决记录
-- 2026-08-10 启动。Z0 派只读预审 SubAgent（sonnet）。
-- `.agents/` 倾向 gitignore（与 .superpowers/ 同类）；`AGENTS.md` 待用户决，攒批到建仓前汇报。
+- 2026-08-10 启动。Z0 派只读预审 SubAgent（sonnet）→ 1必炸(go-cross)+14隐患。
+- Z1 预修 SubAgent（sonnet）→ commit 708e88d。go-cross pin zig0.15.2+czb0.21.4（changelog修zig0.15 macOS交叉），verify改test-f，8隐患修齐（permissions/rust-cache/timeout/concurrency/xxd/deny精确/critcmp/.agents gitignore）。YAML全绿，actionlint仅macos-13 pre-existing告警。
+- 暂不修（裁决）：rust-toolchain pin(接受stable浮动)、百万heavy job(CI绿后)、双变体体积门禁(可选)。
+- **用户决策(AskUserQuestion)**：①Go/WASM发布=补全三端（建仓先进行，CI绿后补Go4平台.a+WASM双产物）；②AGENTS.md=进仓并修正指向(.Codex→.claude, crates/*/AGENTS.md→CLAUDE.md)；③建仓=vane/private 起步。
+- AGENTS.md 修正 SubAgent(haiku) 进行中。完成后 commit → gh repo create vane --private --source=. --remote=origin --push → 进阶段一。
