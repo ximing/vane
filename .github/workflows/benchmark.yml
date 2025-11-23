@@ -5,19 +5,25 @@ on:
     - cron: '0 3 * * *' # 每日 UTC 03:00（北京时间 11:00）
   workflow_dispatch: # 支持手动触发
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   bench:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # 需要历史以对比 main
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install critcmp
-        run: cargo install critcmp --locked
+        # pin 0.1.8（critcmp 最新版，2023.07 发布，此后无新版本；长期稳定）。
+        run: cargo install critcmp --locked --version 0.1.8
       - name: Record trigger ref
         id: ref
         run: echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
