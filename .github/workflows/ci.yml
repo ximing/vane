@@ -129,13 +129,15 @@ jobs:
     # gate 标 #[ignore]（fixture 生成慢），由本 job 专门 --ignored 运行。
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Cold-start gate (SPEC §13.1)
-        run: cargo test --test cold_start_gate -p vane-core -- --ignored --nocapture
+        # 用 --release：10 万 HNSW 库构建在 debug profile 下会卡死 30min
+        # （jieba-compat/ndcg-wiki 均用 --release，此处对齐）。
+        run: cargo test --test cold_start_gate -p vane-core --release -- --ignored --nocapture
       - name: Bench compile check
         run: cargo bench --no-run -p vane-core --bench cold_start
 
@@ -248,6 +250,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # target=Rust triple（CI 实际使用，传给 cargo zigbuild --target + 产物目录）。
+          # zig_target=zig-style（仅供未来参考，CI 不再引用）。
           - target: x86_64-unknown-linux-gnu
             zig_target: x86_64-linux-gnu
             lib_dir: linux-amd64
@@ -267,22 +271,28 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       # Z1 修复（Z0 必炸 #1）：zig 0.13.0 过旧 + cargo-zigbuild 未 pin。
-      # pin zig 0.15.2（2025.11 最新 stable）+ cargo-zigbuild 0.21.4
-      # （v0.21.4 changelog 明确修复 zig 0.15 macOS 交叉编译 + libc++ defines，
-      #  直接覆盖本 matrix 的 darwin-amd64/darwin-arm64 两个 target）。
-      # 待 CI 首跑验证；若 0.21.4 有 zig 0.15.2 兼容问题，回退尝试 0.22.3/0.23.0。
+      # pin zig 0.15.2（2025.11 最新 stable）+ cargo-zigbuild 0.23.0
+      # （zig 0.15.2 + cargo-zigbuild 0.23.0 是经项目验证的成功配对，覆盖
+      #  linux arm64/amd64 + macOS arm64/amd64；0.23.0 较 0.21.4 兼容更稳）。
+      # 关键：cargo-zigbuild 的 --target 必须传 Rust triple（matrix.target），
+      #  不能传 zig-style target（matrix.zig_target，如 x86_64-linux-gnu）——
+      #  cargo 会把 --target 原样转给 rustc，rustc 报 "could not find specification
+      #  for target"。cargo-zigbuild 内部按 Rust triple 映射到 zig target。
+      #  产物目录也是 Rust triple（target/<triple>/release/）。
+      # zig_target 字段保留仅供未来参考，CI 实际用 target。
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: '0.15.2'
       - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked --version 0.21.4
+        run: cargo install cargo-zigbuild --locked --version 0.23.0
       - name: Cross-compile vane-ffi staticlib (zig cc)
-        run: cargo zigbuild --release -p vane-ffi --target ${{ matrix.zig_target }}
+        run: cargo zigbuild --release -p vane-ffi --target ${{ matrix.target }}
       - name: Verify staticlib produced
         # Z1 修复（改进 6）：移除 || true，改 test -f 断言——产物缺失即失败。
+        # 产物目录是 Rust triple（matrix.target），非 zig-style。
         run: |
-          test -f target/${{ matrix.zig_target }}/release/libvane_ffi.a
-          ls -lh target/${{ matrix.zig_target }}/release/libvane_ffi.a
+          test -f target/${{ matrix.target }}/release/libvane_ffi.a
+          ls -lh target/${{ matrix.target }}/release/libvane_ffi.a
 
   wasm-recall:
     # M2-06 §8.4：SIMD/scalar 双变体召回回归（wasm32，node）。
