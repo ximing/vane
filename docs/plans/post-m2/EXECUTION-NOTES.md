@@ -36,3 +36,7 @@
   - go-cross 根因：`cargo zigbuild --target ${{ matrix.zig_target }}` 传 zig-style target，rustc 不认（Z0 标注的 zig_target ⚠️ 隐患，Z1 保留待验证→现验证失败）。修：--target 改用 matrix.target（Rust triple）+ cargo-zigbuild 0.21.4→0.23.0（WebSearch 验证 zig0.15.2 配对）。
   - cold-start 根因：10万 HNSW fixture 用 debug 模式跑（无 --release），卡死 30min timeout。修：加 --release（与 jieba/ndcg 一致）+ timeout 30→60min。
   - 修复 SubAgent(sonnet) 进行中。完成后 commit → push 重跑 → 监控。
+- **阶段一完成 ✅**：run 31366858024 CI 全绿（16 job 含 go-cross 4 平台 + cold-start），1 轮修复。commit pushed。"本地绿→可信交付"达成。
+- **P1 export 下载闭环**：原 SubAgent 完成 worker.rs readFile op（read_file_sync 流式 + read_file wasm_bindgen + 2 测试）+ demo/main.js + demo/worker.js 后被进程中断（stopped，未跑自证/报告）。改动方向已审查确认正确。新派 sonnet SubAgent 审查改动 + 跑自证（wasm32/cargo test/clippy/体积）+ 写 p1-report.md。
+- Z2-补 Go/WASM 发布：待 P1 后，release.yml 加 GitHub Release assets（Go 4 平台 .a 复用 zig 交叉 + WASM 双产物 build-wasm-variants.sh）。用户已决策补全三端。
+- P3 词典 CDN：需用户定 CDN 平台（GitHub Release asset / jsdelivr / 自建）。

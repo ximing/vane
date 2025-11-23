@@ -807,6 +807,32 @@ impl VaneWorker {
         db.export(dest)
     }
 
+    /// readFile：读 VFS 容器内指定虚拟路径的文件全部字节（post-M2 P1 下载闭环）。
+    ///
+    /// 用途：`export(dest)` 写快照到容器内虚拟路径后，主线程经此 op 读回字节 →
+    /// Blob → `<a download>` 触发浏览器下载。读 `inner.vfs`（与 Db 共享的同一 VFS），
+    /// 流式 `read_at` 直到 EOF（n == 0）。文件不存在 → `VaneError::Io`。
+    fn read_file_sync(&self, path: &str) -> Result<Vec<u8>, VaneError> {
+        let inner = self.inner.borrow();
+        inner.check_open()?;
+        let vfs = inner
+            .vfs
+            .as_ref()
+            .ok_or_else(|| VaneError::InvalidArg("vfs not initialized".into()))?;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        let mut off = 0u64;
+        loop {
+            let n = vfs.read_at(path, &mut tmp, off)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            off += n as u64;
+        }
+        Ok(buf)
+    }
+
     fn close_sync(&self) -> Result<(), VaneError> {
         let mut inner = self.inner.borrow_mut();
         // M-8：close 前 flush 所有未落盘 collection（数据持久化），
@@ -952,6 +978,22 @@ impl VaneWorker {
     pub fn export(&self, dest: String) -> js_sys::Promise {
         match self.export_sync(&dest) {
             Ok(()) => ok_promise(JsValue::UNDEFINED),
+            Err(e) => err_promise(e),
+        }
+    }
+
+    /// 读 VFS 容器内指定虚拟路径的文件字节，返回 `Uint8Array`（post-M2 P1 下载闭环）。
+    ///
+    /// 配合 `export`：`export("backup.vane")` 写快照到容器 → `readFile("backup.vane")`
+    /// 读回字节 → 主线程 `new Blob([bytes])` → `<a download="backup.vane">` 下载。
+    /// 文件不存在或读取失败 → reject。
+    #[wasm_bindgen(js_name = readFile)]
+    pub fn read_file(&self, path: String) -> js_sys::Promise {
+        match self.read_file_sync(&path) {
+            Ok(bytes) => {
+                let arr = js_sys::Uint8Array::from(&bytes[..]);
+                ok_promise(arr.into())
+            }
             Err(e) => err_promise(e),
         }
     }
@@ -1140,6 +1182,47 @@ mod tests {
         worker.open_sync("test-db", OpenOptions::default()).unwrap();
         let result = worker.export_sync("/tmp/snapshot");
         assert!(result.is_err());
+        worker.close_sync().unwrap();
+    }
+
+    /// post-M2 P1：readFile 不存在路径 → Err；close 后 → Err（句柄注销）。
+    #[test]
+    fn read_file_errors_on_missing_and_closed() {
+        let worker = VaneWorker::new_memory();
+        worker.open_sync("test-db", OpenOptions::default()).unwrap();
+
+        // 不存在路径 → Err（Io）。
+        let missing = worker.read_file_sync("nonexistent.bin");
+        assert!(missing.is_err());
+
+        worker.close_sync().unwrap();
+        // close 后 → Err（I-7 句柄注销）。
+        let after_close = worker.read_file_sync("backup.vane");
+        assert!(after_close.is_err());
+    }
+
+    /// post-M2 P1：export→readFile round-trip——快照字节以 VANE_SNAP 魔数起始。
+    #[test]
+    fn export_then_read_file_roundtrip() {
+        let worker = VaneWorker::new_memory();
+        worker.open_sync("snap-db", OpenOptions::default()).unwrap();
+
+        let schema = parse_schema(&serde_json::from_str(schema_json()).unwrap()).unwrap();
+        let col_id = worker
+            .collection_sync("docs", schema, CollectionOptions::default())
+            .unwrap();
+        let docs = parse_docs(&serde_json::from_str(docs_json()).unwrap()).unwrap();
+        worker.add_sync(col_id, docs).unwrap();
+        worker.flush_sync(col_id).unwrap();
+
+        // export 写快照到容器内虚拟路径 backup.vane。
+        worker.export_sync("backup.vane").unwrap();
+
+        // readFile 读回快照字节，应以 VANE_SNAP 魔数起始。
+        let snap = worker.read_file_sync("backup.vane").unwrap();
+        assert!(snap.len() > 9, "snapshot too short: {}", snap.len());
+        assert_eq!(&snap[..9], b"VANE_SNAP", "snapshot magic mismatch");
+
         worker.close_sync().unwrap();
     }
 }
