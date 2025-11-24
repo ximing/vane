@@ -11,7 +11,7 @@
 | 4 | 混合搜索 | csi e2e：`search({text:"学习",vector:[...],mode:"hybrid"})` | ✅ hybridHits=8（RRF 融合） |
 | 5 | 持久化 | csi e2e：worker1 写入+close → worker2 open+search | ✅ persistTop1="p1"（OPFS 跨会话保留） |
 | 6 | SIMD 探针 | csi e2e：`WebAssembly.validate(simd128_test_module)` | ✅ simd=true（Chrome 支持 simd128 → 加载 simd 产物） |
-| 7 | 词典加载 | csi e2e：`create(dictUrl:"./pkg/dict.bin")` + sha256 校验 | ✅ created=true（jieba 词典加载成功，dictData fetch + sha256 校验通过） |
+| 7 | 词典加载 | csi e2e：`create(dictUrl:"https://cdn.jsdelivr.net/gh/ximing/vane@main/crates/vane-dict-zh/data/dict.bin")` + sha256 校验 | ✅ created=true（jieba 词典加载成功，CDN fetch + sha256 校验通过；private 仓库期间 jsdelivr 不生效则降级 bigram） |
 | 8 | 词典降级 | csi e2e：`create(无 dictUrl)` + `collection(jieba)` + 中文搜索 | ✅ degradeTop1="d1"（降级 bigram，中文搜索仍可用） |
 | 9 | export 快照 | csi e2e：`export("backup.vane")` | ✅ exported=true（快照写入 OPFS） |
 
