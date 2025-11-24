@@ -3,7 +3,7 @@ name: release
 on:
   push:
     tags:
-      - 'v*' # 仅 tag 触发
+      - 'v*' # 仅 tag 触发正式发版
   workflow_dispatch:
     inputs:
       version:
@@ -18,11 +18,11 @@ env:
 
 jobs:
   build:
+    # SPEC §12.2 M0 Node prebuilt 4 平台（napi-rs）
     strategy:
       fail-fast: false
       matrix:
         include:
-          # SPEC §12.2 M0 Node prebuilt 4 平台
           # triples 与 crates/vane-node/napi.config.json 的 additional 一致
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -30,7 +30,9 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             node_platform: darwin-arm64
-          - os: macos-13
+          # Z1 标注 pre-existing：macos-13（Intel）已于 2025-12 被 GitHub 退役，
+          # 替换为 macos-15-intel（2025-09 上线，退役计划 2027 秋，最后一个 x86_64 镜像）。
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             node_platform: darwin-x64
           - os: windows-latest
@@ -63,25 +65,109 @@ jobs:
             crates/vane-node/*.node
             crates/vane-node/*.tgz
 
-  publish:
-    needs: build
+  build-go:
+    # SPEC §12.2 Go cgo staticlib 4 平台交叉编译（zig cc）。
+    # 配置与 ci.yml go-cross job 一致（已 CI 验证）：
+    #   zig 0.15.2 + cargo-zigbuild 0.23.0 + Rust triple --target。
+    # 产出 libvane_ffi-<lib_dir>.a，发版时作为 GitHub Release asset。
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # target=Rust triple（传给 cargo zigbuild --target + 产物目录）。
+          # lib_dir=bindings/go/lib/ 子目录名（cgo 约定）。
+          - target: x86_64-unknown-linux-gnu
+            lib_dir: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            lib_dir: linux-arm64
+          - target: x86_64-apple-darwin
+            lib_dir: darwin-amd64
+          - target: aarch64-apple-darwin
+            lib_dir: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: '0.15.2'
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.23.0
+      - name: Cross-compile vane-ffi staticlib (zig cc)
+        run: cargo zigbuild --release -p vane-ffi --target ${{ matrix.target }}
+      - name: Verify + rename staticlib
+        run: |
+          test -f target/${{ matrix.target }}/release/libvane_ffi.a
+          cp target/${{ matrix.target }}/release/libvane_ffi.a libvane_ffi-${{ matrix.lib_dir }}.a
+          ls -lh libvane_ffi-${{ matrix.lib_dir }}.a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vane-go-${{ matrix.lib_dir }}
+          path: libvane_ffi-${{ matrix.lib_dir }}.a
+
+  build-wasm:
+    # SPEC §12.2/§13.2-3 浏览器 WASM 双变体（simd128 + scalar）。
+    # 复用 scripts/build-wasm-variants.sh（含 wasm-opt -Oz + 体积门禁 gzip ≤800KB）。
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get install -y binaryen
+      - name: Build WASM dual variants (simd + scalar)
+        run: FEATURES=worker bash scripts/build-wasm-variants.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vane-wasm
+          path: |
+            target/wasm-variants/vane_wasm_simd.wasm
+            target/wasm-variants/vane_wasm_scalar.wasm
+
+  release:
+    # 三端 prebuilt 聚合：Node（napi publish npm）+ Go .a + WASM .wasm（GitHub Release assets）。
+    # tag 触发：npm publish + 创建 GitHub Release + attach Go/WASM assets。
+    # workflow_dispatch：仅构建验证（build/build-go/build-wasm 全跑），跳过 publish/release。
+    needs: [build, build-go, build-wasm]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      - name: Install @napi-rs/cli
+        run: npm install -g @napi-rs/cli
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: crates/vane-node/artifacts
+          path: artifacts
+      - name: Stage node artifacts for napi publish
+        # napi publish 从 crates/vane-node 工作目录扫描 *.tgz；
+        # 恢复原 publish job 的 artifacts 目录结构（vane-node-<platform>/ 子目录）。
+        run: |
+          mkdir -p crates/vane-node/artifacts
+          cp -r artifacts/vane-node-* crates/vane-node/artifacts/
       - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/')
         working-directory: crates/vane-node
         run: napi publish --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Create GitHub Release + attach Go/WASM assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/vane-go-*/libvane_ffi-*.a
+            artifacts/vane-wasm/*.wasm
