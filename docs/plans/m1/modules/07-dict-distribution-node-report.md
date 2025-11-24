@@ -98,5 +98,5 @@
 ## 遗留/疑问
 
 1. **SHA-256 严格性**（R-4）：当前 `sha256_prefix` 用 SipHash 而非严格 SHA-256。三渠道一致性校验靠「相同输入→相同前缀」成立，但与 SPEC §12.3 「sha256 前 8 字节」字面不符。若 10-ci-m1 要求严格 SHA-256，需在 gen_dict 加 `sha2` dev-dep。**需编排者裁决**。
-2. **npm 包结构**：`package.json` 声明 `@vane/dict-zh` 为 `@vane/node` dependency 未落地（vane-node `package.json` 未改——本期是 Rust crate，npm 包发布在 M1 收尾/10-ci-m1）。**需编排者确认是否本期落地 package.json**。
+2. **npm 包结构**：`package.json` 声明 `@vane/dict-zh` 为 `@vane-rs/node` dependency 未落地（vane-node `package.json` 未改——本期是 Rust crate，npm 包发布在 M1 收尾/10-ci-m1）。**需编排者确认是否本期落地 package.json**。
 3. **JS 侧行为测试**：`loadDict()` / 自动加载 / 降级 warn 的 JS 侧行为测试未写（`__tests__/` 未扩展）——Rust 侧测试已覆盖核心逻辑。**需编排者确认是否本期补 JS 测试**。

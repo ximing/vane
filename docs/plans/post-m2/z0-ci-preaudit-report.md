@@ -76,7 +76,7 @@
 | 触发条件 | ✅ | `workflow_run` after release + `workflow_dispatch`，正确依赖 release 先完成 | — |
 | 4 包管理器 × 3 平台 | ✅ | 12 组合，bun+windows `continue-on-error: true`（SPEC §13.2-4 软门禁） | — |
 | 版本解析 | ✅ | `workflow_dispatch` 传参优先，否则从 `package.json` 读取（修复了硬编码 0.1.0 脱节问题） | — |
-| smoke test | ✅ | `require('@vane/node')` + 检查 `open`/`VaneDb` export | — |
+| smoke test | ✅ | `require('@vane-rs/node')` + 检查 `open`/`VaneDb` export | — |
 
 ### release.yml
 
@@ -175,7 +175,7 @@
 
 ## release.yml 就绪度结论（Z2 需要）
 
-**@vane/node 发布**：✅ 就绪
+**@vane-rs/node 发布**：✅ 就绪
 - 4 平台 prebuilt matrix 与 napi.config.json / package.json optionalDependencies 完全对齐
 - napi build → artifacts → publish 流程完整
 - 唯一前置条件：配置 `secrets.NPM_TOKEN`
@@ -196,4 +196,4 @@
 - 浏览器侧：dict 走 CDN fetch（运行时），非 npm 包
 - `vane-dict-zh` Cargo.toml `publish = false`（Rust crate 不发布 crates.io）
 
-**总评**：release.yml 对 @vane/node 4 平台发布**就绪**（仅需配 NPM_TOKEN）。Go .a 和 WASM 双产物发布**未就绪**，Z2 视需求决定是否补充。
+**总评**：release.yml 对 @vane-rs/node 4 平台发布**就绪**（仅需配 NPM_TOKEN）。Go .a 和 WASM 双产物发布**未就绪**，Z2 视需求决定是否补充。

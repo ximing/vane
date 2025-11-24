@@ -124,7 +124,7 @@ worktree 隔离在该环境失败（`Failed to resolve base branch "HEAD": git r
 ## L5 · 11-demo
 ### 11-demo — ✅ 完成 + 审查通过（commit 97e2de1）
 - demo 跑通：10k 文档灌库（~1950ms，10 段）、5 组 query 三列排序对比（5/5 hybrid 与单路不同，AC4）、sqlite-vec+FTS5 代码量对比（Vane 核心 6 行 vs 手写 ~150-200 行）。AC1-AC7 全满足。
-- 审查 12 项全绿，SPEC §15 demo 验收锚点达成。偏离合理（@vane/node CJS 默认导入、合成英文语料）。
+- 审查 12 项全绿，SPEC §15 demo 验收锚点达成。偏离合理（@vane-rs/node CJS 默认导入、合成英文语料）。
 
 ---
 

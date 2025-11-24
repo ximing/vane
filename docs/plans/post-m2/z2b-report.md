@@ -59,7 +59,7 @@
 
 ## 7. 遗留
 
-- **NPM_TOKEN**：`secrets.NPM_TOKEN` 需在 GitHub repo Secrets 配置（@vane/node npm 发布权限）。未配置时 npm publish step 会失败（tag 触发时）；build/build-go/build-wasm 不受影响。
+- **NPM_TOKEN**：`secrets.NPM_TOKEN` 需在 GitHub repo Secrets 配置（@vane-rs/node npm 发布权限）。未配置时 npm publish step 会失败（tag 触发时）；build/build-go/build-wasm 不受影响。
 - **workflow_dispatch 版本号**：`inputs.version` 当前未被任何 step 使用（原状），仅作为触发参数；如需用版本号打 tag/写 Release name，后续可补。
 - **Go .a Windows 平台**：当前 4 平台不含 windows-msvc（与 ci.yml go-cross 一致；Windows cgo 链接 vane-ffi 另有方案，非本次范围）。
 - **未 push**：按指令不 push，待编排者 P1 CI 绿后统一 commit+push。

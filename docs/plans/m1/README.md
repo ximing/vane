@@ -435,7 +435,7 @@ pub const DICT_VERSION: &str = "2026.08";
 pub fn sha256_prefix() -> [u8; 8];  // 编译期校验
 ```
 
-- `@vane/node` 主包 `package.json` 声明 `vane-dict-zh` 为正式 dependency（禁 postinstall）。
+- `@vane-rs/node` 主包 `package.json` 声明 `vane-dict-zh` 为正式 dependency（禁 postinstall）。
 - vane-node 增加 `loadDict()` API：读 `vane-dict-zh::DICT_BIN` → ruzstd 解压 → `JiebaDict::load` → 注入 collection 的 tokenizer 工厂。
 - CI 门禁：`@vane/dict-zh` 包 gzip ≤1.5MB（SPEC §13.2-3）。
 

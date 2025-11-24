@@ -21,14 +21,14 @@
 ## 前置条件
 
 - Node.js ≥ 18
-- `@vane/node` 已构建（在 `crates/vane-node` 下 `napi build --platform --release` 产出 `*.node`）
-- demo 通过本地 file:link 引用 `@vane/node`（见 `package.json`）
+- `@vane-rs/node` 已构建（在 `crates/vane-node` 下 `napi build --platform --release` 产出 `*.node`）
+- demo 通过本地 file:link 引用 `@vane-rs/node`（见 `package.json`）
 
 ## 运行步骤
 
 ```bash
 cd examples/demo
-npm install            # 本地 link @vane/node
+npm install            # 本地 link @vane-rs/node
 npm run load           # 灌库 1 万条，产出 ./vane-data/
 npm run compare        # 三列排序对比
 npm run smoke:vector   # 伪向量模块自检
@@ -119,7 +119,7 @@ function rrfFuse(textHits, vecHits, k = 60, topN = 10) {
 
 ```
 examples/demo/
-├── package.json              # 依赖 @vane/node（本地 file:link）
+├── package.json              # 依赖 @vane-rs/node（本地 file:link）
 ├── .gitignore                # 忽略 vane-data/、node_modules/
 ├── lib/
 │   ├── vector.js             # hashToVector(text, dim=384) —— 确定性伪向量

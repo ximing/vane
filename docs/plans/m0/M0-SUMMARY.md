@@ -84,7 +84,7 @@
 ### 3.5 环境与流程遗留
 - **worktree 隔离不可用**：本环境 worktree 隔离失败（无 remote + 隔离子进程 git 上下文异常），L1/L2 回退串行 + 审查/实现重叠流水线。M1 若需并行可配置 remote 或 worktree.baseRef。
 - **4 平台 prebuilt 仅 mac-arm64 本地验证**：linux-x64/darwin-x64/win32-x64 配置于 release.yml，CI 交叉编译待远程仓库触发（本地无 Linux/Windows 环境，未实跑）。
-- **@vane/node 为 CJS**：ESM 需默认导入 + 解构（demo 已适配）。M1 可评估 ESM 导出。
+- **@vane-rs/node 为 CJS**：ESM 需默认导入 + 解构（demo 已适配）。M1 可评估 ESM 导出。
 - **demo 用合成英文语料**：非真实维基下载（离线可复现优先），README 已标注。
 
 ---

@@ -1,4 +1,4 @@
-// @vane/node 类型声明。main.js 的 JS 侧胶水（VaneError + open）+
+// @vane-rs/node 类型声明。main.js 的 JS 侧胶水（VaneError + open）+
 // napi-rs 生成的原生类（VaneDb / VaneCollection，见 index.d.ts）。
 
 import { VaneDb, VaneCollection } from './index';

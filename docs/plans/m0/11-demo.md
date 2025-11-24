@@ -14,7 +14,7 @@
 
 ```
 examples/demo/
-├── package.json              # 依赖 @vane/node（本地 link），type: "module"
+├── package.json              # 依赖 @vane-rs/node（本地 link），type: "module"
 ├── lib/
 │   ├── vector.js             # hashToVector(text, dim) —— 确定性伪向量
 │   └── data.js               # generateWikiAbstracts(count, seed) —— 1 万合成英文摘要
@@ -26,13 +26,13 @@ examples/demo/
 数据流：
 1. `lib/data.js` 用固定 PRNG 种子生成 1 万条 `{id, title, text}`（英文，主题词+模板句式，保证可复现）。
 2. `lib/vector.js` 对每条 text 用字符/词 n-gram hash 映射到 384 维并 L2 归一化，得到确定性伪向量（同文本同向量，相近文本向量有余弦相关性）。
-3. `load-wiki.js` 调 `@vane/node` 的 `VaneDb.open` → `collection("wiki", schema, {tokenizer:"standard"})` → 批量 `add` → `flush`，落库到 `./vane-data/`。
+3. `load-wiki.js` 调 `@vane-rs/node` 的 `VaneDb.open` → `collection("wiki", schema, {tokenizer:"standard"})` → 批量 `add` → `flush`，落库到 `./vane-data/`。
 4. `compare.js` 打开已建库，对一组预设 query（同时提供 `text` 与 `vector=hashToVector(query)`）分别以 `mode: hybrid|vector|text` 搜索，打印三列 top-10 id 对比表。
 
 ## Tech Stack
 
 - Node.js ≥ 18，ESM（`"type":"module"`）
-- `@vane/node`（本地 file:link `../../crates/vane-node`，由 09-node-binding 产出）
+- `@vane-rs/node`（本地 file:link `../../crates/vane-node`，由 09-node-binding 产出）
 - 无外部依赖：PRNG、hash 全部用 Node 内置 `node:crypto`（sha256），不引入第三方包
 - 向量：**确定性伪向量**（hash-based），非真实 embedding
 
@@ -47,7 +47,7 @@ examples/demo/
 
 ## 前置依赖
 
-- **09-node-binding** 已完成：`@vane/node` 可 `npm install`（本地 link），导出 `VaneDb` / `VaneCollection`，方法签名见 README `Global Interface Contracts §09-node-binding`。
+- **09-node-binding** 已完成：`@vane-rs/node` 可 `npm install`（本地 link），导出 `VaneDb` / `VaneCollection`，方法签名见 README `Global Interface Contracts §09-node-binding`。
 - 09-node-binding 的 JSON 契约（本 demo 消费侧假设，若 09 实现有差异以 09 为准并回更本计划）：
   - `VaneDb.open(path: string, opts?: object) -> Promise<VaneDb>`
   - `db.collection(name: string, schema: object, opts?: {tokenizer?: "standard"|"cjk_bigram"|"jieba"}) -> Promise<VaneCollection>`
@@ -74,7 +74,7 @@ examples/demo/
 | AC3 | `node compare.js` exit 0，stdout 打印 ≥ 3 组 query 的三列对比表，每列 10 个 id，格式 `query | hybrid top10 ids | vector top10 ids | text top10 ids` |
 | AC4 | 对比表中可见三列排序**存在差异**（至少有一组 query 的 hybrid 列与 vector 列、text 列均不完全相同），证明融合在起作用 |
 | AC5 | `README.md` 含：① 运行步骤 ② 伪向量说明（标注"demo 用伪向量，生产用真实 embedding API"） ③ sqlite-vec+FTS5 等价方案代码量对比表 |
-| AC6 | demo 不引入任何第三方 npm 依赖（仅 `@vane/node` + Node 内置模块） |
+| AC6 | demo 不引入任何第三方 npm 依赖（仅 `@vane-rs/node` + Node 内置模块） |
 | AC7 | 重复运行 `load-wiki.js`（删库重建）产出的库可被 `compare.js` 打开并搜索成功 |
 
 ---
@@ -87,10 +87,10 @@ examples/demo/
 | 英文语料 | SPEC §15 明确英文；分词器用 `standard`（SPEC §5.1） |
 | 伪向量可复现 | 同 text 永远产出同 vector（确定性 hash）；L2 归一化以支持 cosine |
 | 伪向量有语义相关性 | 用词 unigram + bigram 的 TF 分量填入 384 维 bucket，使共享词项的文本 cosine 相似度更高（近似 BM25 的词项重叠信号，但维度连续可被向量路召回） |
-| 无第三方依赖 | 仅 `@vane/node` + `node:crypto` + `node:fs` + `node:path` |
+| 无第三方依赖 | 仅 `@vane-rs/node` + `node:crypto` + `node:fs` + `node:path` |
 | 数据可复现 | PRNG 固定种子（mulberry32，seed=42），1 万条文本跨机器一致 |
 | 真实可运行代码 | 禁止占位符；所有脚本含完整可执行 JS |
-| 本地 link | `package.json` 中 `"@vane/node": "file:../../crates/vane-node"` |
+| 本地 link | `package.json` 中 `"@vane-rs/node": "file:../../crates/vane-node"` |
 
 ---
 
@@ -196,7 +196,7 @@ examples/demo/
     "smoke:data": "node lib/data.js"
   },
   "dependencies": {
-    "@vane/node": "file:../../crates/vane-node"
+    "@vane-rs/node": "file:../../crates/vane-node"
   },
   "engines": { "node": ">=18" }
 }
@@ -205,7 +205,7 @@ examples/demo/
 **Steps:**
 - [ ] Step 3.1：新建 `examples/demo/package.json`（上述内容）
 - [ ] Step 3.2：`cd examples/demo && npm install` exit 0（在 09-node-binding 产出后验证；本步可延后到 09 可用时执行，先建文件）
-- [ ] Step 3.3：确认 `node_modules/@vane/node` 软链指向 `../../crates/vane-node`
+- [ ] Step 3.3：确认 `node_modules/@vane-rs/node` 软链指向 `../../crates/vane-node`
 
 ### Task 4 · `load-wiki.js` 灌库脚本
 
@@ -239,7 +239,7 @@ examples/demo/
 - stdout 打印 `loaded 10000 docs in <ms>ms`
 
 **Steps:**
-- [ ] Step 4.1：新建 `examples/demo/load-wiki.js`，import `VaneDb` from `@vane/node`、`hashToVector` from `./lib/vector.js`、`generateWikiAbstracts` from `./lib/data.js`、`node:fs`、`node:path`、`node:url`
+- [ ] Step 4.1：新建 `examples/demo/load-wiki.js`，import `VaneDb` from `@vane-rs/node`、`hashToVector` from `./lib/vector.js`、`generateWikiAbstracts` from `./lib/data.js`、`node:fs`、`node:path`、`node:url`
 - [ ] Step 4.2：定义 `DB_PATH` / `SCHEMA` / `COLLECTION` 常量并 export
 - [ ] Step 4.3：实现 `buildDb()`：删旧库 → open → collection → 分批 add（500/批）→ flush → close → 打印统计
 - [ ] Step 4.4：main 守卫调用 `buildDb().catch(e => { console.error(e); process.exit(1); })`
@@ -305,7 +305,7 @@ examples/demo/
 
 **内容大纲：**
 1. **概述**：1 万英文维基摘要（合成语料）三列排序对比 demo。
-2. **前置条件**：09-node-binding 已构建，`@vane/node` 可 install。
+2. **前置条件**：09-node-binding 已构建，`@vane-rs/node` 可 install。
 3. **运行步骤**：
    ```bash
    cd examples/demo
@@ -361,7 +361,7 @@ examples/demo/
 | 09-node-binding 的 JSON schema/doc 格式与本计划假设不符 | load-wiki.js 调用失败 | 以 09 实际反序列化为准调整 SCHEMA/Doc JSON 形状；回更本计划"前置依赖"节 |
 | 伪向量下 hybrid 与 vector/text 三列排序无差异（AC4 不满足） | 融合未体现价值 | 检查 07-api-core fusion 是否生效；若融合正确但结果恰好相同，改用差异更大的 query（如 query 词在数据中稀疏）；仍不行则向编排者反馈 |
 | 1 万条 add 单批 OOM | 灌库失败 | 已分批 500 条；若仍失败降到 100 条/批 |
-| `@vane/node` 本地 link 在 npm install 时未就绪 | Task 3/4 无法验证 | Task 3.2/4.5 标注"待 09 可用后执行"；先完成代码编写，验证延后 |
+| `@vane-rs/node` 本地 link 在 npm install 时未就绪 | Task 3/4 无法验证 | Task 3.2/4.5 标注"待 09 可用后执行"；先完成代码编写，验证延后 |
 | 合成语料过于模板化导致 BM25 召回集中 | text 列结果同质 | data.js 句式池 ≥ 6 种、词库 ≥ 200 词、每条摘要 3~5 句随机组合；必要时增加 query 数量到 5 组 |
 
 ---
