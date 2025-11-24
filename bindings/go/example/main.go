@@ -13,8 +13,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vane/vane/bindings/go"
-	"github.com/vane/vane/bindings/go/dict"
+	"github.com/ximing/vane/bindings/go"
+	"github.com/ximing/vane/bindings/go/dict"
 )
 
 func main() {
