@@ -55,7 +55,7 @@
 | cold-start job | ✅ 已有（11 模块） | ci.yml cold-start job 已在 |
 | benchmark.yml 排除 cold_start | ✅ | `--skip cold_start`（R-11-3，fixture 慢） |
 | Go cross matrix | ⏸ deferred | ci.yml 注释化（09-go-cgo 待落地） |
-| npm package.json | ✅ 文档化 | vane-dict-zh 是 Rust crate 嵌入 binary，无独立 npm 包。dict.bin 经 `include_bytes!` 编入 `@vane/node` 原生产物。`loadDict()`/`dictVersion()` JS API 已导出。 |
+| npm package.json | ✅ 文档化 | vane-dict-zh 是 Rust crate 嵌入 binary，无独立 npm 包。dict.bin 经 `include_bytes!` 编入 `@vane-rs/node` 原生产物。`loadDict()`/`dictVersion()` JS API 已导出。 |
 | JS 侧行为测试 | ✅ 4 tests passed | `__tests__/dict-behavior.test.js`：loadDict Buffer + dictVersion YYYY.MM + jieba 自动加载 + 降级不抛错 |
 | 三渠道版本哈希一致 | ✅ 基础设施就位 | `scripts/check-dict-hash.sh`：Node 侧 sha256_prefix 校验 + Go 侧 deferred |
 

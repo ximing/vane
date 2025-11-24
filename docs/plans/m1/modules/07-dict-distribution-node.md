@@ -6,13 +6,13 @@
 
 ## Goal
 
-`@vane/dict-zh` 平台无关数据包（仅含预编译 dict.bin），作 `@vane/node` 主包正式 dependency（禁 postinstall）。包体 ≤1.5MB gzip（CI 门禁）。vane-node 增加 `loadDict()` API 注入词典。词典独立日历版本化（`2026.08`）。
+`@vane/dict-zh` 平台无关数据包（仅含预编译 dict.bin），作 `@vane-rs/node` 主包正式 dependency（禁 postinstall）。包体 ≤1.5MB gzip（CI 门禁）。vane-node 增加 `loadDict()` API 注入词典。词典独立日历版本化（`2026.08`）。
 
 ## Architecture
 
 - **`crates/vane-dict-zh`**：纯数据 crate，`include_bytes!("data/dict.bin")` 暴露 `DICT_BIN: &[u8]` + `DICT_VERSION: &str` + `sha256_prefix()`。无 Rust 逻辑（加载在 core 05）。
 - **dict.bin 生成**（离线脚本 `scripts/gen_dict.rs` 或 `crates/vane-dict-zh/build.rs`）：jieba 开源词表剪枝 ~20 万词 → DAT 构建 → zstd 压缩 → 写 `data/dict.bin`。脚本不在 core 运行时；CI 生成或手工提交。
-- **`@vane/node` 集成**：`package.json` 声明 `vane-dict-zh`（npm 包名 `@vane/dict-zh`）为 dependency。vane-node 增加 `loadDict(): Buffer` 或直接在 `VaneCollection` 创建时若 `tokenizer:"jieba"` 自动加载。
+- **`@vane-rs/node` 集成**：`package.json` 声明 `vane-dict-zh`（npm 包名 `@vane/dict-zh`）为 dependency。vane-node 增加 `loadDict(): Buffer` 或直接在 `VaneCollection` 创建时若 `tokenizer:"jieba"` 自动加载。
 - **降级**：词典加载失败（包缺失/损坏）→ fallback `CjkBigram` + console.warn（不抛错，SPEC §13.2-2 ④）。
 
 ## 涉及文件

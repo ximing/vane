@@ -1,14 +1,14 @@
 {
-  "name": "@vane/node",
+  "name": "@vane-rs/node",
   "version": "0.1.0",
   "main": "main.js",
   "types": "main.d.ts",
   "files": ["main.js", "main.d.ts", "index.js", "index.d.ts"],
   "optionalDependencies": {
-    "@vane/node-linux-x64-gnu": "0.1.0",
-    "@vane/node-darwin-arm64": "0.1.0",
-    "@vane/node-darwin-x64": "0.1.0",
-    "@vane/node-win32-x64-msvc": "0.1.0"
+    "@vane-rs/node-linux-x64-gnu": "0.1.0",
+    "@vane-rs/node-darwin-arm64": "0.1.0",
+    "@vane-rs/node-darwin-x64": "0.1.0",
+    "@vane-rs/node-win32-x64-msvc": "0.1.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
@@ -23,6 +23,6 @@
   },
   "napi": {
     "binaryName": "vane",
-    "packageName": "@vane/node"
+    "packageName": "@vane-rs/node"
   }
 }

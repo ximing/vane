@@ -2,7 +2,7 @@
 // 对同一组 query 分别跑三种 mode，打印 top-10 id 对比表，验证融合在起作用（AC3/AC4）。
 // demo 用伪向量（hashToVector），生产用真实 embedding API。
 
-import vane from '@vane/node';
+import vane from '@vane-rs/node';
 const { open } = vane;
 import { hashToVector } from './lib/vector.js';
 import { DB_PATH, SCHEMA, COLLECTION } from './load-wiki.js';

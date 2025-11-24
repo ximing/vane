@@ -21,8 +21,9 @@
 | 二 | P2 5万 Playwright CI | ⏭跳过 | 用户决策不做浏览器验收，继续后续 |
 | 二 | P3 词典 CDN 部署 | ✅完成 | jsdelivr gh URL；check-dict-hash.sh Go 渠道启用三层校验全绿 |
 | 二 | Z2-补 Go/WASM 发布 | ✅完成 | release.yml 三端 prebuilt，CI 绿 |
-| 三 | R1 version 同步 | 待 | |
-| 三 | R2 tag+prebuilt | 待 | 需转 public + NPM_TOKEN + workflow_dispatch 验证 release.yml |
+| 三 | R1 version 同步 | ✅完成 | version 0.1.0 三端同步 + go.mod module 路径 vane/vane→ximing/vane |
+| 三 | R1b npm scope | 进行中 | @vane-rs/node → @vane-rs/node（用户 scope 是 @vane-rs） |
+| 三 | R2 tag+prebuilt | 待 | 需 workflow_dispatch 验证 release.yml + 用户确认打 tag |
 | 三 | R3 发版 | 待 | 需用户确认 |
 
 ## 裁决记录

@@ -11,7 +11,7 @@
     "smoke:data": "node lib/data.js"
   },
   "dependencies": {
-    "@vane/node": "file:../../crates/vane-node"
+    "@vane-rs/node": "file:../../crates/vane-node"
   },
   "engines": { "node": ">=18" }
 }

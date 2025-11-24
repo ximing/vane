@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '@vane/node 版本号'
+        description: '@vane-rs/node 版本号'
         required: true
         default: '0.1.0'
 
@@ -57,13 +57,13 @@ jobs:
         run: |
           mkdir test-install && cd test-install
           case "${{ matrix.pkg_manager }}" in
-            npm)  npm init -y; npm install @vane/node@${{ steps.ver.outputs.version }} ;;
-            yarn) yarn init -y; yarn add @vane/node@${{ steps.ver.outputs.version }} ;;
-            pnpm) pnpm init; pnpm add @vane/node@${{ steps.ver.outputs.version }} ;;
-            bun)  bun init -y; bun add @vane/node@${{ steps.ver.outputs.version }} ;;
+            npm)  npm init -y; npm install @vane-rs/node@${{ steps.ver.outputs.version }} ;;
+            yarn) yarn init -y; yarn add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
+            pnpm) pnpm init; pnpm add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
+            bun)  bun init -y; bun add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
           esac
       - name: Require and smoke test
         shell: bash
         run: |
           cd test-install
-          node -e "const vane = require('@vane/node'); console.log('loaded:', typeof vane); if (typeof vane.open !== 'function' && typeof vane.VaneDb === 'undefined') { console.error('FAIL: no open/VaneDb export'); process.exit(1); } console.log('OK')"
+          node -e "const vane = require('@vane-rs/node'); console.log('loaded:', typeof vane); if (typeof vane.open !== 'function' && typeof vane.VaneDb === 'undefined') { console.error('FAIL: no open/VaneDb export'); process.exit(1); } console.log('OK')"

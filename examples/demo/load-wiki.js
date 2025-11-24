@@ -4,7 +4,7 @@
 // 流程：open → collection("wiki", schema, {tokenizer:"standard"}) → 分批 add(500/批) → flush → close
 // 产出：./vane-data/（manifest.json + segments/seg_*/）
 
-import vane from '@vane/node';
+import vane from '@vane-rs/node';
 const { open } = vane;
 import { hashToVector } from './lib/vector.js';
 import { generateWikiAbstracts } from './lib/data.js';

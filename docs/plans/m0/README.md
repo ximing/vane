@@ -549,7 +549,7 @@ impl VaneDb {
 
 - `load-wiki.js`：加载 1 万维基摘要 + 384 维向量
 - `compare.js`：hybrid / vector-only / text-only 三列排序对比输出
-- `package.json`：依赖 `@vane/node`（本地 link）
+- `package.json`：依赖 `@vane-rs/node`（本地 link）
 
 ---
 

@@ -1,4 +1,4 @@
-// @vane/node JS 入口：VaneError 包装 + 便捷 API（SPEC §9.3 / §10）。
+// @vane-rs/node JS 入口：VaneError 包装 + 便捷 API（SPEC §9.3 / §10）。
 // 纯胶水：无检索逻辑（I-8）。所有 Promise reject 被包成 VaneError(.code/.name)。
 //
 // napi-rs 生成 `index.js`（平台 require 切换 loader）+ `index.d.ts`（类型）。

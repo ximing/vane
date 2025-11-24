@@ -7,7 +7,7 @@
 
 ## Goal
 
-为 Node.js 提供 `@vane/node` 原生包，覆盖 SPEC §4.1 的 M0 函数面（`open` / `collection` / `collections` / `add` / `flush` / `search` / `close`，外加 `delete` 占位 reject），三侧签名映射遵循 §4.3：JS 侧全部 `Promise<T>`，reject 携带含 `code` 的 `VaneError`。M0 交付 4 平台 prebuilt 配置（§12.2）。
+为 Node.js 提供 `@vane-rs/node` 原生包，覆盖 SPEC §4.1 的 M0 函数面（`open` / `collection` / `collections` / `add` / `flush` / `search` / `close`，外加 `delete` 占位 reject），三侧签名映射遵循 §4.3：JS 侧全部 `Promise<T>`，reject 携带含 `code` 的 `VaneError`。M0 交付 4 平台 prebuilt 配置（§12.2）。
 
 ## Architecture
 
@@ -67,7 +67,7 @@
 3. `delete` 调用 reject `VaneError` 且 `err.code === -10`、`err.name === 'E_UNSUPPORTED'`。
 4. 错误透传：构造 `E_SCHEMA`（vector dim 不匹配）场景，断言 `err.code === -2`。
 5. `cargo check -p vane-node` 无 warning；`cargo clippy -p vane-node -- -D warnings` 通过。
-6. `napi build` 在本机产出 `.node` 文件；`node -e "require('@vane/node')"` 不抛错。
+6. `napi build` 在本机产出 `.node` 文件；`node -e "require('@vane-rs/node')"` 不抛错。
 7. binding crate 内 `grep -rE 'tokio|std::fs|hnsw|bm25|cosine' src/` 为空（薄壳验证 I-8）。
 
 ---
@@ -93,7 +93,7 @@
 crates/vane-node/
 ├── Cargo.toml                  # cdylib + lib；napi-derive；serde_json；vane-core dep
 ├── napi.config.json            # @napi-rs/cli 配置（packageName/版本/三元组）
-├── package.json                # @vane/node 主包；optionalDependencies 4 平台子包
+├── package.json                # @vane-rs/node 主包；optionalDependencies 4 平台子包
 ├── index.js                    # JS 入口：平台 require 切换 + VaneError 包装
 ├── src/
 │   ├── lib.rs                  # #[napi] module 入口；register；导出 VaneError JS 构造
@@ -119,7 +119,7 @@ crates/vane-node/
 **Files:** `crates/vane-node/Cargo.toml`, `crates/vane-node/napi.config.json`, `crates/vane-node/package.json`, `crates/vane-node/index.js`, `crates/vane-node/src/lib.rs`, `crates/vane-node/.gitignore`
 
 **Interfaces:**
-- Produces: `@vane/node` 包骨架；一个 `hello()` 导出用于验证 napi 构建链路通。
+- Produces: `@vane-rs/node` 包骨架；一个 `hello()` 导出用于验证 napi 构建链路通。
 - Consumes: 无（仅验证构建）。
 
 **步骤：**
@@ -163,7 +163,7 @@ crates/vane-node/
   ```json
   {
     "binaryName": "vane",
-    "packageName": "@vane/node",
+    "packageName": "@vane-rs/node",
     "packageVersion": "0.1.0",
     "napi": {
       "name": "vane",
@@ -183,16 +183,16 @@ crates/vane-node/
 - [ ] **1.4** 写 `package.json`：
   ```json
   {
-    "name": "@vane/node",
+    "name": "@vane-rs/node",
     "version": "0.1.0",
     "main": "index.js",
     "types": "index.d.ts",
     "files": ["index.js", "index.d.ts"],
     "optionalDependencies": {
-      "@vane/node-linux-x64-gnu": "0.1.0",
-      "@vane/node-darwin-arm64": "0.1.0",
-      "@vane/node-darwin-x64": "0.1.0",
-      "@vane/node-win32-x64-msvc": "0.1.0"
+      "@vane-rs/node-linux-x64-gnu": "0.1.0",
+      "@vane-rs/node-darwin-arm64": "0.1.0",
+      "@vane-rs/node-darwin-x64": "0.1.0",
+      "@vane-rs/node-win32-x64-msvc": "0.1.0"
     },
     "devDependencies": {
       "@napi-rs/cli": "^2.18.0",
@@ -204,7 +204,7 @@ crates/vane-node/
       "test": "ava",
       "prepublishOnly": "napi prepublish -t npm"
     },
-    "napi": { "binaryName": "vane", "packageName": "@vane/node" }
+    "napi": { "binaryName": "vane", "packageName": "@vane-rs/node" }
   }
   ```
 
@@ -212,14 +212,14 @@ crates/vane-node/
   ```js
   // napi-rs 约定：子包名 = `${packageName}-${platformArch}`，platformArch 按 napi-rs naming
   const PlatformPackages = {
-    'linux': { 'x64': '@vane/node-linux-x64-gnu' },
-    'darwin': { 'arm64': '@vane/node-darwin-arm64', 'x64': '@vane/node-darwin-x64' },
-    'win32': { 'x64': '@vane/node-win32-x64-msvc' },
+    'linux': { 'x64': '@vane-rs/node-linux-x64-gnu' },
+    'darwin': { 'arm64': '@vane-rs/node-darwin-arm64', 'x64': '@vane-rs/node-darwin-x64' },
+    'win32': { 'x64': '@vane-rs/node-win32-x64-msvc' },
   };
   function loadNative() {
     const plat = process.platform, arch = process.arch;
     const pkg = PlatformPackages[plat]?.[arch];
-    if (!pkg) throw new Error(`@vane/node: unsupported platform ${plat}-${arch}`);
+    if (!pkg) throw new Error(`@vane-rs/node: unsupported platform ${plat}-${arch}`);
     try { return require(pkg); }
     catch (e) {
       // 开发期：未安装子包时回退本地构建产物（.node 文件名由 napi build 生成）

@@ -22,7 +22,7 @@
 - `cargo-deny`、`cargo fmt`、`cargo clippy -D warnings`
 - `criterion` 基准 + `critcmp` 对比（或 `--save-baseline`）
 - `@napi-rs/cli` 的 `napi build` 命令构建 4 平台 prebuilt
-- npm 发布（`@vane/node` 包）
+- npm 发布（`@vane-rs/node` 包）
 
 ## SPEC 引用
 
@@ -48,8 +48,8 @@
 2. 在 `crates/vane-core/src/` 任意文件加入 `use std::fs;` 后推送，CI 必须红（wasm32 check 或 grep 脚本失败）。
 3. 在 `Cargo.toml` 加入 `regex` 依赖后推送，`cargo deny check bans` 必须失败。
 4. `benchmark.yml` 夜间跑通；相对 main 基准任意指标回退 >10% 时 workflow 失败。
-5. 打 tag `v0.1.0` 后 `release.yml` 在 4 平台均产出 `.node` prebuilt artifact，npm 发布 `@vane/node@0.1.0` 含 4 个平台 optionalDependencies。
-6. `install-matrix.yml` 在 npm/yarn/pnpm/bun 四个包管理器下 `install` + `require('@vane/node')` 成功。
+5. 打 tag `v0.1.0` 后 `release.yml` 在 4 平台均产出 `.node` prebuilt artifact，npm 发布 `@vane-rs/node@0.1.0` 含 4 个平台 optionalDependencies。
+6. `install-matrix.yml` 在 npm/yarn/pnpm/bun 四个包管理器下 `install` + `require('@vane-rs/node')` 成功。
 7. 全部 workflow 在仓库 Actions 页面可见，无占位 job。
 
 ---
@@ -494,7 +494,7 @@ gh workflow run benchmark.yml
   node -e "require('./').open ? console.log('ok') : console.log('loaded')"
   ```
 
-- [ ] **Step 5**：打测试 tag `v0.0.0-rc.1` 触发 release.yml，观察 4 平台 build job 全绿、publish job 成功发布到 npm（pre-release tag 不污染 latest）。验证后在 npmjs.com 确认 `@vane/node@0.0.0-rc.1` 含 4 个平台 optionalDependencies 包。
+- [ ] **Step 5**：打测试 tag `v0.0.0-rc.1` 触发 release.yml，观察 4 平台 build job 全绿、publish job 成功发布到 npm（pre-release tag 不污染 latest）。验证后在 npmjs.com 确认 `@vane-rs/node@0.0.0-rc.1` 含 4 个平台 optionalDependencies 包。
 
 - [ ] **Step 6**：若某平台 build 失败，按错误信息排查（常见：windows MSVC 缺少 `link.exe`、linux 缺少 `gcc`，napi-rs action 通常已预装）。`fail-fast: false` 保证 4 平台独立失败可见。
 
@@ -517,7 +517,7 @@ gh run watch
 - `.github/workflows/install-matrix.yml`（新建）
 
 **Interfaces:**
-- Consumes from Task 5: npm 上已发布的 `@vane/node` 版本
+- Consumes from Task 5: npm 上已发布的 `@vane-rs/node` 版本
 - Produces: npm/yarn/pnpm/bun 安装验证 workflow
 
 **SPEC 引用:** §13.2-4 平台四包管理器（npm/yarn/pnpm/bun）安装矩阵通过。
@@ -532,7 +532,7 @@ gh run watch
     workflow_dispatch:
       inputs:
         version:
-          description: '@vane/node 版本号'
+          description: '@vane-rs/node 版本号'
           required: true
           default: '0.0.0-rc.1'
   jobs:
@@ -560,15 +560,15 @@ gh run watch
           run: |
             mkdir test-install && cd test-install
             case "${{ matrix.pkg_manager }}" in
-              npm)  npm init -y; npm install @vane/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
-              yarn) yarn init -y; yarn add @vane/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
-              pnpm) pnpm init; pnpm add @vane/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
-              bun)  bun init -y; bun add @vane/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
+              npm)  npm init -y; npm install @vane-rs/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
+              yarn) yarn init -y; yarn add @vane-rs/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
+              pnpm) pnpm init; pnpm add @vane-rs/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
+              bun)  bun init -y; bun add @vane-rs/node@${{ github.event.inputs.version || '0.0.0-rc.1' }} ;;
             esac
         - name: Require and smoke test
           run: |
             cd test-install
-            node -e "const vane = require('@vane/node'); console.log('loaded:', typeof vane); if (typeof vane.open !== 'function' && typeof vane.VaneDb === 'undefined') { console.error('FAIL: no open/VaneDb export'); process.exit(1); } console.log('OK')"
+            node -e "const vane = require('@vane-rs/node'); console.log('loaded:', typeof vane); if (typeof vane.open !== 'function' && typeof vane.VaneDb === 'undefined') { console.error('FAIL: no open/VaneDb export'); process.exit(1); } console.log('OK')"
       # 注：windows 上 bun 可能不支持，matrix 仍跑但允许失败标记为继续
       continue-on-error: ${{ matrix.os == 'windows-latest' && matrix.pkg_manager == 'bun' }}
   ```
@@ -580,8 +580,8 @@ gh run watch
   ```bash
   mkdir /tmp/test-install && cd /tmp/test-install
   npm init -y
-  npm install @vane/node@0.0.0-rc.1
-  node -e "const v = require('@vane/node'); console.log(typeof v)"
+  npm install @vane-rs/node@0.0.0-rc.1
+  node -e "const v = require('@vane-rs/node'); console.log(typeof v)"
   ```
   确认 napi prebuilt 在当前平台正确加载。
 

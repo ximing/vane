@@ -1,6 +1,6 @@
 {
   "binaryName": "vane",
-  "packageName": "@vane/node",
+  "packageName": "@vane-rs/node",
   "packageVersion": "0.1.0",
   "napi": {
     "name": "vane",
