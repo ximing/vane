@@ -16,7 +16,13 @@
 const DIM = 64;
 const DB_PATH = "vane.db";
 const COL_NAME = "docs";
-const DICT_URL = "./pkg/dict.bin"; // demo 自托管 dict.bin（亦可换 CDN URL）
+// 词典 CDN URL（jsdelivr gh）。
+// 仓库转 public 后生效；private 仓库期间 jsdelivr 返回 404 → CDN fetch 失败
+// → 降级 bigram（M2-04 铁律：词典不可用永不抛错）。
+// 链路：CDN fetch → verify_sha256_prefix → OPFS 缓存（二次启动零网络）→ 降级 bigram。
+// 本地离线开发可用 build.sh 产出的 ./pkg/dict.bin（同源，sha256_prefix 一致）。
+const DICT_URL =
+  "https://cdn.jsdelivr.net/gh/ximing/vane@main/crates/vane-dict-zh/data/dict.bin";
 
 // =========================================================================
 // Worker 通信封装（postMessage Promise 边界）
