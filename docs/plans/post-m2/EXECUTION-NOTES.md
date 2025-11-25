@@ -23,7 +23,8 @@
 | 二 | Z2-补 Go/WASM 发布 | ✅完成 | release.yml 三端 prebuilt，CI 绿 |
 | 三 | R1 version 同步 | ✅完成 | version 0.1.0 三端同步 + go.mod module 路径 vane/vane→ximing/vane |
 | 三 | R1b npm scope | 进行中 | @vane-rs/node → @vane-rs/node（用户 scope 是 @vane-rs） |
-| 三 | R2 tag+prebuilt | 待 | 需 workflow_dispatch 验证 release.yml + 用户确认打 tag |
+| 三 | R2 tag+prebuilt | 进行中 | release.yml Node 发布重构（napi-rs 3.8.5 架构 bug）|
+| 三 | R2-fix napi artifacts | 进行中 | build-go/build-wasm ✅；build(napi) 失败：napi artifacts --target 不支持+要求全 target+无 napi publish。重构 build job 上传 .node / release job artifacts+pre-publish+publish |
 | 三 | R3 发版 | 待 | 需用户确认 |
 
 ## 裁决记录
