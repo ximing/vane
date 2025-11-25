@@ -19,6 +19,8 @@ env:
 jobs:
   build:
     # SPEC §12.2 M0 Node prebuilt 4 平台（napi-rs）
+    # per-platform matrix：每个 job 只产出 1 个 .node 文件并上传。
+    # napi artifacts 要求所有配置 target 的 .node 同时存在，故移至 release job 执行。
     strategy:
       fail-fast: false
       matrix:
@@ -55,15 +57,10 @@ jobs:
       - name: Build napi prebuilt
         working-directory: crates/vane-node
         run: napi build --target ${{ matrix.target }} --platform --release
-      - name: Package artifact
-        working-directory: crates/vane-node
-        run: napi artifacts --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: vane-node-${{ matrix.node_platform }}
-          path: |
-            crates/vane-node/*.node
-            crates/vane-node/*.tgz
+          path: crates/vane-node/*.node
 
   build-go:
     # SPEC §12.2 Go cgo staticlib 4 平台交叉编译（zig cc）。
@@ -132,9 +129,15 @@ jobs:
             target/wasm-variants/vane_wasm_scalar.wasm
 
   release:
-    # 三端 prebuilt 聚合：Node（napi publish npm）+ Go .a + WASM .wasm（GitHub Release assets）。
-    # tag 触发：npm publish + 创建 GitHub Release + attach Go/WASM assets。
-    # workflow_dispatch：仅构建验证（build/build-go/build-wasm 全跑），跳过 publish/release。
+    # 三端 prebuilt 聚合发布。
+    # Node 流水线（@napi-rs/cli 3.8.5）：
+    #   1. 下载 4 平台 .node → 放回 crates/vane-node/（napi build 默认产出位置）
+    #   2. napi artifacts --output-dir . --npm-dir npm：收集 4 .node 到 npm/ 平台包目录
+    #   3. napi pre-publish -t npm --no-gh-release：更新 package.json + 复制 addon +
+    #      自动 npm publish 4 个 optionalDeps 平台包（@vane-rs/node-*）
+    #   4. npm publish --access public：发布主包 @vane-rs/node（pre-publish 不发布根包）
+    # Go .a + WASM .wasm 作为 GitHub Release assets（softprops/action-gh-release）。
+    # tag 触发：npm publish + GitHub Release。workflow_dispatch：仅构建 + artifacts 收集验证，跳过 publish/release。
     needs: [build, build-go, build-wasm]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -152,16 +155,33 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Stage node artifacts for napi publish
-        # napi publish 从 crates/vane-node 工作目录扫描 *.tgz；
-        # 恢复原 publish job 的 artifacts 目录结构（vane-node-<platform>/ 子目录）。
+      - name: Stage node .node files into crates/vane-node
+        # napi build 默认产出 .node 到 crate folder；artifacts --output-dir . 从 cwd 递归扫描。
+        # 把 4 平台 .node 放回 crates/vane-node/ 以满足 artifacts 对全部 target 的要求。
         run: |
-          mkdir -p crates/vane-node/artifacts
-          cp -r artifacts/vane-node-* crates/vane-node/artifacts/
-      - name: Publish to npm
+          mkdir -p crates/vane-node
+          cp artifacts/vane-node-*/*.node crates/vane-node/
+          ls -lh crates/vane-node/*.node
+      - name: Collect node artifacts into npm platform packages
+        # 要求 napi.config.json 所有 4 个 triple 的 .node 同时存在（release job 已聚合）。
+        # 生成 npm/<platform-arch-abi>/ 目录结构。
+        working-directory: crates/vane-node
+        run: napi artifacts --output-dir . --npm-dir npm
+      - name: Pre-publish (publish optionalDeps platform packages)
+        # napi pre-publish 自动对每个平台包执行 `npm publish`（optionalDependencies）。
+        # --no-gh-release：禁用 napi 自建 GitHub Release，避免与下方 softprops 步骤冲突。
+        # -t npm：tag 风格 v0.1.0（与本仓库 tag 约定一致）。
+        # pre-publish 不发布根包，根包由下一步 npm publish 发布。
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: crates/vane-node
-        run: napi publish --tag latest
+        run: napi pre-publish -t npm --no-gh-release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish root package to npm
+        # pre-publish 只发布 optionalDeps 平台包；主包 @vane-rs/node 需单独发布。
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: crates/vane-node
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub Release + attach Go/WASM assets
