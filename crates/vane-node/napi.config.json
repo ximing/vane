@@ -1,9 +1,13 @@
 {
-  "binaryName": "vane",
-  "packageName": "@vane-rs/node",
-  "packageVersion": "0.1.0",
   "napi": {
-    "name": "vane",
+    "binaryName": "vane",
+    "packageName": "@vane-rs/node",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ],
     "triples": {
       "defaults": false,
       "additional": [
