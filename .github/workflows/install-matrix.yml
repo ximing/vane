@@ -9,7 +9,7 @@ on:
       version:
         description: '@vane-rs/node 版本号'
         required: true
-        default: '0.1.0'
+        default: '0.1.1'
 
 permissions:
   contents: read
