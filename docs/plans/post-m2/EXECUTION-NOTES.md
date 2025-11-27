@@ -22,10 +22,11 @@
 | 二 | P3 词典 CDN 部署 | ✅完成 | jsdelivr gh URL；check-dict-hash.sh Go 渠道启用三层校验全绿 |
 | 二 | Z2-补 Go/WASM 发布 | ✅完成 | release.yml 三端 prebuilt，CI 绿 |
 | 三 | R1 version 同步 | ✅完成 | version 0.1.0 三端同步 + go.mod module 路径 vane/vane→ximing/vane |
-| 三 | R1b npm scope | 进行中 | @vane-rs/node → @vane-rs/node（用户 scope 是 @vane-rs） |
-| 三 | R2 tag+prebuilt | 进行中 | release.yml Node 发布重构（napi-rs 3.8.5 架构 bug）|
-| 三 | R2-fix napi artifacts | 进行中 | build-go/build-wasm ✅；build(napi) 失败：napi artifacts --target 不支持+要求全 target+无 napi publish。重构 build job 上传 .node / release job artifacts+pre-publish+publish |
-| 三 | R3 发版 | 待 | 需用户确认 |
+| 三 | R1b npm scope | ✅完成 | @vane/node → @vane-rs/node（用户 scope 是 @vane-rs） |
+| 三 | R2 tag+prebuilt | ✅完成 | v0.1.0 tag 发版，三端 prebuilt 产出（napi-rs 6 轮调试） |
+| 三 | R3 发版 | ✅完成 | GitHub Release v0.1.0 发版说明 + 三渠道词典哈希（P3 验证） |
+
+**post-M2 全部完成 ✅（2026-08-10）。v0.1.0 已发版。详见 POST-M2-SUMMARY.md。**
 
 ## 裁决记录
 - 2026-08-10 启动。Z0 派只读预审 SubAgent（sonnet）→ 1必炸(go-cross)+14隐患。
