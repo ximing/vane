@@ -38,7 +38,7 @@ jobs:
             npm)  npm --version ;;
             yarn) corepack enable; yarn --version ;;
             pnpm) npm install -g pnpm; pnpm --version ;;
-            bun)  curl -fsSL https://bun.sh/install | bash; echo "$HOME/.bun/bin" >> $GITHUB_PATH; bun --version ;;
+            bun)  curl -fsSL https://bun.sh/install | bash; echo "$HOME/.bun/bin" >> $GITHUB_PATH; export PATH="$HOME/.bun/bin:$PATH"; bun --version ;;
           esac
       - name: Resolve version
         id: ver
@@ -58,7 +58,7 @@ jobs:
           mkdir test-install && cd test-install
           case "${{ matrix.pkg_manager }}" in
             npm)  npm init -y; npm install @vane-rs/node@${{ steps.ver.outputs.version }} ;;
-            yarn) yarn init -y; yarn add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
+            yarn) yarn init -y; echo 'nodeLinker: node-modules' > .yarnrc.yml; yarn add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
             pnpm) pnpm init; pnpm add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
             bun)  bun init -y; bun add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
           esac
