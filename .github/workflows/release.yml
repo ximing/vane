@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（如 0.1.0）'
+        description: '版本号（如 0.1.1）'
         required: true
 
 permissions:
@@ -63,6 +63,7 @@ jobs:
           name: vane-node-${{ matrix.node_platform }}
           path: |
             crates/vane-node/*.node
+            crates/vane-node/index.js
 
   build-go:
     # SPEC §12.2 Go cgo staticlib 4 平台交叉编译（zig cc）。
@@ -158,10 +159,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Stage node .node into crates/vane-node/
+      - name: Stage node .node + index.js into crates/vane-node/
         # napi artifacts --dir . 从 cwd（crates/vane-node/）扫描 *.node；
         # 将 4 个 per-platform .node 暂存到此目录。
-        run: cp artifacts/vane-node-*/*.node crates/vane-node/
+        # index.js 是 napi-rs 生成的平台切换 loader（main.js require './index.js'），
+        # 被 .gitignore 忽略不入库，需从 build artifact 暂存（4 平台生成相同文件，取 linux 即可）。
+        run: |
+          cp artifacts/vane-node-*/*.node crates/vane-node/
+          cp artifacts/vane-node-linux-x64-gnu/index.js crates/vane-node/
+          ls -lh crates/vane-node/*.node crates/vane-node/index.js
       - name: Create npm platform package dirs
         # 2.x 命令为 `create-npm-dir`（单数）；为 napi.triples.additional 的每个 target
         # 创建 npm/<platform>/ + package.json（main 指向 <binaryName>.<platform>.node）。
