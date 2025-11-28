@@ -28,6 +28,12 @@
 
 **post-M2 全部完成 ✅（2026-08-10）。v0.1.0 已发版。详见 POST-M2-SUMMARY.md。**
 
+## v0.1.1 修复发版（post-post-M2）
+- **v0.1.0 发版产物 bug**：install-matrix 3 次失败——npm 包 @vane-rs/node 缺 index.js（napi 生成 loader，被 .gitignore，release job 没 stage）。main.js require './index.js' MODULE_NOT_FOUND。
+- **v0.1.1 修复**：release.yml build upload index.js + release stage index.js；bump 0.1.0→0.1.1 三端（npm 不允许 republish）。v0.1.1 发版 success。
+- **install-matrix 修复**：v0.1.1 install-matrix 残留 yarn×3 + bun×3 失败。yarn 根因：corepack Yarn 4 默认 PnP，node -e require 找不到包 → .yarnrc.yml nodeLinker: node-modules。bun 根因：Setup step bun --version 在 GITHUB_PATH 生效前 command not found → export PATH。修复后 install-matrix **12/12 全绿**（npm/yarn/pnpm/bun × 3 平台）。
+- **最终状态**：v0.1.1 npm @vane-rs/node@0.1.1 + 4 平台包；GitHub Release v0.1.0（Go .a×4 + WASM×2）；install-matrix 12/12 全绿。发版产物可用性完全验证。
+
 ## 裁决记录
 - 2026-08-10 启动。Z0 派只读预审 SubAgent（sonnet）→ 1必炸(go-cross)+14隐患。
 - Z1 预修 SubAgent（sonnet）→ commit 708e88d。go-cross pin zig0.15.2+czb0.21.4（changelog修zig0.15 macOS交叉），verify改test-f，8隐患修齐（permissions/rust-cache/timeout/concurrency/xxd/deny精确/critcmp/.agents gitignore）。YAML全绿，actionlint仅macos-13 pre-existing告警。
