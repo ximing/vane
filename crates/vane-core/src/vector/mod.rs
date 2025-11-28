@@ -48,19 +48,115 @@ impl Ord for Keyf32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// f32 距离核：4-lane 累加（wasm32 SIMD128 / 标量双路径，归约顺序逐位一致）
+// ---------------------------------------------------------------------------
+//
+// 数值一致性硬约束：CI wasm-recall 门禁要求 simd/scalar 双变体跨变体 top-10
+// Jaccard≥0.99，top-10 下实际要求两变体距离结果逐位一致（排序永不翻转）。
+// FP 加法非结合，因此两条路径必须共用**完全相同的归约顺序**：
+//
+//   1. 主循环（chunk of 4，i < n4 = len & !3）：index i 的项归入 lane (i % 4)，
+//      lane 内按下标升序累加（acc_k += term）。
+//      - simd128 路径：f32x4 的 lane k 即 acc[k]，f32x4_mul/f32x4_add 逐 lane
+//        与标量同序同舍入。
+//      - 标量路径：4 个独立累加器 acc[0..4]，chunk 内显式逐项累加。
+//   2. 尾部（len % 4 项）：index j 归入 lane (j - n4)（n4 ≡ 0 (mod 4)，即 j % 4），
+//      两路径共用同一段标量尾部代码。
+//   3. 水平归约：固定顺序 ((acc0 + acc1) + acc2) + acc3（reduce4），两路径共用。
+//
+// 由此两变体每个中间累加值与最终结果逐位相同。
+// （SPEC v1.4 I-5 释义扩展：cfg(target_feature="simd128") 算法向量化双实现
+// 允许出现在 core 算法代码中。）
+
+/// 4-lane 水平归约：固定顺序 ((acc0+acc1)+acc2)+acc3。
+/// simd128 与标量两路径共用的最终归约，跨变体逐位一致的最后环节。
+#[inline(always)]
+fn reduce4(acc: [f32; 4]) -> f32 {
+    ((acc[0] + acc[1]) + acc[2]) + acc[3]
+}
+
+/// 提取 f32x4 四个 lane 为数组，lane 顺序 = 数组下标顺序（lane k -> acc[k]）。
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+fn extract4(v: core::arch::wasm32::v128) -> [f32; 4] {
+    use core::arch::wasm32::f32x4_extract_lane;
+    [
+        f32x4_extract_lane::<0>(v),
+        f32x4_extract_lane::<1>(v),
+        f32x4_extract_lane::<2>(v),
+        f32x4_extract_lane::<3>(v),
+    ]
+}
+
 /// cosine 相似度 = (a·b) / (|a|·|b|)。零向量返回 0.0。
 ///
 /// 维度校验：debug_assert a.len() == b.len()（上层保证；本层防御性）。
 fn cosine_score(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "cosine_score: dim mismatch");
-    let mut dot = 0.0_f32;
-    let mut na = 0.0_f32;
-    let mut nb = 0.0_f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
+    let n = a.len();
+    let n4 = n & !3;
+
+    // 主循环：lane k 累加 i≡k (mod 4) 的项（dot / |a|² / |b|² 三组累加同规则）。
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    let (mut dot4, mut na4, mut nb4) = {
+        use core::arch::wasm32::{f32x4_add, f32x4_mul, f32x4_splat, v128, v128_load};
+        let mut vdot = f32x4_splat(0.0);
+        let mut vna = f32x4_splat(0.0);
+        let mut vnb = f32x4_splat(0.0);
+        let mut i = 0;
+        while i < n4 {
+            // SAFETY: i + 4 <= n4 <= a.len() == b.len()，两个指针均指向切片内
+            // 有效的连续 4 个 f32；v128_load 无对齐要求（wasm 不会对齐陷阱）。
+            let (xa, xb) = unsafe {
+                (
+                    v128_load(a.as_ptr().add(i).cast::<v128>()),
+                    v128_load(b.as_ptr().add(i).cast::<v128>()),
+                )
+            };
+            vdot = f32x4_add(vdot, f32x4_mul(xa, xb));
+            vna = f32x4_add(vna, f32x4_mul(xa, xa));
+            vnb = f32x4_add(vnb, f32x4_mul(xb, xb));
+            i += 4;
+        }
+        (extract4(vdot), extract4(vna), extract4(vnb))
+    };
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    let (mut dot4, mut na4, mut nb4) = {
+        let mut dot4 = [0.0_f32; 4];
+        let mut na4 = [0.0_f32; 4];
+        let mut nb4 = [0.0_f32; 4];
+        let mut i = 0;
+        while i < n4 {
+            dot4[0] += a[i] * b[i];
+            na4[0] += a[i] * a[i];
+            nb4[0] += b[i] * b[i];
+            dot4[1] += a[i + 1] * b[i + 1];
+            na4[1] += a[i + 1] * a[i + 1];
+            nb4[1] += b[i + 1] * b[i + 1];
+            dot4[2] += a[i + 2] * b[i + 2];
+            na4[2] += a[i + 2] * a[i + 2];
+            nb4[2] += b[i + 2] * b[i + 2];
+            dot4[3] += a[i + 3] * b[i + 3];
+            na4[3] += a[i + 3] * a[i + 3];
+            nb4[3] += b[i + 3] * b[i + 3];
+            i += 4;
+        }
+        (dot4, na4, nb4)
+    };
+
+    // 尾部（len % 4 项）：index j 归入 lane (j - n4)，两路径同一规则。
+    for j in n4..n {
+        let lane = j - n4;
+        dot4[lane] += a[j] * b[j];
+        na4[lane] += a[j] * a[j];
+        nb4[lane] += b[j] * b[j];
     }
+
+    let dot = reduce4(dot4);
+    let na = reduce4(na4);
+    let nb = reduce4(nb4);
     let denom = na.sqrt() * nb.sqrt();
     if denom == 0.0_f32 || !denom.is_finite() {
         return 0.0_f32; // 零向量或溢出，无信息
@@ -71,22 +167,105 @@ fn cosine_score(a: &[f32], b: &[f32]) -> f32 {
 /// L2 score = -|a-b|（负欧氏距离，越大越相似）。
 fn l2_score(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "l2_score: dim mismatch");
-    let mut sum_sq = 0.0_f32;
-    for i in 0..a.len() {
-        let d = a[i] - b[i];
-        sum_sq += d * d;
+    let n = a.len();
+    let n4 = n & !3;
+
+    // 主循环：lane k 累加 i≡k (mod 4) 的 (a-b)² 项。
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    let mut acc4 = {
+        use core::arch::wasm32::{f32x4_add, f32x4_mul, f32x4_splat, f32x4_sub, v128, v128_load};
+        let mut vsum = f32x4_splat(0.0);
+        let mut i = 0;
+        while i < n4 {
+            // SAFETY: i + 4 <= n4 <= a.len() == b.len()，两个指针均指向切片内
+            // 有效的连续 4 个 f32；v128_load 无对齐要求（wasm 不会对齐陷阱）。
+            let (xa, xb) = unsafe {
+                (
+                    v128_load(a.as_ptr().add(i).cast::<v128>()),
+                    v128_load(b.as_ptr().add(i).cast::<v128>()),
+                )
+            };
+            let d = f32x4_sub(xa, xb);
+            vsum = f32x4_add(vsum, f32x4_mul(d, d));
+            i += 4;
+        }
+        extract4(vsum)
+    };
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    let mut acc4 = {
+        let mut acc4 = [0.0_f32; 4];
+        let mut i = 0;
+        while i < n4 {
+            let d0 = a[i] - b[i];
+            acc4[0] += d0 * d0;
+            let d1 = a[i + 1] - b[i + 1];
+            acc4[1] += d1 * d1;
+            let d2 = a[i + 2] - b[i + 2];
+            acc4[2] += d2 * d2;
+            let d3 = a[i + 3] - b[i + 3];
+            acc4[3] += d3 * d3;
+            i += 4;
+        }
+        acc4
+    };
+
+    // 尾部（len % 4 项）：index j 归入 lane (j - n4)，两路径同一规则。
+    for j in n4..n {
+        let d = a[j] - b[j];
+        acc4[j - n4] += d * d;
     }
-    -sum_sq.sqrt()
+
+    -reduce4(acc4).sqrt()
 }
 
 /// dot score = a·b（未归一化点积）。
 fn dot_score(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "dot_score: dim mismatch");
-    let mut s = 0.0_f32;
-    for i in 0..a.len() {
-        s += a[i] * b[i];
+    let n = a.len();
+    let n4 = n & !3;
+
+    // 主循环：lane k 累加 i≡k (mod 4) 的 a·b 项。
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    let mut acc4 = {
+        use core::arch::wasm32::{f32x4_add, f32x4_mul, f32x4_splat, v128, v128_load};
+        let mut vacc = f32x4_splat(0.0);
+        let mut i = 0;
+        while i < n4 {
+            // SAFETY: i + 4 <= n4 <= a.len() == b.len()，两个指针均指向切片内
+            // 有效的连续 4 个 f32；v128_load 无对齐要求（wasm 不会对齐陷阱）。
+            let (xa, xb) = unsafe {
+                (
+                    v128_load(a.as_ptr().add(i).cast::<v128>()),
+                    v128_load(b.as_ptr().add(i).cast::<v128>()),
+                )
+            };
+            vacc = f32x4_add(vacc, f32x4_mul(xa, xb));
+            i += 4;
+        }
+        extract4(vacc)
+    };
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    let mut acc4 = {
+        let mut acc4 = [0.0_f32; 4];
+        let mut i = 0;
+        while i < n4 {
+            acc4[0] += a[i] * b[i];
+            acc4[1] += a[i + 1] * b[i + 1];
+            acc4[2] += a[i + 2] * b[i + 2];
+            acc4[3] += a[i + 3] * b[i + 3];
+            i += 4;
+        }
+        acc4
+    };
+
+    // 尾部（len % 4 项）：index j 归入 lane (j - n4)，两路径同一规则。
+    for j in n4..n {
+        acc4[j - n4] += a[j] * b[j];
     }
-    s
+
+    reduce4(acc4)
 }
 
 /// 暴力向量扫描（SPEC §8.1 vector 模式；M0 无 HNSW）。
@@ -351,6 +530,133 @@ mod tests {
     fn keyf32_eq_bitwise() {
         assert_ne!(Keyf32(0.0_f32), Keyf32(-0.0_f32)); // bits 不同 -> 不等
         assert_eq!(Keyf32(1.5), Keyf32(1.5));
+    }
+
+    // ---- post-v0.1.1 Task 1: 4-lane 归约一致性（simd/scalar 同一归约顺序）----
+
+    /// 朴素顺序累加参考实现（改动前旧行为），仅用于测试对比。
+    fn naive_dot(a: &[f32], b: &[f32]) -> f32 {
+        let mut s = 0.0_f32;
+        for i in 0..a.len() {
+            s += a[i] * b[i];
+        }
+        s
+    }
+
+    fn naive_l2(a: &[f32], b: &[f32]) -> f32 {
+        let mut sum_sq = 0.0_f32;
+        for i in 0..a.len() {
+            let d = a[i] - b[i];
+            sum_sq += d * d;
+        }
+        -sum_sq.sqrt()
+    }
+
+    fn naive_cosine(a: &[f32], b: &[f32]) -> f32 {
+        let mut dot = 0.0_f32;
+        let mut na = 0.0_f32;
+        let mut nb = 0.0_f32;
+        for i in 0..a.len() {
+            dot += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        let denom = na.sqrt() * nb.sqrt();
+        if denom == 0.0_f32 || !denom.is_finite() {
+            return 0.0_f32;
+        }
+        dot / denom
+    }
+
+    /// 确定性伪随机数据（与 perf 测试同款 LCG），覆盖 [0,1)。
+    fn pseudo_random_vec(n: usize, seed: u32) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                (seed.wrapping_add(i as u32).wrapping_mul(2654435761) as f32) / (u32::MAX as f32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn acc4_matches_naive_within_tolerance() {
+        // 4 累加器实现 vs 朴素顺序累加（旧行为）：归约顺序改变会引入 FP 重排误差，
+        // 断言偏差被控制在 ~1e-5 相对量级内，确认对召回的影响可控。
+        // 覆盖 len%4 = 0/1/2/3 各形态与实际维度档位。
+        for n in [
+            1_usize, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 100, 383, 384, 385, 386, 387, 1024, 4096,
+        ] {
+            let a = pseudo_random_vec(n, 7);
+            let b = pseudo_random_vec(n, 13);
+            let dot_new = dot_score(&a, &b);
+            let dot_old = naive_dot(&a, &b);
+            let dot_tol = 1e-5 * dot_old.abs().max(1.0);
+            assert!(
+                (dot_new - dot_old).abs() <= dot_tol,
+                "dot n={n}: new={dot_new} old={dot_old}"
+            );
+            let l2_new = l2_score(&a, &b);
+            let l2_old = naive_l2(&a, &b);
+            let l2_tol = 1e-5 * l2_old.abs().max(1.0);
+            assert!(
+                (l2_new - l2_old).abs() <= l2_tol,
+                "l2 n={n}: new={l2_new} old={l2_old}"
+            );
+            let cos_new = cosine_score(&a, &b);
+            let cos_old = naive_cosine(&a, &b);
+            let cos_tol = 1e-5 * cos_old.abs().max(1.0);
+            assert!(
+                (cos_new - cos_old).abs() <= cos_tol,
+                "cosine n={n}: new={cos_new} old={cos_old}"
+            );
+        }
+    }
+
+    #[test]
+    fn acc4_tail_lane_rule_bitwise_exact_on_ints() {
+        // 小整数值（乘积与部分和均可精确表示，无舍入）：4 累加器路径必须与
+        // 朴素顺序累加**逐位一致**，借此精确验证尾部 lane 归位规则
+        // （index j -> lane j%4）与固定归约顺序 ((a0+a1)+a2)+a3。
+        for n in 1_usize..=9 {
+            let a: Vec<f32> = (0..n).map(|i| (i % 3) as f32 + 1.0).collect();
+            let b: Vec<f32> = (0..n).map(|i| ((i + 1) % 4) as f32 - 1.5).collect();
+            assert_eq!(
+                dot_score(&a, &b).to_bits(),
+                naive_dot(&a, &b).to_bits(),
+                "dot n={n}"
+            );
+            assert_eq!(
+                l2_score(&a, &b).to_bits(),
+                naive_l2(&a, &b).to_bits(),
+                "l2 n={n}"
+            );
+            assert_eq!(
+                cosine_score(&a, &b).to_bits(),
+                naive_cosine(&a, &b).to_bits(),
+                "cosine n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn acc4_reduction_is_deterministic() {
+        // 同一编译配置下重复调用必须逐位一致（排序门禁依赖确定性）。
+        let a = pseudo_random_vec(384, 3);
+        let b = pseudo_random_vec(384, 5);
+        assert_eq!(dot_score(&a, &b).to_bits(), dot_score(&a, &b).to_bits());
+        assert_eq!(l2_score(&a, &b).to_bits(), l2_score(&a, &b).to_bits());
+        assert_eq!(
+            cosine_score(&a, &b).to_bits(),
+            cosine_score(&a, &b).to_bits()
+        );
+    }
+
+    #[test]
+    fn acc4_empty_slices() {
+        // 空切片：主循环与尾部均不执行，acc = [0;4]，归约得 0。
+        let empty: [f32; 0] = [];
+        assert_eq!(dot_score(&empty, &empty), 0.0);
+        assert_eq!(l2_score(&empty, &empty), 0.0); // -0.0 == 0.0
+        assert_eq!(cosine_score(&empty, &empty), 0.0); // denom=0 -> 0.0
     }
 
     // ---- Task 2: brute_search topK ----
