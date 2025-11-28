@@ -10,7 +10,10 @@
 //! - query 量化一次复用全段扫描（reviewer B-M5）。
 //! - 仅用于暴力回退路径（HNSW 导航仍用 f32，精度优先，SPEC §13.2-1）。
 //!
-//! 不变量 I-5：`cfg(feature="sq8")` 在 segment/vector 编解码处；core 算法零 `cfg(target)`。
+//! 不变量 I-5（SPEC v1.4 释义）：`cfg(feature="sq8")` 在 segment/vector 编解码处；
+//! core 算法无 `cfg(target_arch)`/`cfg(target_os)` 平台分支（仅限 VFS/Executor）；
+//! `cfg(target_feature)` 向量化/标量双实现视为能力开关允许（SQ8 本次未向量化，
+//! carry-forward，后续若向量化遵循同一口径）。
 //! 不变量 I-1：SQ8 是内存缓存，不写段文件（vectors.bin 仍 f32 落盘）。
 
 use std::cmp::Reverse;
