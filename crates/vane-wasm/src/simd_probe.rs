@@ -2,10 +2,12 @@
 //!
 //! 通过 `WebAssembly.validate(simd128_test_module)` 探测运行时是否支持
 //! WebAssembly SIMD128。Worker init 调用此函数决定加载 simd 还是 scalar 产物
-//! （M2-04 协同）。两产物由构建脚本区分（M2-05），core 算法零 cfg，依赖
+//! （M2-04 协同）。两产物由构建脚本区分（M2-05），core 算法无平台分支
+//! （`cfg(target_arch)`/`cfg(target_os)` 仅限 VFS/Executor，SPEC v1.4 I-5），依赖
 //! `-Ctarget-feature=+simd128` 启用 LLVM SIMD 代码生成（roaring 位图等依赖
-//! 的 SIMD 路径被激活；f32 距离循环因 FP 非结合性未自动向量化——详见
-//! M2-05 报告「自动向量化是否充分」一节）。
+//! 的 SIMD 路径被激活；f32 距离三核 cosine/L2/dot 已由 post-v0.1.1 Task 1
+//! 显式向量化——simd128/标量双路径 `cfg(target_feature="simd128")`，归约顺序
+//! 逐位对齐保证双变体 top-10 一致，见 `vane-core/src/vector/mod.rs`）。
 //!
 //! 非 wasm32 环境（host 测试）无 `WebAssembly` 对象，恒返 false。
 //! wasm32 环境调用 JS `WebAssembly.validate`；测试模块含 `v128.const` 指令，

@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.3）
+# Vane 技术规范（SPEC v1.4）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -353,7 +353,7 @@ Node **不经过 C ABI**，`vane-node` 用 napi-rs 直连 core（N-API v6+）；
 
 ## 11. 并发与执行模型
 
-- `trait Executor { fn spawn(&self, task: Task); fn scope(&self, …); }`：native 实现 = rayon；wasm 实现 = 同线程串行。**`cfg` 只允许出现在 Executor 与 VFS 实现处**，核心算法零 cfg（不变量 I-5）。
+- `trait Executor { fn spawn(&self, task: Task); fn scope(&self, …); }`：native 实现 = rayon；wasm 实现 = 同线程串行。**`cfg(target_arch)`/`cfg(target_os)` 平台分支只允许出现在 Executor 与 VFS 实现处**；`cfg(target_feature)` 用于同一算法的向量化/标量双实现时视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中（不变量 I-5，v1.4 释义）。
 - 读路径零锁：快照经 `Arc<SegmentSet>` swap 获取。
 - 写路径：单写者队列；flush/合并/reindex 互斥（E_BUSY）。
 - 明确不支持：SharedArrayBuffer 多线程 WASM（COOP/COEP 部署成本）；tokio 进 core。
@@ -434,8 +434,8 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 - **I-2 双索引原子可见**：flush 后向量与倒排在同一快照同时出现；不存在"半可见"状态。
 - **I-3 图不原地删**：HNSW 图节点删除只经 tombstone；图重建仅发生在段合并。
 - **I-4 单一分词身份**：任意时刻一 collection 一套 TokenizerId；新写入在 reindex 完成前必须用旧身份。
-- **I-5 核心零平台分支**：core 算法代码无 `cfg(target)`；平台差异仅在 VFS/Executor 实现。
-  - 注：`cfg(feature)` 用于存储编解码能力开关（如 zstd-encode）允许出现在 segment 编解码处；`cfg(target)` 平台分支仍仅限 VFS/Executor 实现。
+- **I-5 核心零平台分支**：core 算法代码无 `cfg(target_arch)`/`cfg(target_os)` 平台分支；平台差异仅在 VFS/Executor 实现。
+  - 注：`cfg(feature)` 用于存储编解码能力开关（如 zstd-encode）允许出现在 segment 编解码处；`cfg(target_feature)` 用于同一算法的向量化/标量双实现（如 f32 距离核的 simd128/标量双路径）视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中；`cfg(target_arch)`/`cfg(target_os)` 平台分支仍仅限 VFS/Executor 实现。
 - **I-6 manifest 原子性**：任何崩溃后 manifest 指向完整状态；孤儿段文件可安全清理。
 - **I-7 FFI 内存铁律**：谁分配谁释放，跨边界只借不还；句柄注销后使用 = 明确错误而非 UB。
 - **I-8 binding 薄壳**：三侧绑定无检索逻辑；行为差异视为 bug。
@@ -458,3 +458,4 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 - **v1.1**（2026-08-09）：M1 计划审查闭环后三处修订。S1 §5.4 澄清 `builtin_dict_version` = 编译期词典格式 spec 版本常量（非日历内容版本），词典内容升级不改变 TokenizerId（满足 REQUIREMENTS §3.3「仅警告不强制重建」）。S2 §9.1 FFI 句柄注册表 `DashMap` → `std::sync::RwLock<HashMap>`（消除与依赖黑名单冲突）。S3 §9.2 补列 `vane_reindex_progress` / `vane_reindex_wait`（ReindexHandle IDL 落实）+ `vane_load_dict` / `vane_dict_version`（M1 词典分发扩展）。
 - **v1.2**（2026-08-09）：M2 scoping 检查点后三处修订（用户批准）。S1 §13.1 冷启动承诺改为「元数据 open <1s（vectors/stored 懒加载，M2 实测背书）；首次向量查询触发 vectors 加载 <3s」，消解 M1 实测 1573ms 未达 <1s 的遗留（SegmentReader OnceLock 懒加载，不改 §4 IDL 签名）。S2 §6.2 stored.bin 引入 per-file format_version（每文件独立递增，替代全局共用常量）+ v1(裸JSON)/v2(zstd) 双模读取（不做原地迁移）；补懒加载语义注释。S3 §14 I-5 释义澄清：`cfg(feature)` 能力开关（如 zstd-encode）允许出现在 segment 编解码处，`cfg(target)` 平台分支仍仅限 VFS/Executor。
 - **v1.3**（2026-08-10）：M2-13 真实维基 nDCG corpus 落地后一处修订（用户批准）。S1 §13.2-2 ② 修订：真实中文维基 500 篇上 jieba-lite 相对 bigram nDCG@10 门禁从「提升 ≥15%」改为「不退步（≥0%，实测 +0.4%）」——bigram 在真实维基为强基线（nDCG≈0.93，数学上限≈7.5%），+15% 仅在合成边界陷阱语料可达（M1 实测 +84%，由代表性边界歧义 corpus 承载该硬门禁）；相对完整版 <2% 由 200 句 100% 切分一致性覆盖。
+- **v1.4**（2026-08-10）：post-v0.1.1 f32 距离 SIMD128 显式向量化需要，一处修订（用户批准）。S1 §14 I-5 释义扩展（§11 同步）：`cfg(target_feature)` 用于同一算法的向量化/标量双实现（如 f32 距离核的 simd128/标量双路径，归约顺序逐位对齐保证双变体 top-10 一致）视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中；`cfg(target_arch)`/`cfg(target_os)` 平台分支仍仅限 VFS/Executor 实现。实现参照 commit 5668479（`crates/vane-core/src/vector/mod.rs` f32 距离三核 cfg(target_feature="simd128") 双路径）。
