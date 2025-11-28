@@ -5,8 +5,11 @@
 #   target/wasm-variants/vane_wasm_simd.wasm   (RUSTFLAGS="-Ctarget-feature=+simd128")
 #   target/wasm-variants/vane_wasm_scalar.wasm (默认，无 simd128)
 #
-# core 算法零 cfg——simd 变体仅靠 LLVM 自动向量化（-Ctarget-feature=+simd128 时
-# f32 距离循环被向量化）。两产物由构建 flag 区分，core 代码完全相同。
+# core 算法无平台分支（SPEC v1.4 I-5）——两产物由构建 flag 区分，core 代码完全相同。
+# simd 变体中 f32 距离三核走显式 f32x4 intrinsics 路径（post-v0.1.1 Task 1，
+# cfg(all(target_arch="wasm32", target_feature="simd128")) 向量化/标量双实现，
+# v1.4 释义视为能力开关，归约顺序逐位对齐保证双变体 top-10 一致）；其余代码
+# （roaring 位图等）仍靠 -Ctarget-feature=+simd128 启用 LLVM 自动向量化。
 #
 # 用法：
 #   bash scripts/build-wasm-variants.sh           # 默认带 worker feature
