@@ -39,7 +39,9 @@ vane-dict-zh = { path = "../vane-dict-zh" }
 
 [features]
 default = []
-# M2-05：simd128 变体标注（marker feature，core 算法零 cfg——依赖 LLVM 自动向量化）。
+# M2-05：simd128 变体标注（marker feature，core 算法无平台分支，SPEC v1.4 I-5——
+# f32 距离三核走 cfg(all(target_arch="wasm32", target_feature="simd128")) 显式 f32x4
+# 双路径（v1.4 视为能力开关），其余代码仍靠 -Ctarget-feature=+simd128 启用 LLVM 自动向量化）。
 # 双产物由 scripts/build-wasm-variants.sh 用 RUSTFLAGS="-Ctarget-feature=+simd128" 区分，
 # 非 cargo feature 门控。本 feature 仅供下游标注/条件编译胶水（如探针日志），不进 core。
 simd128 = []
