@@ -4,6 +4,23 @@
  * Later tasks consume these variables only — do not invent new ones.
  */
 
+/* Self-hosted JetBrains Mono (latin subset, regular/bold only). */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/vane/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/vane/fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2');
+}
+
 :root {
   /* Colors — light theme */
   --bg: #ffffff;

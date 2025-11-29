@@ -1,8 +1,41 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>
+      // Anti-FOUC: resolve and apply the theme before first paint.
+      // Must stay inline, synchronous, and at the top of <head>.
+      // Keep the storage key / logic in sync with src/theme.ts.
+      (function () {
+        var theme = null;
+        try {
+          theme = localStorage.getItem('vane-theme');
+        } catch (e) {
+          /* localStorage unavailable */
+        }
+        if (theme !== 'light' && theme !== 'dark') {
+          theme = window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', theme);
+      })();
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      rel="preload"
+      href="/vane/fonts/jetbrains-mono-latin-400-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/vane/fonts/jetbrains-mono-latin-700-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <title>Vane — Embedded hybrid search in Rust</title>
     <meta
       name="description"
