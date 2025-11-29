@@ -1,0 +1,47 @@
+/* QuickStart page — colocated styles (consumed only by QuickStart.tsx). */
+
+.quickstart h1 {
+  margin-bottom: var(--space-4);
+}
+
+.quickstart h2 {
+  margin-top: var(--space-7);
+  margin-bottom: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.quickstart h2:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.quickstart p {
+  margin-bottom: var(--space-4);
+  color: var(--fg);
+}
+
+.quickstart table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.quickstart th,
+.quickstart td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+}
+
+.quickstart th {
+  background: var(--bg-elevated);
+  font-weight: 600;
+}
+
+.quickstart .code-block,
+.quickstart .lang-tabs,
+.quickstart .callout {
+  margin-bottom: var(--space-4);
+}

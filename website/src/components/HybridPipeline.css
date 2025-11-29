@@ -1,0 +1,279 @@
+/* HybridPipeline — inline SVG animation for the Hybrid Search guide.
+ * One 6s keyframe cycle drives every element; negative-free stagger is done
+ * with per-element keyframe windows so the loop stays in sync.
+ * Animations are paused until .is-active (IntersectionObserver in the TSX).
+ */
+
+.hybrid-pipeline {
+  margin: var(--space-5) 0 var(--space-6);
+  padding: var(--space-5);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.hybrid-pipeline svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.hybrid-pipeline__caption {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+/* ---- static pieces ---- */
+
+.hp-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  fill: var(--fg-faint);
+}
+
+.hp-box {
+  fill: var(--bg);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.hp-box-text {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  fill: var(--fg);
+}
+
+.hp-graph-edge {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.hp-posting {
+  fill: var(--bg-inset);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+/* ---- animated pieces (base = pre-animation state) ---- */
+
+.hp-anim {
+  animation-play-state: paused;
+}
+
+.hybrid-pipeline.is-active .hp-anim {
+  animation-play-state: running;
+}
+
+.hp-edge {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+
+.hp-edge--split {
+  animation: hp-draw-split 6s linear infinite;
+}
+
+.hp-edge--conv {
+  animation: hp-draw-conv 6s linear infinite;
+}
+
+.hp-edge--out {
+  animation: hp-draw-out 6s linear infinite;
+}
+
+.hp-node {
+  fill: var(--bg);
+  stroke: var(--border);
+  stroke-width: 2;
+}
+
+.hp-node--1 {
+  animation: hp-node-1 6s linear infinite;
+}
+
+.hp-node--2 {
+  animation: hp-node-2 6s linear infinite;
+}
+
+.hp-node--3 {
+  animation: hp-node-3 6s linear infinite;
+}
+
+.hp-node--4 {
+  animation: hp-node-4 6s linear infinite;
+}
+
+.hp-scan {
+  fill: var(--accent);
+  opacity: 0;
+  animation: hp-scan 6s linear infinite;
+}
+
+.hp-rrf {
+  fill: var(--bg);
+  stroke: var(--accent);
+  stroke-width: 2;
+  animation: hp-rrf 6s linear infinite;
+}
+
+.hp-rrf-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--accent);
+  animation: hp-rrf-text 6s linear infinite;
+}
+
+.hp-hit {
+  opacity: 0;
+  transform: translateX(10px);
+}
+
+.hp-hit--1 {
+  animation: hp-hit-1 6s ease-out infinite;
+}
+
+.hp-hit--2 {
+  animation: hp-hit-2 6s ease-out infinite;
+}
+
+.hp-hit--3 {
+  animation: hp-hit-3 6s ease-out infinite;
+}
+
+.hp-hit-box {
+  fill: var(--bg);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.hp-hit-text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  fill: var(--fg);
+}
+
+/* ---- keyframes: 6s cycle ----
+ * 0-12%   split edges draw
+ * 10-40%  HNSW nodes light up (staggered) / WAND scan bar sweeps postings
+ * 42-55%  converge edges draw
+ * 50-62%  RRF node pulses
+ * 60-78%  ranked hits slide in (staggered)
+ * 92-100% everything resets for the next loop
+ */
+
+@keyframes hp-draw-split {
+  0% { stroke-dashoffset: 1; }
+  12%, 100% { stroke-dashoffset: 0; }
+}
+
+@keyframes hp-draw-conv {
+  0%, 42% { stroke-dashoffset: 1; }
+  55%, 100% { stroke-dashoffset: 0; }
+}
+
+@keyframes hp-draw-out {
+  0%, 58% { stroke-dashoffset: 1; }
+  68%, 100% { stroke-dashoffset: 0; }
+}
+
+@keyframes hp-node-1 {
+  0%, 10% { fill: var(--bg); stroke: var(--border); }
+  16%, 88% { fill: var(--accent); stroke: var(--accent); }
+  94%, 100% { fill: var(--bg); stroke: var(--border); }
+}
+
+@keyframes hp-node-2 {
+  0%, 15% { fill: var(--bg); stroke: var(--border); }
+  21%, 88% { fill: var(--accent); stroke: var(--accent); }
+  94%, 100% { fill: var(--bg); stroke: var(--border); }
+}
+
+@keyframes hp-node-3 {
+  0%, 20% { fill: var(--bg); stroke: var(--border); }
+  26%, 88% { fill: var(--accent); stroke: var(--accent); }
+  94%, 100% { fill: var(--bg); stroke: var(--border); }
+}
+
+@keyframes hp-node-4 {
+  0%, 25% { fill: var(--bg); stroke: var(--border); }
+  31%, 88% { fill: var(--accent); stroke: var(--accent); }
+  94%, 100% { fill: var(--bg); stroke: var(--border); }
+}
+
+@keyframes hp-scan {
+  0%, 8% { transform: translateX(0); opacity: 0; }
+  12% { opacity: 0.35; }
+  38% { transform: translateX(210px); opacity: 0.35; }
+  42%, 100% { transform: translateX(210px); opacity: 0; }
+}
+
+@keyframes hp-rrf {
+  0%, 50% { fill: var(--bg); }
+  58%, 86% { fill: var(--accent); }
+  92%, 100% { fill: var(--bg); }
+}
+
+@keyframes hp-rrf-text {
+  0%, 50% { fill: var(--accent); }
+  58%, 86% { fill: var(--accent-fg); }
+  92%, 100% { fill: var(--accent); }
+}
+
+@keyframes hp-hit-1 {
+  0%, 60% { opacity: 0; transform: translateX(10px); }
+  66%, 90% { opacity: 1; transform: translateX(0); }
+  96%, 100% { opacity: 0; transform: translateX(0); }
+}
+
+@keyframes hp-hit-2 {
+  0%, 64% { opacity: 0; transform: translateX(10px); }
+  70%, 90% { opacity: 1; transform: translateX(0); }
+  96%, 100% { opacity: 0; transform: translateX(0); }
+}
+
+@keyframes hp-hit-3 {
+  0%, 68% { opacity: 0; transform: translateX(10px); }
+  74%, 90% { opacity: 1; transform: translateX(0); }
+  96%, 100% { opacity: 0; transform: translateX(0); }
+}
+
+/* ---- reduced motion: final state, no animation ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .hybrid-pipeline .hp-anim {
+    animation: none;
+  }
+
+  .hybrid-pipeline .hp-edge {
+    stroke-dashoffset: 0;
+  }
+
+  .hybrid-pipeline .hp-node {
+    fill: var(--accent);
+    stroke: var(--accent);
+  }
+
+  .hybrid-pipeline .hp-scan {
+    opacity: 0;
+  }
+
+  .hybrid-pipeline .hp-rrf {
+    fill: var(--accent);
+  }
+
+  .hybrid-pipeline .hp-rrf-text {
+    fill: var(--accent-fg);
+  }
+
+  .hybrid-pipeline .hp-hit {
+    opacity: 1;
+    transform: none;
+  }
+}

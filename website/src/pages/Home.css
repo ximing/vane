@@ -1,0 +1,429 @@
+/* Home page — full-width, no DocsLayout. Consumes tokens only. */
+
+.home {
+  padding-top: var(--topbar-h);
+}
+
+.home__container {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 var(--space-5);
+}
+
+.home__section {
+  padding: var(--space-8) 0;
+}
+
+.home__section--alt {
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.home__h2 {
+  font-size: var(--text-2xl);
+  margin-bottom: var(--space-5);
+}
+
+.home__section-lede {
+  color: var(--fg-muted);
+  max-width: 720px;
+  margin-bottom: var(--space-5);
+}
+
+/* ------------------------------------------------------------------ */
+/* Hero                                                                */
+/* ------------------------------------------------------------------ */
+
+.home__hero {
+  padding: var(--space-8) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.home__hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: var(--space-7);
+  align-items: center;
+}
+
+.home__hero-copy {
+  min-width: 0;
+}
+
+.home__title {
+  font-size: var(--text-3xl);
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-4);
+}
+
+.home__lede {
+  color: var(--fg-muted);
+  margin-bottom: var(--space-5);
+}
+
+.home__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+}
+
+.home__badge {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+}
+
+.home__ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.home__btn {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-base);
+  font-weight: 600;
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+}
+
+.home__btn:hover {
+  text-decoration: none;
+}
+
+.home__btn--primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 1px solid var(--accent);
+}
+
+.home__btn--primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--accent-fg);
+}
+
+.home__btn--secondary {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+
+.home__btn--secondary:hover {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+
+.home__hero-term {
+  min-width: 0;
+}
+
+/* Terminal window */
+
+.term {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.term__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.term__dots {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.term__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.term__title {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+
+.term__body {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  padding: var(--space-4);
+  /* 8 lines at 1.7em + padding: fixed floor so the typing never shifts layout */
+  min-height: calc(8 * 1.7em + 2 * var(--space-4));
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.term__line {
+  color: var(--fg);
+}
+
+.term__line--out {
+  color: var(--fg-muted);
+}
+
+.term__prompt {
+  color: var(--accent);
+}
+
+.term__cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--fg);
+  animation: term-blink 1s steps(1) infinite;
+}
+
+@keyframes term-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term__cursor {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Feature grid                                                        */
+/* ------------------------------------------------------------------ */
+
+.home__features {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.home__feature {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  padding: var(--space-5);
+}
+
+.home__feature-icon {
+  color: var(--accent);
+  margin-bottom: var(--space-3);
+}
+
+.home__feature-title {
+  font-size: var(--text-lg);
+  margin-bottom: var(--space-2);
+}
+
+.home__feature-body {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Comparison table                                                    */
+/* ------------------------------------------------------------------ */
+
+.home__table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.home__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.home__table th,
+.home__table td {
+  text-align: left;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.home__table thead th {
+  color: var(--fg-faint);
+  font-weight: 600;
+  background: var(--bg-elevated);
+}
+
+.home__table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Architecture diagram                                                */
+/* ------------------------------------------------------------------ */
+
+.home__arch {
+  overflow-x: auto;
+}
+
+.home__arch-svg {
+  width: 100%;
+  min-width: 640px;
+  height: auto;
+  font-family: var(--font-mono);
+}
+
+.arch-box rect {
+  fill: var(--bg-elevated);
+  stroke: var(--border);
+}
+
+.arch-label {
+  fill: var(--fg);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.arch-sub {
+  fill: var(--fg-faint);
+  font-size: 11px;
+}
+
+.arch-line {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.arch-core rect {
+  fill: var(--bg-elevated);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.arch-title {
+  fill: var(--fg);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.arch-item {
+  fill: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Performance gates                                                   */
+/* ------------------------------------------------------------------ */
+
+.home__stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.home__stat {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  padding: var(--space-5);
+}
+
+.home__stat-value {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--text-2xl);
+  color: var(--fg);
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-2);
+  white-space: nowrap;
+}
+
+.home__stat-label {
+  font-size: var(--text-sm);
+  color: var(--fg);
+  margin-bottom: var(--space-2);
+}
+
+.home__stat-basis {
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Won't-have quote                                                    */
+/* ------------------------------------------------------------------ */
+
+.home__quote {
+  border-left: 2px solid var(--accent);
+  padding-left: var(--space-5);
+  max-width: 720px;
+}
+
+.home__quote p {
+  font-size: var(--text-xl);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive                                                          */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 1100px) {
+  .home__features {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home__stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .home__container {
+    padding: 0 var(--space-4);
+  }
+
+  .home__section {
+    padding: var(--space-7) 0;
+  }
+
+  .home__hero {
+    padding: var(--space-7) 0;
+  }
+
+  .home__hero-grid {
+    grid-template-columns: 1fr;
+    gap: var(--space-6);
+  }
+}
+
+@media (max-width: 560px) {
+  .home__features {
+    grid-template-columns: 1fr;
+  }
+
+  .home__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

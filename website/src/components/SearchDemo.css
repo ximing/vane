@@ -1,0 +1,222 @@
+.search-demo {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  padding: var(--space-5);
+}
+
+.search-demo__provenance {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+
+.search-demo__controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  /* keep clear of the provenance label in the corner */
+  padding-right: var(--space-6);
+}
+
+.search-demo__input {
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  line-height: var(--leading-tight);
+  padding: var(--space-3) var(--space-4);
+}
+
+.search-demo__input::placeholder {
+  color: var(--fg-faint);
+}
+
+.search-demo__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.search-demo__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.search-demo__chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.search-demo__chip:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.search-demo__chip--active {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.search-demo__chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Three-column result comparison                                      */
+/* ------------------------------------------------------------------ */
+
+.search-demo__columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+.search-demo__column {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.search-demo__column-head {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+.search-demo__mode {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.search-demo__hits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.search-demo__hit {
+  padding: var(--space-3);
+}
+
+.search-demo__hit + .search-demo__hit {
+  border-top: 1px solid var(--border);
+}
+
+.search-demo__hit-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.search-demo__hit-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+  line-height: var(--leading-tight);
+}
+
+.search-demo__hit-score {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+
+.search-demo__hit-snippet {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+
+.search-demo__hit mark,
+.search-demo mark {
+  background: var(--highlight);
+  color: inherit;
+  border-radius: var(--radius-sm);
+  padding: 0 1px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fallback ranking                                                    */
+/* ------------------------------------------------------------------ */
+
+.search-demo__fallback {
+  margin-top: var(--space-5);
+  border: 1px solid var(--note-border);
+  border-radius: var(--radius-md);
+  background: var(--note-bg);
+  padding: var(--space-4);
+}
+
+.search-demo__fallback-note {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+}
+
+.search-demo__hits--fallback {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.search-demo__empty {
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Mobile: collapse the three columns into a vertical stack            */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 900px) {
+  .search-demo {
+    padding: var(--space-4);
+  }
+
+  .search-demo__provenance {
+    position: static;
+    display: block;
+    margin-bottom: var(--space-2);
+  }
+
+  .search-demo__controls {
+    padding-right: 0;
+  }
+
+  .search-demo__columns {
+    grid-template-columns: 1fr;
+  }
+}
