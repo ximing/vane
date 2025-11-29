@@ -95,7 +95,7 @@ impl Task for CloseTask {
     }
 }
 
-// ---- Export（I1：M0 占位 reject E_UNSUPPORTED） ----
+// ---- Export（M2-12：VANE_SNAP 快照导出，write_snapshot 打包） ----
 
 pub struct ExportTask {
     db: Db,
