@@ -63,14 +63,31 @@ test('reindex returns VaneReindexHandle (M1 实装)', async (t) => {
   await db.close();
 });
 
-// export 仍为 M2 占位（reject E_UNSUPPORTED，code -10）。
-test('export rejects E_UNSUPPORTED (code -10)', async (t) => {
+// M2-12 实装：export 打包 VANE_SNAP 快照（不再 reject E_UNSUPPORTED）。
+test('export succeeds on DB with flushed collection (M2-12 实装)', async (t) => {
   const db = await open(tmp('exp'), {});
-  await t.throwsAsync(db.export('/tmp/vane-export-dest'), {
-    instanceOf: VaneError,
-    code: -10,
-    name: 'E_UNSUPPORTED',
-  });
+  const col = await db.collection(
+    'c',
+    { fields: [{ name: 'v', type: 'vector', dim: 2 }] },
+    {}
+  );
+  await col.add([{ id: 'x', vector: [1, 0] }]);
+  await col.flush();
+
+  // export 到临时文件 → 成功（Promise<void> resolve，不 throw）。
+  const dest = tmp('exp-dest');
+  await db.export(dest);
+
+  // 验证产物存在 + VANE_SNAP magic（前 9 字节）。
+  const fs = require('node:fs');
+  const buf = Buffer.alloc(9);
+  const fd = fs.openSync(dest, 'r');
+  fs.readSync(fd, buf, 0, 9, 0);
+  fs.closeSync(fd);
+  t.is(buf.toString('ascii'), 'VANE_SNAP');
+
+  // 清理。
+  fs.unlinkSync(dest);
   await db.close();
 });
 
