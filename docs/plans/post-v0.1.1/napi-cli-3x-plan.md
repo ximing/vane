@@ -83,23 +83,54 @@ web 查证（`napi-rs/napi-rs` cli/src 源码 + `package-template` + `website` M
 - `binaryName` 3.x 缺省 `"index"`；本仓库 `"vane"` 激活 → `vane.<platform>.node`（见 §3.1）。
 - 迁移指南其他 breaking（`universal`→`universalize`、`--cargo-cwd`→`--manifest-path`、`napi.package.name`→`packageName`）本仓库均不涉及（无 universalize、用 working-directory 非 `--cargo-cwd`、已有 `packageName`）。
 
+### 3.4 napi Rust crate 配对升级（T1 实测阻塞 → 范围扩展，已落定）
+
+**阻塞根因（T1 failure 1，task-1-report.md）**：@napi-rs/cli 3.x 设 `NAPI_TYPE_DEF_TMP_FOLDER` env var（cli.js:7168），但 `napi-derive =2.16.13` 读旧名 `TYPE_DEF_TMP_PATH`（napi-derive-2.16.13/src/expand/napi.rs:139,193）→ 名称不匹配 → napi-derive 宏不写 intermediate type def → CLI `generateTypeDef()` 空 → **不生成 `index.js` loader** → `main.js require('./index.js')` MODULE_NOT_FOUND → pub API 断裂。这是 **硬版本配对要求**：napi-derive 2.x + CLI 3.x = 静默不生 index.js；napi-derive 3.x + CLI 2.x = 编译期 panic（napi-derive 3.x 源码 `crates/macro/src/expand/typedef/type_def.rs` 显式 panic）。二者必须同升降。
+
+**范围扩展决策**：原 T1 brief 禁触 Cargo.toml（"不动 Rust 代码"）。但 3.x CLI 升级**必然**要求 `napi`+`napi-derive` 同升 3.x——这是 plan defect（原范围低估耦合），非 SPEC 矛盾/阻塞/用户侧操作。按编排者授权（plan defect 修复 within authority），扩 T1 范围含 Cargo.toml napi 升级。
+
+**napi 3.x 安全性查证（源码逐版对比，research report）**：
+- `napi::Error` 结构体：`pub reason: String` + `pub status: S` 在 **2.16.13 / 3.0.0 / 3.6.x 全部 pub 不变**。S14 担忧（"reason 字段访问在新版本失效"）**未发生**。
+- `Error::new<R: ToString>(status, reason)` 签名逐字节一致（2.16.13:131 / 3.0.0:173）。
+- Vane 的 `e.reason` 直接读（error.rs ×5 + convert.rs ×5，**全 `#[cfg(test)]`**）+ `Error::new(status_of(code), format!(...))` 构造（error.rs:50）+ `NapiResult<T>` 别名 → **3.x 全部不变，零 Rust 源码改动**。
+- bare `#[napi]`（无属性参数）语法 3.x 不变（Vane 全部 bare 用法，grep 确认零 `#[napi(`）。
+- features `napi8`+`serde-json` 3.x 仍有效；`compat-mode` 在 3.x 不再是 default，但 Vane grep 确认零 compat 类型用法（`JsObject`/`JsBuffer`/`Reference`/`ThreadsafeFunction` 等零命中）→ 安全。
+- `napi-build` **保持 2.x**（3.0.0-beta.0 yanked；2.4.1 仍最新且 emit 双 env var 兼容）；`napi_build::setup()` 签名不变。build.rs 不动。
+- `ToNapiValue` 3.0.0 加 `: Sized` bound → Vane `Json` newtype 是 Sized，不受影响。
+- 3.6.x 新增 `pub cause: Option<Box<Error>>` 字段 → Vane 用直接 `e.reason` 访问（非结构体 pattern），不受影响。**故 pin `napi = "3"`（semver range，不钉 3.6.x）**。
+- env var 改名时间线：napi-derive 3.0.0-alpha.0 仍 `TYPE_DEF_TMP_PATH` → 3.0.0 stable（2025-07-17）改 `NAPI_TYPE_DEF_TMP_FOLDER` + 旧名 panic。
+
+**版本 pin（配 @napi-rs/cli 3.8.5，同发版日 2026-04-15 配对：napi 3.8.5 + napi-derive 3.5.4；用 semver range 留更新空间）**：
+```toml
+napi = { version = "3", features = ["napi8", "serde-json"] }
+napi-derive = "3"
+napi-build = "2"   # 不变（2.4.1）
+```
+移除 `=2.16.13` 精确 pin；S14 注释改写为 3.x 现状（reason 仍 pub，配对要求说明）。
+
 ## 4. 任务分解（串行，T2 可与 T1 审查重叠）
 
-### T1｜本地 3.x CLI 验证 + package.json/napi.config 配置升级【keystone】
-- 清理 `crates/vane-node/` 旧产物：`rm -f index.js *.node`（陈旧 2.x 产物）。
-- `cd crates/vane-node && npm install @napi-rs/cli@^3`（devDep 升级 + 本地装 3.x）。
+### T1｜本地 3.x CLI 验证 + napi Rust crate 升级 + package.json/napi.config 配置【keystone】
+- 清理 `crates/vane-node/` 旧产物：`rm -f index.js *.node`（陈旧 2.x 产物，packageName 陈旧）。
+- **Cargo.toml napi 升级**（§3.4，解阻关键）：
+  - `crates/vane-node/Cargo.toml:13` `napi = { version = "=2.16.13", features = ["napi8", "serde-json"] }` → `napi = { version = "3", features = ["napi8", "serde-json"] }`。
+  - `:14` `napi-derive = "=2.16.13"` → `napi-derive = "3"`。
+  - `:24` `napi-build = "2"` **不动**（2.4.1 兼容双 env var）。
+  - `:12` S14 注释改写：2.16.13 锁定理由已失效（reason 仍 pub）→ 3.x 现状 + 配对要求（napi/napi-derive/@napi-rs/cli 必须同 3.x，env var `NAPI_TYPE_DEF_TMP_FOLDER`）。
+- `cd crates/vane-node && npm install @napi-rs/cli@^3 --no-package-lock`（devDep 升级 + 本地装 3.x；勿生成 lockfile）。
 - 本地实测 3.x 命令并记录产出：
-  - `napi build --platform --release` → 确认产出 `vane.<platform>.node`（非 `index.*`）+ 再生成 `index.js`；读 `index.js` 确认引用 `@vane-rs/node-<platform>`（非陈旧 `@vane/node-*`）+ `vane.<platform>.node`。
-  - `napi create-npm-dirs`（复数）→ 确认命令存在 + 创建 `npm/<platform>/` 目录。
-  - `napi artifacts --output-dir . --npm-dir npm` → 确认收集 `vane.<platform>.node` 到 `npm/<platform>/` + 平台包 `main` 指向正确。
-  - `npm publish --dry-run`（触发 `prepublishOnly`）→ 确认 `napi pre-publish -t npm` 在 dry-run 下不报错（需先把 scripts.prepublishOnly 改 `pre-publish`，见下）。
-- 应用配置改动：
-  - `package.json:14` devDep `^2.18.0` → `^3`。
-  - `package.json:22` scripts.prepublishOnly `napi prepublish -t npm` → `napi pre-publish -t npm`。
-  - `package.json:24-42` napi 字段：**移除 `triples`**（3.x 不读），保留 `targets`（3.x 读）。`binaryName` 暂留 `"vane"`（实测链路通则保留；断则回退 `"index"` 并在报告标注）。
-  - `napi.config.json`：按 §3.2 决策——删除文件（若 3.x 不读）或同步移除 `triples`。
-- 报告：3.x 命令名/flags 实测确认表 + 产出文件名 + `index.js` 关键 require 行 + binaryName 决策结论 + napi.config.json 去留结论。
-- 门禁：`cd crates/vane-node && npm test`（ava）+ `cargo check -p vane-node`（无 Rust 改动，确认不破）。`npm run check:thin`（分发结构）。
+  - `napi build --platform --release` → 确认产出 `vane.<platform>.node`（binaryName 激活）+ **再生 `index.js`**（napi-derive 3.x 读新 env var → type def 正常 → index.js 生成）；读 `index.js` 确认引用 `@vane-rs/node-<platform>`（非陈旧 `@vane/node-*`）+ `vane.<platform>.node`。
+  - `node -e "require('./main.js')"` → 确认全链路通（main.js → index.js → vane.darwin-arm64.node）。
+  - `napi create-npm-dirs`（复数，无 `-t`）→ 确认创建 `npm/<platform>/` + 平台包 `main` 指向 `vane.<platform>.node`。
+  - `napi artifacts --help` → 确认 `--output-dir,-o,-d` + `--npm-dir`，无 `--target`/`--dir`。
+  - `napi pre-publish --help` → 确认 `-t`=`--tag-style`(`npm|lerna`)；**勿真跑**（会发 npm/挂 GH Release）。
+- 应用配置改动（package.json + napi.config.json，T1 failure 1 已实测正确，续用）：
+  - `package.json` devDep `^2.18.0` → `^3`；scripts.prepublishOnly `prepublish` → `pre-publish`；napi 字段移除 `triples`，保留 `targets`+`binaryName:"vane"`+`packageName`。
+  - `napi.config.json`：**删除**（§3.2，3.x 仅 `-c` 传参才读，本仓库无 `-c`；grep 确认无代码引用）。
+  - `.gitignore` 追加 `npm/`（create-npm-dirs 产物）。
+- binaryName 决策：T1 failure 1 已证 `vane`/`index` 均产正确 .node 且链路通断与 binaryName 无关（根因是 napi-derive env var）。napi-derive 升 3.x 后链路应通 → **保留 `vane`**（与 v0.1.1 命名解耦，3.x 激活 binaryName 为预期行为）。
+- 报告：3.x 命令实测确认表 + Cargo.toml napi 升级 + build 产出 `vane.*.node` + **再生 index.js 的 require 行** + 链路验证输出 + binaryName 决策 + napi.config.json 删除 + 门禁。
+- 门禁：`cd crates/vane-node && npm test`（ava，应全绿——index.js 再生）+ `cargo check -p vane-node` + `cargo test -p vane-node`（reason 字段测试应不变通过）+ `npm run check:thin`。
 
 ### T2｜release.yml 3.x 命令适配（依赖 T1 实测命令确认）
 - `release.yml:57`（build job）+ `:157`（release job）：`@napi-rs/cli@^2.18.0` → `@napi-rs/cli@^3`。
