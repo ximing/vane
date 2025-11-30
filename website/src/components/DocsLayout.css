@@ -85,6 +85,14 @@
   scroll-margin-top: calc(var(--topbar-h) + var(--space-4));
 }
 
+/* Content tables scroll horizontally instead of breaking the layout viewport
+   on narrow screens (block display lets overflow-x take effect on <table>). */
+.docs-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 /* Right TOC */
 
 .docs-toc {
