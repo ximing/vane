@@ -423,7 +423,8 @@
     grid-template-columns: 1fr;
   }
 
+  /* single column: nowrap mono values ("≥ 5,000 docs/s") overflow 2-col tracks */
   .home__stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 }
