@@ -1,0 +1,119 @@
+/* CodeBlock — macOS-style window frame + shiki dual-theme wiring. */
+
+.code-block {
+  margin: var(--space-4) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+/* ---- Title bar ---- */
+
+.code-block__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.code-block__dots {
+  display: inline-flex;
+  gap: 6px;
+  flex: none;
+}
+
+.code-block__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.code-block__dot--close {
+  background: #ff5f57;
+}
+
+.code-block__dot--min {
+  background: #febc2e;
+}
+
+.code-block__dot--max {
+  background: #28c840;
+}
+
+.code-block__title {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-block__lang {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.code-block__copy {
+  flex: none;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.code-block__copy:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- Body: identical metrics for fallback and highlighted states ---- */
+
+.code-block__plain,
+.code-block__highlight .shiki {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  overflow-x: auto;
+  tab-size: 2;
+}
+
+.code-block__plain {
+  color: var(--fg);
+  white-space: pre;
+}
+
+/* Shiki dual themes, single pass: tokens carry --shiki-light and
+ * --shiki-dark variables; we only flip which variable is consumed, so a
+ * theme switch never re-runs highlighting. `defaultColor: false` means
+ * shiki emits no inline color, so these rules win without !important. */
+.code-block__highlight .shiki {
+  background-color: transparent;
+  color: var(--shiki-light);
+}
+
+.code-block__highlight .shiki span {
+  color: var(--shiki-light);
+}
+
+[data-theme='dark'] .code-block__highlight .shiki {
+  color: var(--shiki-dark);
+}
+
+[data-theme='dark'] .code-block__highlight .shiki span {
+  color: var(--shiki-dark);
+}

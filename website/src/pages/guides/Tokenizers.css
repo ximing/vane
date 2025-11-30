@@ -1,0 +1,103 @@
+/* Tokenizers guide page (T12). Prefix: tok- */
+
+.tok-page h1 {
+  margin: 0 0 var(--space-3);
+}
+
+.tok-page h2 {
+  margin: var(--space-7) 0 var(--space-3);
+}
+
+.tok-page p {
+  line-height: var(--leading-normal);
+}
+
+.tok-lede {
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-5);
+}
+
+.tok-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-4) 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.tok-table th,
+.tok-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.tok-table th {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.tok-decision {
+  margin: var(--space-3) 0 var(--space-5);
+  padding-left: var(--space-5);
+  line-height: var(--leading-normal);
+}
+
+.tok-decision li {
+  margin-bottom: var(--space-2);
+}
+
+/* Mixed-text pipeline diagram (pure HTML/CSS). */
+
+.tok-flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 var(--space-5);
+  padding: var(--space-4);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.tok-flow__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.tok-flow__row + .tok-flow__row {
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border);
+}
+
+.tok-flow__stage {
+  min-width: 120px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}
+
+.tok-chip {
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.tok-chip--raw {
+  background: var(--bg-inset);
+}
+
+.tok-chip--token {
+  border-color: var(--accent);
+}
+
+.tok-chip--token em {
+  font-style: normal;
+  color: var(--fg-faint);
+}
