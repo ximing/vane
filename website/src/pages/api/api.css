@@ -1,0 +1,120 @@
+/*
+ * api.css — shared styles for the seven API reference pages
+ * (Overview / open / collection / documents / search / maintenance / errors).
+ * Consumes tokens.css variables only; no new globals.
+ */
+
+.api-page h1 {
+  margin-bottom: var(--space-3);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.api-lead {
+  margin-bottom: var(--space-5);
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+}
+
+.api-page h2 {
+  margin-top: var(--space-7);
+  margin-bottom: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.api-page h3 {
+  margin-top: var(--space-5);
+  margin-bottom: var(--space-3);
+}
+
+.api-page p {
+  margin-bottom: var(--space-4);
+}
+
+.api-page ul,
+.api-page ol {
+  margin: 0 0 var(--space-4) var(--space-5);
+}
+
+.api-page li + li {
+  margin-top: var(--space-1);
+}
+
+/* Language-neutral IDL signature block (SPEC §4.1/§4.2). */
+.api-idl {
+  margin-bottom: var(--space-5);
+  padding: var(--space-4);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  white-space: pre;
+}
+
+.api-idl code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.api-page .lang-tabs {
+  margin-bottom: var(--space-5);
+}
+
+.api-page .code-block {
+  margin-bottom: var(--space-4);
+}
+
+.api-page .callout {
+  margin-bottom: var(--space-4);
+}
+
+/* Parameter / verb / error tables. Wrapped for horizontal scroll on mobile. */
+.api-table-wrap {
+  margin-bottom: var(--space-5);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.api-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.api-table th,
+.api-table td {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-table tr:last-child td {
+  border-bottom: none;
+}
+
+.api-table th {
+  background: var(--bg-elevated);
+  color: var(--fg-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.api-table td:first-child {
+  white-space: nowrap;
+}
+
+.api-table code {
+  white-space: nowrap;
+}
+
+.api-table td:last-child code,
+.api-table td.api-table__wide code {
+  white-space: normal;
+}

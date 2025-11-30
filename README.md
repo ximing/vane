@@ -3,6 +3,7 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![CI](https://github.com/ximing/vane/actions/workflows/ci.yml/badge.svg)
 ![Rust](https://img.shields.io/badge/Rust-stable-orange)
+[![Docs](https://img.shields.io/badge/docs-ximing.github.io%2Fvane-3b9eff)](https://ximing.github.io/vane/)
 
 **English** | [中文](README.zh-CN.md)
 

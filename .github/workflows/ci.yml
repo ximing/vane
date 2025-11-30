@@ -3,7 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore: ['website/**', 'docs/plans/docs-site-*.md']
   pull_request:
+    paths-ignore: ['website/**', 'docs/plans/docs-site-*.md']
 
 permissions:
   contents: read

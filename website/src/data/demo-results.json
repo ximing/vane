@@ -1,0 +1,800 @@
+{
+  "docs": [
+    {
+      "id": "vec-intro-en",
+      "title": "Vector search 101",
+      "body": "Vector search turns documents into dense embeddings and finds nearest neighbors by cosine similarity. It captures semantic similarity even when the exact keywords never appear in the text."
+    },
+    {
+      "id": "vec-intro-zh",
+      "title": "向量检索入门",
+      "body": "向量检索把文档编码为稠密 embedding，再按余弦相似度寻找最近邻。即使查询与文档没有共同关键词，语义相近的内容也能被召回。"
+    },
+    {
+      "id": "embed-model-en",
+      "title": "Choosing an embedding model",
+      "body": "Picking an embedding model is a trade-off between dimension, latency and multilingual quality. A good embedding model makes semantically similar documents cluster together in vector space."
+    },
+    {
+      "id": "embed-doc-zh",
+      "title": "如何为文档生成 embedding",
+      "body": "为文档生成 embedding 通常调用外部模型，把标题和正文拼接后编码成一个向量。向量维度需要与 collection schema 中声明的 dim 保持一致。"
+    },
+    {
+      "id": "hnsw-en",
+      "title": "HNSW index internals",
+      "body": "HNSW builds a layered proximity graph over vectors so approximate nearest neighbor queries stay fast as the collection grows. Vane keeps per-segment HNSW indexes that merge during compaction."
+    },
+    {
+      "id": "hnsw-zh",
+      "title": "HNSW 图索引原理",
+      "body": "HNSW 在向量集合上构建分层邻近图，让近似最近邻查询在百万级规模下仍然毫秒返回。图索引的构建成本在段合并时摊销。"
+    },
+    {
+      "id": "metric-en",
+      "title": "Cosine vs dot product",
+      "body": "Cosine similarity normalizes vectors to unit length before comparison, while dot product keeps magnitude information. For normalized embeddings the two metrics rank identically."
+    },
+    {
+      "id": "bm25-en",
+      "title": "BM25 ranking explained",
+      "body": "BM25 scores a document by term frequency saturation and inverse document frequency. Rare query terms contribute more, and long documents are length-normalized so keyword stuffing fails."
+    },
+    {
+      "id": "bm25-zh",
+      "title": "BM25 全文检索原理",
+      "body": "BM25 用词频饱和与逆文档频率为文档打分：查询里的稀有词贡献更大，长文档经过长度归一化，堆关键词刷分不再有效。"
+    },
+    {
+      "id": "inverted-en",
+      "title": "Full-text search with inverted index",
+      "body": "An inverted index maps every term to the postings list of documents containing it. Full-text search intersects postings lists and ranks candidates with BM25."
+    },
+    {
+      "id": "inverted-zh",
+      "title": "倒排索引与全文检索",
+      "body": "倒排索引把每个词映射到包含它的文档列表。全文检索对查询词求 postings 交集，再用 BM25 为候选文档排序。"
+    },
+    {
+      "id": "tokenizer-en",
+      "title": "Tokenizers: stemming and lowercase",
+      "body": "The standard tokenizer splits on unicode boundaries, lowercases latin text and applies Porter stemming, so \"searching\" and \"search\" hit the same term."
+    },
+    {
+      "id": "jieba-zh",
+      "title": "中文分词：jieba 与二元组",
+      "body": "中文没有空格分词，需要分词器。jieba 用前缀词典做最大概率切分并用 HMM 识别未登录词；cjk_bigram 则把连续汉字切成二元组，无需词典。"
+    },
+    {
+      "id": "userdict-zh",
+      "title": "jieba 词典与用户自定义词",
+      "body": "内置 jieba-lite 词典约二十万词条，与 jieba 原版切分行为一致。领域新词可以通过 userDict 注入，单 token 入索引后短语查询百分百命中。"
+    },
+    {
+      "id": "hybrid-en",
+      "title": "Hybrid search: best of both worlds",
+      "body": "Hybrid search runs vector and BM25 retrieval in parallel and fuses both ranked lists. It keeps semantic recall while staying precise on exact keyword matches."
+    },
+    {
+      "id": "hybrid-zh",
+      "title": "混合检索：向量与关键词融合",
+      "body": "混合检索并行执行向量召回与 BM25 全文召回，再把两路结果融合。它既保留语义召回能力，又在精确关键词上维持高准确率。"
+    },
+    {
+      "id": "rrf-en",
+      "title": "Reciprocal rank fusion deep dive",
+      "body": "Reciprocal rank fusion scores each document by the sum of 1/(k+rank) across result lists. RRF needs no score calibration, which makes it the default fusion strategy in Vane."
+    },
+    {
+      "id": "rrf-zh",
+      "title": "RRF 倒数排名融合算法",
+      "body": "RRF 按每路排名的倒数求和打分，不需要对向量距离与 BM25 分做归一化校准。两路都命中的文档在融合后排名显著靠前。"
+    },
+    {
+      "id": "when-hybrid-en",
+      "title": "When hybrid beats vector-only",
+      "body": "Pure vector search misses exact product codes and rare proper nouns; pure text search misses paraphrases. Hybrid fusion wins whenever both signals matter."
+    },
+    {
+      "id": "when-hybrid-zh",
+      "title": "什么时候该用混合检索",
+      "body": "纯向量检索会漏掉精确型号与冷门专有名词，纯全文检索又理解不了同义改写。两类信号都重要时，混合检索的排序质量稳定居优。"
+    },
+    {
+      "id": "persist-en",
+      "title": "Embedded databases and persistence",
+      "body": "An embedded search library persists segments to local disk so data survives restarts. Vane opens a directory and manages manifests, segments and snapshots for you."
+    },
+    {
+      "id": "persist-zh",
+      "title": "嵌入式检索库的持久化设计",
+      "body": "嵌入式检索库把段文件持久化到本地磁盘，重启后数据不丢。打开一个目录即可，manifest、段与快照由库自动管理。"
+    },
+    {
+      "id": "segment-en",
+      "title": "Segmented storage and compaction",
+      "body": "Writes land in an in-memory buffer and flush to immutable segments. Background compaction merges small segments and reclaims space from deleted documents."
+    },
+    {
+      "id": "segment-zh",
+      "title": "段式存储与合并压缩",
+      "body": "写入先落到内存 buffer，flush 后成为不可变段。后台合并把小段压成大段，同时回收被删除文档占用的空间。"
+    },
+    {
+      "id": "wal-en",
+      "title": "WAL and crash recovery",
+      "body": "A write-ahead log records every add before it reaches a segment. After a crash the engine replays the WAL so acknowledged writes are never lost."
+    },
+    {
+      "id": "wal-zh",
+      "title": "WAL 预写日志与崩溃恢复",
+      "body": "预写日志在文档落段之前先记录每一次写入。崩溃重启后引擎重放 WAL，已确认的写入一条不丢。"
+    },
+    {
+      "id": "node-bind-en",
+      "title": "Using Vane from Node.js",
+      "body": "The Node.js binding is a thin napi-rs addon with prebuilt binaries per platform. Open a database directory, create a collection, add documents and search with one async call."
+    },
+    {
+      "id": "node-bind-zh",
+      "title": "在 Node.js 中使用 Vane",
+      "body": "Node 绑定是 napi-rs 薄壳，各平台提供预编译二进制。打开数据库目录、创建 collection、批量 add 文档，然后一次异步调用完成检索。"
+    },
+    {
+      "id": "wasm-en",
+      "title": "Search in the browser with WASM",
+      "body": "The WASM build runs the same engine inside a Web Worker with an IndexedDB-backed VFS. Browser search stays fully offline once the bundle is cached."
+    },
+    {
+      "id": "wasm-zh",
+      "title": "浏览器里的 WASM 检索",
+      "body": "WASM 构建把同一套引擎跑在 Web Worker 里，底层用 IndexedDB 做虚拟文件系统。资源缓存后浏览器端检索可以完全离线。"
+    },
+    {
+      "id": "go-bind-en",
+      "title": "Go bindings via cgo",
+      "body": "The Go package links the C ABI of vane-ffi statically through cgo. The API mirrors the same six verbs: open, collection, add, flush, search, delete."
+    },
+    {
+      "id": "go-bind-zh",
+      "title": "Go 绑定：cgo 静态链接",
+      "body": "Go 包通过 cgo 静态链接 vane-ffi 的 C ABI。接口保持同样的六个动词：open、collection、add、flush、search、delete。"
+    }
+  ],
+  "queries": [
+    {
+      "q": "向量检索",
+      "hybrid": [
+        {
+          "id": "vec-intro-zh",
+          "title": "向量检索入门",
+          "snippet": "向量检索入门 — 向量检索把文档编码为稠密 embedding，再按余弦相似度寻找最近邻。即使查询与文档没有共同关键词，语义相近的内容也能被召回。",
+          "score": 0.03306
+        },
+        {
+          "id": "embed-doc-zh",
+          "title": "如何为文档生成 embedding",
+          "snippet": "…为文档生成 embedding 通常调用外部模型，把标题和正文拼接后编码成一个向量。向量维度需要与 collection schema 中声明的 dim 保持一致。",
+          "score": 0.031746
+        },
+        {
+          "id": "hybrid-zh",
+          "title": "混合检索：向量与关键词融合",
+          "snippet": "混合检索：向量与关键词融合 — 混合检索并行执行向量召回与 BM25 全文召回，再把两路结果融合。它既保留语义召回能力，又在精确关键词上维持高准确率。",
+          "score": 0.031099
+        },
+        {
+          "id": "hnsw-zh",
+          "title": "HNSW 图索引原理",
+          "snippet": "HNSW 图索引原理 — HNSW 在向量集合上构建分层邻近图，让近似最近邻查询在百万级规模下仍然毫秒返回。图索引的构建成本在段合并时摊销。",
+          "score": 0.03031
+        },
+        {
+          "id": "when-hybrid-zh",
+          "title": "什么时候该用混合检索",
+          "snippet": "什么时候该用混合检索 — 纯向量检索会漏掉精确型号与冷门专有名词，纯全文检索又理解不了同义改写。两类信号都重要时，混合检索的排序质量稳定居优。",
+          "score": 0.030018
+        }
+      ],
+      "vector": [
+        {
+          "id": "vec-intro-en",
+          "title": "Vector search 101",
+          "snippet": "Vector search 101 — Vector search turns documents into dense embeddings and finds nearest …",
+          "score": 1
+        },
+        {
+          "id": "vec-intro-zh",
+          "title": "向量检索入门",
+          "snippet": "向量检索入门 — 向量检索把文档编码为稠密 embedding，再按余弦相似度寻找最近邻。即使查询与文档没有共同关键词，语义相近的内容也能被召回。",
+          "score": 1
+        },
+        {
+          "id": "embed-model-en",
+          "title": "Choosing an embedding model",
+          "snippet": "Choosing an embedding model — Picking an embedding model is a trade-off between dimension,…",
+          "score": 1
+        },
+        {
+          "id": "embed-doc-zh",
+          "title": "如何为文档生成 embedding",
+          "snippet": "…为文档生成 embedding 通常调用外部模型，把标题和正文拼接后编码成一个向量。向量维度需要与 collection schema 中声明的 dim 保持一致。",
+          "score": 1
+        },
+        {
+          "id": "hnsw-en",
+          "title": "HNSW index internals",
+          "snippet": "HNSW index internals — HNSW builds a layered proximity graph over vectors so approximate n…",
+          "score": 1
+        }
+      ],
+      "text": [
+        {
+          "id": "vec-intro-zh",
+          "title": "向量检索入门",
+          "snippet": "向量检索入门 — 向量检索把文档编码为稠密 embedding，再按余弦相似度寻找最近邻。即使查询与文档没有共同关键词，语义相近的内容也能被召回。",
+          "score": 3.986539
+        },
+        {
+          "id": "hybrid-zh",
+          "title": "混合检索：向量与关键词融合",
+          "snippet": "混合检索：向量与关键词融合 — 混合检索并行执行向量召回与 BM25 全文召回，再把两路结果融合。它既保留语义召回能力，又在精确关键词上维持高准确率。",
+          "score": 3.986539
+        },
+        {
+          "id": "when-hybrid-zh",
+          "title": "什么时候该用混合检索",
+          "snippet": "什么时候该用混合检索 — 纯向量检索会漏掉精确型号与冷门专有名词，纯全文检索又理解不了同义改写。两类信号都重要时，混合检索的排序质量稳定居优。",
+          "score": 3.787558
+        },
+        {
+          "id": "embed-doc-zh",
+          "title": "如何为文档生成 embedding",
+          "snippet": "…为文档生成 embedding 通常调用外部模型，把标题和正文拼接后编码成一个向量。向量维度需要与 collection schema 中声明的 dim 保持一致。",
+          "score": 2.172637
+        },
+        {
+          "id": "inverted-zh",
+          "title": "倒排索引与全文检索",
+          "snippet": "倒排索引与全文检索 — 倒排索引把每个词映射到包含它的文档列表。全文检索对查询词求 postings 交集，再用 BM25 为候选文档排序。",
+          "score": 1.874908
+        }
+      ]
+    },
+    {
+      "q": "hybrid search fusion",
+      "hybrid": [
+        {
+          "id": "hybrid-en",
+          "title": "Hybrid search: best of both worlds",
+          "snippet": "Hybrid search: best of both worlds — Hybrid search runs vector and BM25 retrieval in …",
+          "score": 0.03306
+        },
+        {
+          "id": "when-hybrid-en",
+          "title": "When hybrid beats vector-only",
+          "snippet": "When hybrid beats vector-only — Pure vector search misses exact product codes and rare …",
+          "score": 0.032292
+        },
+        {
+          "id": "rrf-en",
+          "title": "Reciprocal rank fusion deep dive",
+          "snippet": "Reciprocal rank fusion deep dive — Reciprocal rank fusion scores each document by the sum …",
+          "score": 0.032258
+        },
+        {
+          "id": "vec-intro-en",
+          "title": "Vector search 101",
+          "snippet": "Vector search 101 — Vector search turns documents into dense embeddings and finds nearest …",
+          "score": 0.030777
+        },
+        {
+          "id": "hybrid-zh",
+          "title": "混合检索：向量与关键词融合",
+          "snippet": "混合检索：向量与关键词融合 — 混合检索并行执行向量召回与 BM25 全文召回，再把两路结果融合。它既保留语义召回能力，又在精确关键词上维持高准确率。",
+          "score": 0.016393
+        }
+      ],
+      "vector": [
+        {
+          "id": "hybrid-en",
+          "title": "Hybrid search: best of both worlds",
+          "snippet": "Hybrid search: best of both worlds — Hybrid search runs vector and BM25 retrieval in …",
+          "score": 1
+        },
+        {
+          "id": "hybrid-zh",
+          "title": "混合检索：向量与关键词融合",
+          "snippet": "混合检索：向量与关键词融合 — 混合检索并行执行向量召回与 BM25 全文召回，再把两路结果融合。它既保留语义召回能力，又在精确关键词上维持高准确率。",
+          "score": 1
+        },
+        {
+          "id": "rrf-en",
+          "title": "Reciprocal rank fusion deep dive",
+          "snippet": "Reciprocal rank fusion deep dive — Reciprocal rank fusion scores each document by the sum …",
+          "score": 1
+        },
+        {
+          "id": "rrf-zh",
+          "title": "RRF 倒数排名融合算法",
+          "snippet": "RRF 倒数排名融合算法 — RRF 按每路排名的倒数求和打分，不需要对向量距离与 BM25 分做归一化校准。两路都命中的文档在融合后排名显著靠前。",
+          "score": 1
+        },
+        {
+          "id": "when-hybrid-en",
+          "title": "When hybrid beats vector-only",
+          "snippet": "When hybrid beats vector-only — Pure vector search misses exact product codes and rare …",
+          "score": 1
+        }
+      ],
+      "text": [
+        {
+          "id": "when-hybrid-en",
+          "title": "When hybrid beats vector-only",
+          "snippet": "When hybrid beats vector-only — Pure vector search misses exact product codes and rare …",
+          "score": 8.062548
+        },
+        {
+          "id": "hybrid-en",
+          "title": "Hybrid search: best of both worlds",
+          "snippet": "Hybrid search: best of both worlds — Hybrid search runs vector and BM25 retrieval in …",
+          "score": 5.192938
+        },
+        {
+          "id": "rrf-en",
+          "title": "Reciprocal rank fusion deep dive",
+          "snippet": "Reciprocal rank fusion deep dive — Reciprocal rank fusion scores each document by the sum …",
+          "score": 3.994173
+        },
+        {
+          "id": "tokenizer-en",
+          "title": "Tokenizers: stemming and lowercase",
+          "snippet": "…latin text and applies Porter stemming, so \"searching\" and \"search\" hit the same term.",
+          "score": 1.666927
+        },
+        {
+          "id": "vec-intro-en",
+          "title": "Vector search 101",
+          "snippet": "Vector search 101 — Vector search turns documents into dense embeddings and finds nearest …",
+          "score": 1.596253
+        }
+      ]
+    },
+    {
+      "q": "BM25 ranking",
+      "hybrid": [
+        {
+          "id": "bm25-en",
+          "title": "BM25 ranking explained",
+          "snippet": "BM25 ranking explained — BM25 scores a document by term frequency saturation and inverse …",
+          "score": 0.033333
+        },
+        {
+          "id": "inverted-en",
+          "title": "Full-text search with inverted index",
+          "snippet": "…containing it. Full-text search intersects postings lists and ranks candidates with BM25.",
+          "score": 0.032522
+        },
+        {
+          "id": "bm25-zh",
+          "title": "BM25 全文检索原理",
+          "snippet": "BM25 全文检索原理 — BM25 用词频饱和与逆文档频率为文档打分：查询里的稀有词贡献更大，长文档经过长度归一化，堆关键词刷分不再有效。",
+          "score": 0.032018
+        },
+        {
+          "id": "hybrid-en",
+          "title": "Hybrid search: best of both worlds",
+          "snippet": "…Hybrid search runs vector and BM25 retrieval in parallel and fuses both ranked lists. It …",
+          "score": 0.031054
+        },
+        {
+          "id": "inverted-zh",
+          "title": "倒排索引与全文检索",
+          "snippet": "倒排索引与全文检索 — 倒排索引把每个词映射到包含它的文档列表。全文检索对查询词求 postings 交集，再用 BM25 为候选文档排序。",
+          "score": 0.031025
+        }
+      ],
+      "vector": [
+        {
+          "id": "bm25-en",
+          "title": "BM25 ranking explained",
+          "snippet": "BM25 ranking explained — BM25 scores a document by term frequency saturation and inverse …",
+          "score": 1
+        },
+        {
+          "id": "bm25-zh",
+          "title": "BM25 全文检索原理",
+          "snippet": "BM25 全文检索原理 — BM25 用词频饱和与逆文档频率为文档打分：查询里的稀有词贡献更大，长文档经过长度归一化，堆关键词刷分不再有效。",
+          "score": 1
+        },
+        {
+          "id": "inverted-en",
+          "title": "Full-text search with inverted index",
+          "snippet": "…containing it. Full-text search intersects postings lists and ranks candidates with BM25.",
+          "score": 1
+        },
+        {
+          "id": "inverted-zh",
+          "title": "倒排索引与全文检索",
+          "snippet": "倒排索引与全文检索 — 倒排索引把每个词映射到包含它的文档列表。全文检索对查询词求 postings 交集，再用 BM25 为候选文档排序。",
+          "score": 1
+        },
+        {
+          "id": "tokenizer-en",
+          "title": "Tokenizers: stemming and lowercase",
+          "snippet": "Tokenizers: stemming and lowercase — The standard tokenizer splits on unicode boundaries, …",
+          "score": 1
+        }
+      ],
+      "text": [
+        {
+          "id": "bm25-en",
+          "title": "BM25 ranking explained",
+          "snippet": "BM25 ranking explained — BM25 scores a document by term frequency saturation and inverse …",
+          "score": 3.93381
+        },
+        {
+          "id": "inverted-en",
+          "title": "Full-text search with inverted index",
+          "snippet": "…containing it. Full-text search intersects postings lists and ranks candidates with BM25.",
+          "score": 3.339385
+        },
+        {
+          "id": "hybrid-en",
+          "title": "Hybrid search: best of both worlds",
+          "snippet": "…Hybrid search runs vector and BM25 retrieval in parallel and fuses both ranked lists. It …",
+          "score": 3.339385
+        },
+        {
+          "id": "rrf-en",
+          "title": "Reciprocal rank fusion deep dive",
+          "snippet": "Reciprocal rank fusion deep dive — Reciprocal rank fusion scores each document by the sum …",
+          "score": 2.773642
+        },
+        {
+          "id": "bm25-zh",
+          "title": "BM25 全文检索原理",
+          "snippet": "BM25 全文检索原理 — BM25 用词频饱和与逆文档频率为文档打分：查询里的稀有词贡献更大，长文档经过长度归一化，堆关键词刷分不再有效。",
+          "score": 2.030836
+        }
+      ]
+    },
+    {
+      "q": "中文分词",
+      "hybrid": [
+        {
+          "id": "jieba-zh",
+          "title": "中文分词：jieba 与二元组",
+          "snippet": "中文分词：jieba 与二元组 — 中文没有空格分词，需要分词器。jieba 用前缀词典做最大概率切分并用 HMM 识别未登录词；cjk_bigram 则把连续汉字切成二元组，无需…",
+          "score": 0.032051
+        },
+        {
+          "id": "bm25-en",
+          "title": "BM25 ranking explained",
+          "snippet": "BM25 ranking explained — BM25 scores a document by term frequency saturation and inverse d…",
+          "score": 0.016667
+        },
+        {
+          "id": "bm25-zh",
+          "title": "BM25 全文检索原理",
+          "snippet": "BM25 全文检索原理 — BM25 用词频饱和与逆文档频率为文档打分：查询里的稀有词贡献更大，长文档经过长度归一化，堆关键词刷分不再有效。",
+          "score": 0.016393
+        },
+        {
+          "id": "inverted-en",
+          "title": "Full-text search with inverted index",
+          "snippet": "Full-text search with inverted index — An inverted index maps every term to the postings l…",
+          "score": 0.016129
+        },
+        {
+          "id": "inverted-zh",
+          "title": "倒排索引与全文检索",
+          "snippet": "倒排索引与全文检索 — 倒排索引把每个词映射到包含它的文档列表。全文检索对查询词求 postings 交集，再用 BM25 为候选文档排序。",
+          "score": 0.015873
+        }
+      ],
+      "vector": [
+        {
+          "id": "bm25-en",
+          "title": "BM25 ranking explained",
+          "snippet": "BM25 ranking explained — BM25 scores a document by term frequency saturation and inverse d…",
+          "score": 1
+        },
+        {
+          "id": "bm25-zh",
+          "title": "BM25 全文检索原理",
+          "snippet": "BM25 全文检索原理 — BM25 用词频饱和与逆文档频率为文档打分：查询里的稀有词贡献更大，长文档经过长度归一化，堆关键词刷分不再有效。",
+          "score": 1
+        },
+        {
+          "id": "inverted-en",
+          "title": "Full-text search with inverted index",
+          "snippet": "Full-text search with inverted index — An inverted index maps every term to the postings l…",
+          "score": 1
+        },
+        {
+          "id": "inverted-zh",
+          "title": "倒排索引与全文检索",
+          "snippet": "倒排索引与全文检索 — 倒排索引把每个词映射到包含它的文档列表。全文检索对查询词求 postings 交集，再用 BM25 为候选文档排序。",
+          "score": 1
+        },
+        {
+          "id": "tokenizer-en",
+          "title": "Tokenizers: stemming and lowercase",
+          "snippet": "Tokenizers: stemming and lowercase — The standard tokenizer splits on unicode boundaries, …",
+          "score": 1
+        }
+      ],
+      "text": [
+        {
+          "id": "jieba-zh",
+          "title": "中文分词：jieba 与二元组",
+          "snippet": "中文分词：jieba 与二元组 — 中文没有空格分词，需要分词器。jieba 用前缀词典做最大概率切分并用 HMM 识别未登录词；cjk_bigram 则把连续汉字切成二元组，无需…",
+          "score": 8.134648
+        }
+      ]
+    },
+    {
+      "q": "embedding semantic similarity",
+      "hybrid": [
+        {
+          "id": "vec-intro-en",
+          "title": "Vector search 101",
+          "snippet": "…nearest neighbors by cosine similarity. It captures semantic similarity even when the …",
+          "score": 0.03306
+        },
+        {
+          "id": "embed-model-en",
+          "title": "Choosing an embedding model",
+          "snippet": "Choosing an embedding model — Picking an embedding model is a trade-off between dimension,…",
+          "score": 0.032796
+        },
+        {
+          "id": "vec-intro-zh",
+          "title": "向量检索入门",
+          "snippet": "向量检索入门 — 向量检索把文档编码为稠密 embedding，再按余弦相似度寻找最近邻。即使查询与文档没有共同关键词，语义相近的内容也能被召回。",
+          "score": 0.031545
+        },
+        {
+          "id": "metric-en",
+          "title": "Cosine vs dot product",
+          "snippet": "…vs dot product — Cosine similarity normalizes vectors to unit length before …",
+          "score": 0.031281
+        },
+        {
+          "id": "embed-doc-zh",
+          "title": "如何为文档生成 embedding",
+          "snippet": "如何为文档生成 embedding — 为文档生成 embedding 通常调用外部模型，把标题和正文拼接后编码成一个向量。向量维度需要与 collection schema 中声…",
+          "score": 0.031258
+        }
+      ],
+      "vector": [
+        {
+          "id": "vec-intro-en",
+          "title": "Vector search 101",
+          "snippet": "…nearest neighbors by cosine similarity. It captures semantic similarity even when the …",
+          "score": 1
+        },
+        {
+          "id": "vec-intro-zh",
+          "title": "向量检索入门",
+          "snippet": "向量检索入门 — 向量检索把文档编码为稠密 embedding，再按余弦相似度寻找最近邻。即使查询与文档没有共同关键词，语义相近的内容也能被召回。",
+          "score": 1
+        },
+        {
+          "id": "embed-model-en",
+          "title": "Choosing an embedding model",
+          "snippet": "Choosing an embedding model — Picking an embedding model is a trade-off between dimension,…",
+          "score": 1
+        },
+        {
+          "id": "embed-doc-zh",
+          "title": "如何为文档生成 embedding",
+          "snippet": "如何为文档生成 embedding — 为文档生成 embedding 通常调用外部模型，把标题和正文拼接后编码成一个向量。向量维度需要与 collection schema 中声…",
+          "score": 1
+        },
+        {
+          "id": "hnsw-en",
+          "title": "HNSW index internals",
+          "snippet": "HNSW index internals — HNSW builds a layered proximity graph over vectors so approximate n…",
+          "score": 1
+        }
+      ],
+      "text": [
+        {
+          "id": "embed-model-en",
+          "title": "Choosing an embedding model",
+          "snippet": "Choosing an embedding model — Picking an embedding model is a trade-off between dimension,…",
+          "score": 7.157822
+        },
+        {
+          "id": "vec-intro-en",
+          "title": "Vector search 101",
+          "snippet": "…nearest neighbors by cosine similarity. It captures semantic similarity even when the …",
+          "score": 7.074133
+        },
+        {
+          "id": "metric-en",
+          "title": "Cosine vs dot product",
+          "snippet": "…vs dot product — Cosine similarity normalizes vectors to unit length before …",
+          "score": 4.152637
+        },
+        {
+          "id": "persist-en",
+          "title": "Embedded databases and persistence",
+          "snippet": "Embedded databases and persistence — An embedded search library persists segments to local…",
+          "score": 2.303823
+        },
+        {
+          "id": "hybrid-en",
+          "title": "Hybrid search: best of both worlds",
+          "snippet": "…both ranked lists. It keeps semantic recall while staying precise on exact keyword …",
+          "score": 2.288999
+        }
+      ]
+    },
+    {
+      "q": "持久化 崩溃恢复",
+      "hybrid": [
+        {
+          "id": "wal-zh",
+          "title": "WAL 预写日志与崩溃恢复",
+          "snippet": "WAL 预写日志与崩溃恢复 — 预写日志在文档落段之前先记录每一次写入。崩溃重启后引擎重放 WAL，已确认的写入一条不丢。",
+          "score": 0.03306
+        },
+        {
+          "id": "persist-zh",
+          "title": "嵌入式检索库的持久化设计",
+          "snippet": "嵌入式检索库的持久化设计 — 嵌入式检索库把段文件持久化到本地磁盘，重启后数据不丢。打开一个目录即可，manifest、段与快照由库自动管理。",
+          "score": 0.032266
+        },
+        {
+          "id": "wal-en",
+          "title": "WAL and crash recovery",
+          "snippet": "WAL and crash recovery — A write-ahead log records every add before it reaches a segment. …",
+          "score": 0.016667
+        },
+        {
+          "id": "persist-en",
+          "title": "Embedded databases and persistence",
+          "snippet": "Embedded databases and persistence — An embedded search library persists segments to local…",
+          "score": 0.016129
+        },
+        {
+          "id": "segment-en",
+          "title": "Segmented storage and compaction",
+          "snippet": "Segmented storage and compaction — Writes land in an in-memory buffer and flush to immutab…",
+          "score": 0.015625
+        }
+      ],
+      "vector": [
+        {
+          "id": "wal-en",
+          "title": "WAL and crash recovery",
+          "snippet": "WAL and crash recovery — A write-ahead log records every add before it reaches a segment. …",
+          "score": 0.99981
+        },
+        {
+          "id": "wal-zh",
+          "title": "WAL 预写日志与崩溃恢复",
+          "snippet": "WAL 预写日志与崩溃恢复 — 预写日志在文档落段之前先记录每一次写入。崩溃重启后引擎重放 WAL，已确认的写入一条不丢。",
+          "score": 0.99981
+        },
+        {
+          "id": "persist-en",
+          "title": "Embedded databases and persistence",
+          "snippet": "Embedded databases and persistence — An embedded search library persists segments to local…",
+          "score": 0.999804
+        },
+        {
+          "id": "persist-zh",
+          "title": "嵌入式检索库的持久化设计",
+          "snippet": "嵌入式检索库的持久化设计 — 嵌入式检索库把段文件持久化到本地磁盘，重启后数据不丢。打开一个目录即可，manifest、段与快照由库自动管理。",
+          "score": 0.999804
+        },
+        {
+          "id": "segment-en",
+          "title": "Segmented storage and compaction",
+          "snippet": "Segmented storage and compaction — Writes land in an in-memory buffer and flush to immutab…",
+          "score": 0.999268
+        }
+      ],
+      "text": [
+        {
+          "id": "wal-zh",
+          "title": "WAL 预写日志与崩溃恢复",
+          "snippet": "WAL 预写日志与崩溃恢复 — 预写日志在文档落段之前先记录每一次写入。崩溃重启后引擎重放 WAL，已确认的写入一条不丢。",
+          "score": 7.313898
+        },
+        {
+          "id": "persist-zh",
+          "title": "嵌入式检索库的持久化设计",
+          "snippet": "嵌入式检索库的持久化设计 — 嵌入式检索库把段文件持久化到本地磁盘，重启后数据不丢。打开一个目录即可，manifest、段与快照由库自动管理。",
+          "score": 7.102623
+        }
+      ]
+    },
+    {
+      "q": "WASM 浏览器",
+      "hybrid": [
+        {
+          "id": "wasm-en",
+          "title": "Search in the browser with WASM",
+          "snippet": "Search in the browser with WASM — The WASM build runs the same engine inside a Web Worker …",
+          "score": 0.03306
+        },
+        {
+          "id": "wasm-zh",
+          "title": "浏览器里的 WASM 检索",
+          "snippet": "浏览器里的 WASM 检索 — WASM 构建把同一套引擎跑在 Web Worker 里，底层用 IndexedDB 做虚拟文件系统。资源缓存后浏览器端检索可以完全离线。",
+          "score": 0.03306
+        },
+        {
+          "id": "go-bind-en",
+          "title": "Go bindings via cgo",
+          "snippet": "Go bindings via cgo — The Go package links the C ABI of vane-ffi statically through cgo. T…",
+          "score": 0.016129
+        },
+        {
+          "id": "go-bind-zh",
+          "title": "Go 绑定：cgo 静态链接",
+          "snippet": "Go 绑定：cgo 静态链接 — Go 包通过 cgo 静态链接 vane-ffi 的 C ABI。接口保持同样的六个动词：open、collection、add、flush、se…",
+          "score": 0.015873
+        },
+        {
+          "id": "node-bind-en",
+          "title": "Using Vane from Node.js",
+          "snippet": "Using Vane from Node.js — The Node.js binding is a thin napi-rs addon with prebuilt binari…",
+          "score": 0.015625
+        }
+      ],
+      "vector": [
+        {
+          "id": "wasm-en",
+          "title": "Search in the browser with WASM",
+          "snippet": "Search in the browser with WASM — The WASM build runs the same engine inside a Web Worker …",
+          "score": 1
+        },
+        {
+          "id": "wasm-zh",
+          "title": "浏览器里的 WASM 检索",
+          "snippet": "浏览器里的 WASM 检索 — WASM 构建把同一套引擎跑在 Web Worker 里，底层用 IndexedDB 做虚拟文件系统。资源缓存后浏览器端检索可以完全离线。",
+          "score": 1
+        },
+        {
+          "id": "go-bind-en",
+          "title": "Go bindings via cgo",
+          "snippet": "Go bindings via cgo — The Go package links the C ABI of vane-ffi statically through cgo. T…",
+          "score": 0.9988
+        },
+        {
+          "id": "go-bind-zh",
+          "title": "Go 绑定：cgo 静态链接",
+          "snippet": "Go 绑定：cgo 静态链接 — Go 包通过 cgo 静态链接 vane-ffi 的 C ABI。接口保持同样的六个动词：open、collection、add、flush、se…",
+          "score": 0.9988
+        },
+        {
+          "id": "node-bind-en",
+          "title": "Using Vane from Node.js",
+          "snippet": "Using Vane from Node.js — The Node.js binding is a thin napi-rs addon with prebuilt binari…",
+          "score": 0.998723
+        }
+      ],
+      "text": [
+        {
+          "id": "wasm-zh",
+          "title": "浏览器里的 WASM 检索",
+          "snippet": "浏览器里的 WASM 检索 — WASM 构建把同一套引擎跑在 Web Worker 里，底层用 IndexedDB 做虚拟文件系统。资源缓存后浏览器端检索可以完全离线。",
+          "score": 7.773599
+        },
+        {
+          "id": "wasm-en",
+          "title": "Search in the browser with WASM",
+          "snippet": "Search in the browser with WASM — The WASM build runs the same engine inside a Web Worker …",
+          "score": 3.566443
+        }
+      ]
+    }
+  ],
+  "provenance": "vane-node"
+}

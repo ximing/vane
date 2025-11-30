@@ -1,0 +1,88 @@
+/* Examples page — colocated styles (consumed only by Examples.tsx). */
+
+.examples h1 {
+  margin-bottom: var(--space-4);
+}
+
+.examples > p {
+  margin-bottom: var(--space-5);
+}
+
+.examples__card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  margin-bottom: var(--space-6);
+}
+
+.examples__card h2 {
+  margin-bottom: var(--space-2);
+}
+
+.examples__card h3 {
+  font-size: var(--text-base);
+  margin-top: var(--space-5);
+  margin-bottom: var(--space-3);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.examples__path {
+  color: var(--fg-faint);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-4);
+}
+
+.examples__card p,
+.examples__card ul {
+  margin-bottom: var(--space-4);
+}
+
+.examples__card ul {
+  padding-left: var(--space-5);
+}
+
+.examples__card li {
+  margin-bottom: var(--space-2);
+}
+
+.examples__shot {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin: var(--space-4) 0;
+}
+
+.examples table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.examples th,
+.examples td {
+  text-align: left;
+  vertical-align: top;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+}
+
+.examples th {
+  background: var(--bg-inset);
+  font-weight: 600;
+}
+
+.examples .code-block,
+.examples .callout {
+  margin-bottom: var(--space-4);
+}
+
+/* Page-level footer section (outside the cards). */
+.examples > h2 {
+  margin-top: var(--space-6);
+  margin-bottom: var(--space-4);
+}

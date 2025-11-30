@@ -1,0 +1,91 @@
+/* Custom Dict & Reindex guide page (T13). Prefix: rx- */
+
+.rx-page h1 {
+  margin: 0 0 var(--space-3);
+}
+
+.rx-page h2 {
+  margin: var(--space-7) 0 var(--space-3);
+}
+
+.rx-page p {
+  line-height: var(--leading-normal);
+}
+
+.rx-lede {
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-5);
+}
+
+.rx-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-4) 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.rx-table th,
+.rx-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.rx-table th {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+/* State machine diagram (static SVG). */
+
+.rx-diagram {
+  margin: var(--space-4) 0 var(--space-5);
+  padding: var(--space-4);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.rx-diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rx-state {
+  fill: var(--bg);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.rx-state--staged {
+  stroke: var(--accent);
+}
+
+.rx-state-text {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  fill: var(--fg);
+}
+
+.rx-edge {
+  fill: none;
+  stroke: var(--fg-muted);
+  stroke-width: 1.5;
+}
+
+.rx-edge--abandon {
+  stroke-dasharray: 5 4;
+}
+
+.rx-arrow-head {
+  fill: var(--fg-muted);
+}
+
+.rx-edge-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  fill: var(--fg-muted);
+}

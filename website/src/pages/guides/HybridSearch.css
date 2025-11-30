@@ -1,0 +1,46 @@
+/* Hybrid Search guide page (T11). Prefix: hs- */
+
+.hs-page h1 {
+  margin: 0 0 var(--space-3);
+}
+
+.hs-page h2 {
+  margin: var(--space-7) 0 var(--space-3);
+}
+
+.hs-page p {
+  line-height: var(--leading-normal);
+}
+
+.hs-lede {
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-5);
+}
+
+.hs-formula {
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.hs-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-4) 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.hs-table th,
+.hs-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.hs-table th {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
