@@ -1,17 +1,17 @@
 {
   "name": "@vane-rs/node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "main": "main.js",
   "types": "main.d.ts",
   "files": ["main.js", "main.d.ts", "index.js", "index.d.ts"],
   "optionalDependencies": {
-    "@vane-rs/node-linux-x64-gnu": "0.1.1",
-    "@vane-rs/node-darwin-arm64": "0.1.1",
-    "@vane-rs/node-darwin-x64": "0.1.1",
-    "@vane-rs/node-win32-x64-msvc": "0.1.1"
+    "@vane-rs/node-linux-x64-gnu": "0.1.2",
+    "@vane-rs/node-darwin-arm64": "0.1.2",
+    "@vane-rs/node-darwin-x64": "0.1.2",
+    "@vane-rs/node-win32-x64-msvc": "0.1.2"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
+    "@napi-rs/cli": "^3",
     "ava": "^6.0.0"
   },
   "scripts": {
@@ -19,7 +19,7 @@
     "build:debug": "napi build --platform",
     "test": "ava",
     "check:thin": "sh scripts/check-thin.sh",
-    "prepublishOnly": "napi prepublish -t npm"
+    "prepublishOnly": "napi pre-publish -t npm"
   },
   "napi": {
     "binaryName": "vane",
@@ -29,16 +29,7 @@
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",
       "x86_64-pc-windows-msvc"
-    ],
-    "triples": {
-      "defaults": false,
-      "additional": [
-        "x86_64-unknown-linux-gnu",
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "x86_64-pc-windows-msvc"
-      ]
-    }
+    ]
   },
   "publishConfig": {
     "access": "public"
