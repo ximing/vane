@@ -9,9 +9,12 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# S14: 锁定 napi 版本，避免 reason 字段访问在新版本失效。
-napi = { version = "=2.16.13", features = ["napi8", "serde-json"] }
-napi-derive = "=2.16.13"
+# S14: napi 3.x——@napi-rs/cli 3.x 与 napi-derive 必须同 3.x（env var
+# NAPI_TYPE_DEF_TMP_FOLDER 配对；2.x 读旧名 TYPE_DEF_TMP_PATH 不生 index.js）。
+# reason 字段在 3.x 仍 pub（源码逐版查证 2.16.13/3.0.0/3.6.x 不变），e.reason
+# 直接读 + Error::new(status, reason) 构造均不变，零 Rust 源码改动。
+napi = { version = "3", features = ["napi8", "serde-json"] }
+napi-derive = "3"
 serde_json = "1"
 # 07：启用 dict-zh feature → Db::open 自动加载 vane-dict-zh 词典；
 # jieba 分词器在 collection 创建时自动注入词典（Task 2）。
