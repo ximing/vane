@@ -7,10 +7,9 @@
 #   3. 每变体：wasm-opt -Oz 优化 _bg.wasm → vane_wasm_{simd,scalar}.wasm
 #   4. 拷贝 JS 胶水 + .d.ts 到 dist/（双变体共享一份，导出一致）
 #   5. cp vane_wasm_scalar.wasm vane_wasm_bg.wasm 别名（§7.3 默认 URL 兼容）
-#   6. W8 校验：vane_wasm.js 含 __wbg_init + new URL(..., import.meta.url)
-#   7. 体积门禁（gzip ≤ 800KB，SPEC §13.2-3）
-#
-# 不含 tsc 编译 src/*.ts（Task 3 扩展；src/ 尚不存在）。
+#   6. tsc 编译 src/*.ts → dist/index.js / worker.js / probe.js + .d.ts（§7.4 Task 3）
+#   7. W8 校验：vane_wasm.js 含 __wbg_init + new URL(..., import.meta.url)
+#   8. 体积门禁（gzip ≤ 800KB，SPEC §13.2-3）
 #
 # 技术说明（与 task brief 第 2 步的差异）：
 #   task brief 称"scalar 不需要再跑 wasm-bindgen"。但 raw .wasm 的 __wbindgen_*
@@ -122,7 +121,26 @@ cp "$DIST/vane_wasm_scalar.wasm" "$DIST/vane_wasm_bg.wasm"
 echo "→ $DIST/vane_wasm_bg.wasm (scalar 别名，默认 URL 兼容)"
 
 # ============================================================
-# 6. W8 校验：vane_wasm.js 含 __wbg_init + new URL(..., import.meta.url)
+# 6. tsc 编译 src/*.ts → dist/index.js / worker.js / probe.js + .d.ts（§7.4 Task 3）
+#    前置依赖：dist/vane_wasm.d.ts（步骤 4 产出），src/vane_wasm.d.ts 桥接类型。
+#    tsc 不发射输入 .d.ts，dist/vane_wasm.d.ts 保留 wasm-bindgen 版本。
+# ============================================================
+echo ""
+echo "=== tsc compile src/*.ts → dist/ ==="
+TSC_BIN="bindings/web/node_modules/.bin/tsc"
+if [ ! -f "$TSC_BIN" ]; then
+  echo "FAIL: tsc not found at $TSC_BIN" >&2
+  echo "      Run 'cd bindings/web && npm install' first." >&2
+  exit 1
+fi
+"$TSC_BIN" -p bindings/web/tsconfig.json
+echo "→ $DIST/index.js + index.d.ts"
+echo "→ $DIST/worker.js + worker.d.ts"
+echo "→ $DIST/probe.js + probe.d.ts"
+echo "→ $DIST/types.js + types.d.ts"
+
+# ============================================================
+# 7. W8 校验：vane_wasm.js 含 __wbg_init + new URL(..., import.meta.url)
 # ============================================================
 echo ""
 echo "=== W8 wasm-bindgen 生成校验 ==="
@@ -137,7 +155,7 @@ fi
 echo "OK: __wbg_init + new URL(..., import.meta.url) 均存在"
 
 # ============================================================
-# 7. 体积门禁（gzip ≤ 800KB，SPEC §13.2-3）
+# 8. 体积门禁（gzip ≤ 800KB，SPEC §13.2-3）
 # ============================================================
 echo ""
 echo "=== Size gate (gzip ≤ 800KB) ==="

@@ -17,6 +17,11 @@
     "./package.json": "./package.json"
   },
   "optionalDependencies": { "@vane-rs/dict-zh": "2026.8.0" },
+  "devDependencies": { "typescript": "^5.7.0" },
+  "scripts": {
+    "build": "bash scripts/build-web.sh",
+    "tsc": "tsc"
+  },
   "publishConfig": { "access": "public" },
   "engines": { "node": ">=16" }
 }
