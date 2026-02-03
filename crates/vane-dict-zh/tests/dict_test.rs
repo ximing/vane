@@ -97,6 +97,46 @@ fn dict_has_substantial_vocab() {
     assert!(dict.freq("是").is_some(), "「是」应在词典中");
 }
 
+/// Task 6：第四渠道（WASM npm dictData）package.json 元数据校验。
+///
+/// @vane-rs/dict-zh npm 包的 data/dict.bin 必须与源 crates/vane-dict-zh/data/dict.bin 同源
+/// （package.json files 字段直接引用源文件路径，非拷贝）。本测试校验 package.json files +
+/// exports 配置正确，确保 npm pack 产物引用源文件 → 第四渠道与第一渠道字节一致。
+/// 字节级 npm pack 比对在 scripts/check-dict-hash.sh 中（CI 门禁）。
+#[test]
+fn npm_package_json_references_source_dict_bin() {
+    use serde_json::Value;
+
+    let pkg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/package.json");
+    let pkg = std::fs::read_to_string(pkg_path).expect("read package.json");
+    let v: Value = serde_json::from_str(&pkg).expect("parse package.json");
+
+    // files 字段含 data/dict.bin + data/sha256_prefix.bin
+    let files = v["files"].as_array().expect("files is array");
+    assert!(
+        files.iter().any(|f| f.as_str() == Some("data/dict.bin")),
+        "package.json files must include data/dict.bin"
+    );
+    assert!(
+        files
+            .iter()
+            .any(|f| f.as_str() == Some("data/sha256_prefix.bin")),
+        "package.json files must include data/sha256_prefix.bin"
+    );
+
+    // exports ./dict.bin → ./data/dict.bin（确保 import 解析到源文件）
+    assert_eq!(
+        v["exports"]["./dict.bin"].as_str(),
+        Some("./data/dict.bin"),
+        "exports ./dict.bin must point to ./data/dict.bin"
+    );
+    assert_eq!(
+        v["exports"]["./sha256_prefix.bin"].as_str(),
+        Some("./data/sha256_prefix.bin"),
+        "exports ./sha256_prefix.bin must point to ./data/sha256_prefix.bin"
+    );
+}
+
 /// gzip 体积估算（与 gen_dict.rs 同方法）。
 fn gzip_size(data: &[u8]) -> usize {
     use std::process::Command;
