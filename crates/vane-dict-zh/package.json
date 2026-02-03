@@ -3,7 +3,7 @@
   "version": "2026.8.0",
   "description": "Vane 中文词典数据包（dict.bin zstd 压缩 DAT + HMM，含 sha256_prefix 校验字节）",
   "license": "Apache-2.0",
-  "files": ["data/dict.bin", "data/sha256_prefix.bin"],
+  "files": ["data/dict.bin", "data/sha256_prefix.bin", "LICENSE"],
   "exports": {
     "./dict.bin": "./data/dict.bin",
     "./sha256_prefix.bin": "./data/sha256_prefix.bin",

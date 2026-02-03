@@ -64,4 +64,4 @@ npm install @vane-rs/dict-zh
 
 ## License
 
-Apache-2.0（见仓库根 [LICENSE](https://github.com/ximing/vane/blob/main/LICENSE)）。
+Apache-2.0（见同目录 [LICENSE](./LICENSE)）。
