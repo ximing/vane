@@ -1,0 +1,59 @@
+/* Web Integration guide page (T9). Prefix: webint- */
+
+.webint-page h1 {
+  margin: 0 0 var(--space-3);
+}
+
+.webint-page h2 {
+  margin: var(--space-7) 0 var(--space-3);
+}
+
+.webint-page h3 {
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+.webint-page p {
+  line-height: var(--leading-normal);
+}
+
+.webint-lede {
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-5);
+}
+
+/* Config-item tables (vite / webpack): compact reference. */
+
+.webint-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-4) 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.webint-table th,
+.webint-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.webint-table th {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.webint-table code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+/* Stack Callouts in the gotchas section with a tighter gap. */
+
+.webint-callouts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 var(--space-5);
+}
