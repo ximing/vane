@@ -51,8 +51,8 @@ npm run preview
 `npm run build` 产出 `dist/`，含：
 - `index.html` + `assets/index-*.js`（主线程 chunk）
 - `assets/worker-*.js`（worker chunk，@vane-rs/web 的 worker.js）
-- `assets/vane_wasm_simd-*.wasm` + `vane_wasm_scalar-*.wasm`（wasm 双变体）
-- `assets/dict-*.bin` + `sha256_prefix-*.bin`（@vane-rs/dict-zh 词典 asset）
+- `assets/vane_wasm_bg-*.wasm` + `vane_wasm_simd-*.wasm`（wasm 双变体：bg 为非 SIMD 回退，simd 为 SIMD 加速）
+- `assets/dict-*.bin`（@vane-rs/dict-zh 词典 asset；`sha256_prefix.bin` 仅 8 字节，vite 按 `assetsInlineLimit` 默认 4096 内联为 data URI，不单独产出文件）
 
 ## vite.config.ts 说明
 
