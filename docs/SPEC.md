@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.4）
+# Vane 技术规范（SPEC v1.5）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -369,8 +369,10 @@ crates/vane-core   # 检索核心；feature: std(默认) / wasm / jieba(M1)
 crates/vane-ffi    # cdylib + staticlib + cbindgen
 crates/vane-node   # napi-rs
 crates/vane-wasm   # wasm-bindgen + Worker 胶水 [M2]
+crates/vane-dict-zh # jieba-lite 词典数据 crate（include_bytes + DAT 序列化）[M1]；兼 npm 数据包源 [M3]
 bindings/go        # cgo 包装 + 预编译 .a
 bindings/node      # npm 包骨架
+bindings/web       # @vane-rs/web npm 包源（ESM glue + worker + dict_loader + TS 类型）[M3]
 ```
 
 ### 12.2 目标矩阵
@@ -378,24 +380,26 @@ bindings/node      # npm 包骨架
 | 产物 | target | 里程碑 |
 |---|---|---|
 | Node prebuilt（M0 即 4 个） | x86_64-linux-gnu / aarch64-apple-darwin / x86_64-apple-darwin / x86_64-pc-windows-msvc | M0 |
-| Node prebuilt 追加 | linux-musl ×2、linux-arm64、win-arm64（可选） | M1 |
+| Node prebuilt 追加（未实现，顺延） | linux-musl ×2、linux-arm64、win-arm64（可选） | M1 |
 | Go staticlib | 同 Node 矩阵（zig cc 交叉） | M1 |
 | wasm32-unknown-unknown | core CI check 门禁 | **M0 起** |
 | wasm 双变体（simd128 默认 / scalar fallback，init 探针选择） | 对外交付 | M2 |
+| Web npm @vane-rs/web | wasm-bindgen `--target web` ESM 双变体（simd/scalar）+ worker + dict_loader + TS 类型；vite/webpack 可 import；wasm ≤800KB gzip；npm publish（非 napi，直接 `npm publish --access public`） | M3 |
 
-### 12.3 词典分发（jieba-lite）[M1/M2]
+### 12.3 词典分发（jieba-lite）[M1/M2/M3]
 
 | 侧 | 通道 | 约束 |
 |---|---|---|
-| Node | `@vane/dict-zh` 平台无关数据包，主包**正式 dependency**；`@vane/slim` 无词典变体 | 禁止 postinstall 下载；包体 ≤1.5MB gzip（CI 门禁） |
+| Node | `crates/vane-dict-zh` cargo path 依赖，`include_bytes!` 编译期内嵌进 `vane-node` native 模块 | 禁止 postinstall 下载；包体 ≤1.5MB gzip（CI 门禁） |
 | Go | `go:embed dict.bin.gz`；`//go:build vane_nodict` 裁剪 tag；`vane.DictVersion()` | embed 二进制增量 <2MB（CI 门禁） |
-| WASM [M2] | 默认 CDN URL fetch → sha256 校验 → OPFS 缓存；支持 `dictData` 内联注入 | fetch 失败自动降级 bigram + console.warn，**不抛错** |
+| WASM CDN [M2] | **降级 fallback**：`dictData` 未注入时 CDN URL fetch → sha256 校验 → OPFS 缓存 | fetch 失败自动降级 bigram + console.warn，**不抛错** |
+| WASM npm dictData [M3] | `@vane-rs/dict-zh` npm 包 `data/dict.bin`，Web 端 import → fetch + arrayBuffer → VaneWorker `dictData` 内联注入（**优先于 CDN**）；零强制 CDN | 包体 ≤1.5MB gzip（CI 门禁） |
 
-词典独立日历版本化；库 release 前校验三渠道所钉词典版本哈希一致，不一致阻断发版。
+词典独立日历版本化；库 release 前校验四渠道所钉词典版本哈希一致（`scripts/check-dict-hash.sh` + `crates/vane-dict-zh/tests/dict_tests.rs`），不一致阻断发版。
 
 ### 12.4 版本与发布
 
-crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本驱动；产物命名 `libvane-{version}-{triple}.{a|node|wasm}`。
+crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ npm `@vane-rs/web` 四端版本号严格同步，单一 release 脚本驱动；产物命名 `libvane-{version}-{triple}.{a|node|wasm}`。`@vane-rs/dict-zh` 走独立日历版（`YYYY.M.0`），与库 semver 解耦，由 §12.3 四渠道哈希一致门禁对齐。
 
 ---
 
@@ -416,8 +420,9 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 
 1. hybrid recall@10 ≥ 0.95（相对暴力双路+RRF 基线），五档选择率回归。
 2. 中文分词（M1）：① 200 句测试集与 jieba-rs 原版切分 100% 一致；② 中文维基 500 篇 + 50 查询，jieba-lite 相对 bigram nDCG@10 不退步（≥0%，M2 实测 +0.4%——bigram 在真实维基为强基线，数学上限≈7.5%）；相对 bigram ≥15% 提升由代表性边界歧义语料（合成 trap corpus，M1 实测 +84%）承载；相对完整版 nDCG@10 差 <2% 由 ① 的 200 句 100% 切分一致性覆盖（切分一致→nDCG 差 0%）；③ 20 个生造词注入 userDict 后单 token 入索引、短语命中 100%；④ 缺词典自动降级不抛错。
-3. 体积：核心 wasm gzip ≤ 800KB（含 jieba 代码、不含词典）；全功能 ≤ 1.2MB；`@vane/dict-zh` ≤ 1.5MB；Go embed 增量 < 2MB；500KB 为 M2 优化目标非门禁。
-4. 平台四包管理器（npm/yarn/pnpm/bun）安装矩阵通过。
+3. 体积：核心 wasm gzip ≤ 800KB（含 jieba 代码、不含词典）；全功能 ≤ 1.2MB；`@vane-rs/dict-zh` ≤ 1.5MB；`@vane-rs/web` 双变体（simd128/scalar）wasm 各 ≤ 800KB gzip；Go embed 增量 < 2MB；500KB 为 M2 优化目标非门禁。
+4. 平台四包管理器（npm/yarn/pnpm/bun）安装矩阵通过（`@vane-rs/node`）。
+5. Web npm 安装门禁 [M3]：`npm i @vane-rs/web @vane-rs/dict-zh` 在 vite/webpack 可 import + build（install-matrix 扩展或 `examples/vite` + `examples/webpack` build 冒烟）。
 
 ### 13.3 工程纪律门禁
 
@@ -459,3 +464,4 @@ crates.io / npm / Go module 三端版本号严格同步，单一 release 脚本�
 - **v1.2**（2026-08-09）：M2 scoping 检查点后三处修订（用户批准）。S1 §13.1 冷启动承诺改为「元数据 open <1s（vectors/stored 懒加载，M2 实测背书）；首次向量查询触发 vectors 加载 <3s」，消解 M1 实测 1573ms 未达 <1s 的遗留（SegmentReader OnceLock 懒加载，不改 §4 IDL 签名）。S2 §6.2 stored.bin 引入 per-file format_version（每文件独立递增，替代全局共用常量）+ v1(裸JSON)/v2(zstd) 双模读取（不做原地迁移）；补懒加载语义注释。S3 §14 I-5 释义澄清：`cfg(feature)` 能力开关（如 zstd-encode）允许出现在 segment 编解码处，`cfg(target)` 平台分支仍仅限 VFS/Executor。
 - **v1.3**（2026-08-10）：M2-13 真实维基 nDCG corpus 落地后一处修订（用户批准）。S1 §13.2-2 ② 修订：真实中文维基 500 篇上 jieba-lite 相对 bigram nDCG@10 门禁从「提升 ≥15%」改为「不退步（≥0%，实测 +0.4%）」——bigram 在真实维基为强基线（nDCG≈0.93，数学上限≈7.5%），+15% 仅在合成边界陷阱语料可达（M1 实测 +84%，由代表性边界歧义 corpus 承载该硬门禁）；相对完整版 <2% 由 200 句 100% 切分一致性覆盖。
 - **v1.4**（2026-08-10）：post-v0.1.1 f32 距离 SIMD128 显式向量化需要，一处修订（用户批准）。S1 §14 I-5 释义扩展（§11 同步）：`cfg(target_feature)` 用于同一算法的向量化/标量双实现（如 f32 距离核的 simd128/标量双路径，归约顺序逐位对齐保证双变体 top-10 一致）视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中（向量化能力门控可与 `target_arch` 组合，如 `cfg(all(target_arch = "wasm32", target_feature = "simd128"))`，组合整体仍视为能力开关而非平台分支——澄清，非扩大）；`cfg(target_arch)`/`cfg(target_os)` 平台分支仍仅限 VFS/Executor 实现。实现参照 commit 5668479（`crates/vane-core/src/vector/mod.rs` f32 距离三核 cfg(target_feature="simd128") 双路径）。
+- **v1.5**（2026-08-11）：M3 Web npm 包交付后五处修订（用户批准）。S1 §12.1 Workspace 补全：补 `crates/vane-dict-zh`（jieba-lite 词典数据 crate，M1 起漏列）+ `bindings/web`（@vane-rs/web npm 包源）[M3]。S2 §12.2 目标矩阵三端→四端：加第六行 Web npm `@vane-rs/web`（wasm-bindgen `--target web` ESM 双变体 simd/scalar + worker + dict_loader + TS 类型，vite/webpack 可 import，wasm ≤800KB gzip，`npm publish --access public`）；Node prebuilt 追加目标标注「（未实现，顺延）」——M1 已完成但 musl/arm64-win 从未实现（release.yml 仅 4 平台），保留规范意图 + 诚实标注现状（决策点 1，用户拍板方案 B）。S3 §12.3 词典分发三渠道→四渠道：Node 通道修正为 `crates/vane-dict-zh` cargo path 依赖 `include_bytes!` 编译期内嵌（非 npm 数据包），删 `@vane/slim`（决策点 2，修正错误——`@vane/slim` 从未存在，Node 端词典是编译期内嵌无「无词典变体」概念）；scope `@vane/dict-zh`→`@vane-rs/dict-zh`（R4 修正）；WASM CDN [M2] 降级为 fallback（`dictData` 优先）；新增第四渠道 WASM npm dictData [M3]（`@vane-rs/dict-zh` npm 包 `data/dict.bin`，Web 端 import → fetch + arrayBuffer → VaneWorker `dictData` 内联注入，优先于 CDN，零强制 CDN）；末句三渠道→四渠道 + `scripts/check-dict-hash.sh` + `crates/vane-dict-zh/tests/dict_tests.rs` 引用。S4 §12.4 版本与发布三端→四端：crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ npm `@vane-rs/web` 四端版本号严格同步；`@vane-rs/dict-zh` 走独立日历版（`YYYY.M.0`），与库 semver 解耦。S5 §13.2 质量门禁：§13.2-3 scope `@vane/dict-zh`→`@vane-rs/dict-zh` + 补 `@vane-rs/web` 双变体（simd128/scalar）wasm 各 ≤800KB gzip；§13.2-4 加「（`@vane-rs/node`）」限定；新增第 5 项 Web npm 安装门禁 [M3]（`npm i @vane-rs/web @vane-rs/dict-zh` 在 vite/webpack 可 import + build）。不触碰 §1-§11 / §13.1 / §13.3 / §14 / §15（M3 不碰 core 语义、不变量、性能承诺、里程碑验收）。
