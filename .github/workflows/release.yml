@@ -240,20 +240,26 @@ jobs:
           files: |
             artifacts/vane-go-*/libvane_ffi-*.a
             artifacts/vane-wasm/*.wasm
+      - name: Publish @vane-rs/dict-zh to npm
+        # @vane-rs/dict-zh 纯数据包，非 napi，不需 build job。源目录 data/ + package.json + LICENSE
+        # 已在仓库（package.json files：data/dict.bin + data/sha256_prefix.bin + LICENSE）。
+        # 顺序（C4 修复）：dict-zh 必须在 @vane-rs/web 之前 publish。web 的 package.json
+        # 声明 optionalDependencies: { "@vane-rs/dict-zh": "2026.8.0" }——先发 dict-zh 确保
+        # web publish 时 optionalDep 指向已存在的版本；若 dict-zh 失败，step 失败阻塞
+        # web publish（保守设计，避免断裂 optionalDep 上线：用户装 web 后中文分词不可用）。
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: crates/vane-dict-zh
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish @vane-rs/web to npm
         # @vane-rs/web 非 napi 包，直接 npm publish --access public（package.json publishConfig.access=public 已设）。
         # dist/ 由 build-web artifact 暂存；package.json + README + LICENSE 由 checkout 提供。
         # setup-node registry-url 已在 release job 顶部配置（npm publish 读 ~/.npmrc 认证）。
+        # 顺序（C4 修复）：在 @vane-rs/dict-zh publish 之后——dict-zh 是 web 的 optionalDep，
+        # 先发依赖包确保 web 上线时 optionalDep 指向已存在版本。
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: bindings/web
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish @vane-rs/dict-zh to npm
-        # @vane-rs/dict-zh 纯数据包，非 napi，不需 build job。源目录 data/ + package.json + LICENSE
-        # 已在仓库（package.json files：data/dict.bin + data/sha256_prefix.bin + LICENSE）。
-        if: startsWith(github.ref, 'refs/tags/')
-        working-directory: crates/vane-dict-zh
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
