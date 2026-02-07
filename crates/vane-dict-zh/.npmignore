@@ -1,0 +1,23 @@
+# vane-dict-zh Rust 源码（编译期内嵌，npm 包不需要）
+src/
+
+# 测试与基准（dev-only，不发 npm）
+tests/
+benches/
+
+# 示例生成工具（dev-only）
+examples/
+
+# Cargo 产物（Rust crate 配置，npm 包是独立通道）
+Cargo.toml
+Cargo.lock
+target/
+
+# Rust 产物
+*.rs
+
+# 编辑器/系统杂物
+.DS_Store
+*.swp
+.vscode/
+.idea/
