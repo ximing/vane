@@ -1,0 +1,21 @@
+{
+  "name": "vane-webpack-example",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "build": "webpack --mode production",
+    "serve": "webpack serve --mode development"
+  },
+  "dependencies": {
+    "@vane-rs/web": "file:../../bindings/web",
+    "@vane-rs/dict-zh": "file:../../crates/vane-dict-zh"
+  },
+  "devDependencies": {
+    "html-webpack-plugin": "^5.6.3",
+    "ts-loader": "^9.5.2",
+    "typescript": "^5.8.0",
+    "webpack": "^5.97.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^5.2.0"
+  }
+}

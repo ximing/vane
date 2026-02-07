@@ -1,0 +1,27 @@
+{
+  "name": "@vane-rs/web",
+  "version": "0.2.0",
+  "description": "Vane 混合检索库 Web 端 npm 包（wasm-bindgen --target web ESM 双变体 + worker + dictData 内联）",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": ["./dist/worker.js", "./dist/vane_wasm.js", "**/*.wasm"],
+  "files": ["dist/", "README.md", "LICENSE"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" },
+    "./worker": { "types": "./dist/worker.d.ts", "import": "./dist/worker.js", "default": "./dist/worker.js" },
+    "./probe": { "types": "./dist/probe.d.ts", "import": "./dist/probe.js", "default": "./dist/probe.js" },
+    "./vane_wasm.js": "./dist/vane_wasm.js",
+    "./package.json": "./package.json"
+  },
+  "optionalDependencies": { "@vane-rs/dict-zh": "2026.8.0" },
+  "devDependencies": { "typescript": "^5.7.0" },
+  "scripts": {
+    "build": "bash scripts/build-web.sh",
+    "tsc": "tsc"
+  },
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=16" }
+}

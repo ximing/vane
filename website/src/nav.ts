@@ -26,6 +26,7 @@ export const docsNav: NavSection[] = [
       { label: 'Tokenizers', path: '/guides/tokenizers' },
       { label: 'Custom Dict & Reindex', path: '/guides/reindex' },
       { label: 'Persistence & Visibility', path: '/guides/persistence' },
+      { label: 'Web Integration', path: '/guides/web-integration' },
     ],
   },
   {
