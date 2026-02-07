@@ -155,3 +155,37 @@
   - C1 typo 修复：SPEC 两处 dict_tests.rs→dict_test.rs（文件名单数，0 残留）。
   - **Task 13：complete（commits ca19dc5..HEAD，简化 review——纯文档 + 用户已批准 + 7 验证点过 + C1 typo 已修）**。
   - ⚠️ 跨任务待验证（reviewer 标 Cannot verify）：@vane-rs/dict-zh npm 可用性(Task 5) / vite 集成(Task 7) / npm pack 产物(Task 4) / probe.js 对齐(Task 3) / worker.js 显式 URL(Task 3) / dict-zh exports(5)。无 Task 2 gap。
+
+## M3 完成记录（2026-08-11）
+
+### 发版 v0.2.0 验证（四端全绿）
+- **release.yml tag 触发 run 31467745900 conclusion: success**——所有 build job（build 4 平台 + build-go 4 平台 + build-wasm + build-web）+ release job 全 success。
+- **npm 四端 published**：
+  - @vane-rs/node@0.2.0 ✅（napi pre-publish 发 4 平台包）
+  - @vane-rs/dict-zh@2026.8.0 ✅（`+ @vane-rs/dict-zh@2026.8.0`，纯数据包 5 文件 1.5MB，npm registry 传播后 view 确认）
+  - @vane-rs/web@0.2.0 ✅（`+ @vane-rs/web@0.2.0`，ESM 双变体 + worker + TS 类型）
+- **GitHub Release v0.2.0**：10 assets（4 .a + 4 .node + 2 .wasm），published 2026-08-11T07:10:23Z。
+- **publish 顺序**：dict-zh 先 web 后（C4 修复生效，dict-zh 成功后 web 发布，optionalDep 指向已存在版本）。
+- **ci.yml run 31467253663 全绿**：fmt/clippy/test/dict-hash/dict-size/corpus-compat/recall/ndcg-wiki/go-host/wasm-recall/jieba-compat/wasm32-check/wasm32-size/deny/go-cross×4 全 success。
+
+### Task 14：complete
+- 分支 feat/m3-web-npm 合并 main（merge 38573e3）+ tag v0.2.0 push。
+- release.yml workflow_dispatch 四端构建验证全绿（run 31467282725）+ tag 触发真正发版全绿（run 31467745900）。
+- npm 四端 + GitHub Release 全部 published。
+
+### M3 DoD 全部达成
+- ✅ v0.1.2 发版闭环（阶段零）
+- ✅ @vane-rs/web npm published（wasm-bindgen --target web ESM 双变体 + worker + dict_loader + TS 类型，vite/webpack 可 import，wasm ≤800KB gzip：simd 318KB / scalar 320KB）
+- ✅ @vane-rs/dict-zh npm published（dict.bin，Web 端 dictData 内联，零强制 CDN）
+- ✅ vite + webpack 示例可用（examples/，npm i → import → 检索，零 clone/build/CDN）
+- ✅ 文档站集成指南（Web Integration 页，/vane/guides/web-integration）
+- ✅ release.yml 四端发布（Node + Go .a + WASM Release + Web npm + dict-zh npm），v0.2.0 发版
+- ✅ SPEC v1.5（§12.2 四端 + §12.3 四渠道 + §13.2 Web 门禁，用户批准）+ changelog
+- ✅ cargo test --workspace 全绿 + clippy/fmt/wasm32 check/check-dict-hash/deny 不回退
+- ✅ docs/plans/m3/ 计划 + 总结报告
+- ⏸ install-matrix 扩展（@vane-rs/web vite/webpack build 冒烟）：Task 10 deferred，发版后可用 install-matrix 扩展补（@vane-rs/web + @vane-rs/dict-zh 已发 npm，可真正 npm i 测试）
+
+### M3 冻结契约全程遵守
+- crates/vane-wasm/ 零 .rs 改动（VaneWorker JS 契约冻结，@vane-rs/web 是其 npm 包装）
+- crates/vane-dict-zh/ src/ + data/ + Cargo.toml 零改动（只加 package.json/.npmignore/README/LICENSE）
+- core 禁 std::fs/std::net/mmap + 依赖黑名单 + MoSCoW Won't-have 全程不触碰
