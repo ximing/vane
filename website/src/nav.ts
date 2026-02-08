@@ -39,6 +39,7 @@ export const docsNav: NavSection[] = [
       { label: 'search', path: '/api/search' },
       { label: 'maintenance', path: '/api/maintenance' },
       { label: 'errors', path: '/api/errors' },
+      { label: 'web (@vane-rs/web)', path: '/api/web' },
     ],
   },
   {
