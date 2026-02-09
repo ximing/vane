@@ -7,7 +7,7 @@ import './api.css';
 const IDL = `// Error surface contract (SPEC §9 / §10)
 // Node:     Promise rejects with VaneError { code, name, message }
 // Go:       (T, error) — error is *vane.VaneError { Code, Message }
-// Browser:  worker Promise rejects; the message carries the E_* name
+// Browser:  Vane Promise rejects; the message carries the E_* name
 // C ABI:    int32_t return code (0 = OK, negative = code);
 //           details via vane_last_error_message(h) -> char*`;
 
@@ -42,8 +42,9 @@ if errors.As(err, &ve) {
     }
 }`;
 
-const BROWSER_SNIPPET = `try {
-  await worker.add(col, [{ id: 'x', text: 'hi', vector: [1.0, 2.0] }]);
+const BROWSER_SNIPPET = `// 假设 vane 已由 createVane({dictData}) 创建，col = await vane.collection(...)
+try {
+  await vane.add(col, [{ id: 'x', text: 'hi', vector: [1.0, 2.0] }]); // wrong dim
 } catch (err) {
   // The rejected value's text carries the SPEC §10 error name.
   const msg = String(err);
@@ -51,8 +52,9 @@ const BROWSER_SNIPPET = `try {
     // fix the document shape
   }
 }
-// Note: dictionary problems never reject here — the browser
-// auto-degrades jieba → cjk_bigram with a console warning.`;
+// Note: dictionary problems never reject here — with dictData inlined
+// from @vane-rs/dict-zh there is no CDN fetch to fail; without dictData
+// the browser auto-degrades jieba → cjk_bigram with a console warning.`;
 
 export default function ApiErrors() {
   return (
@@ -168,7 +170,9 @@ export default function ApiErrors() {
           binding automatically degrades to <code>cjk_bigram</code> with a console warning
           instead of failing (SPEC §10 note). Declaring <code>tokenizer: "jieba"</code>{' '}
           in the browser is therefore always safe — you get jieba when the dictionary is
-          available and bigram search when it is not.
+          available and bigram search when it is not. When <code>dictData</code> is
+          inlined from <code>@vane-rs/dict-zh</code> there is no network fetch at
+          all, so the CDN failure path is unreachable too.
         </Callout>
 
         <h2 id="handling">Handling errors</h2>
@@ -183,7 +187,7 @@ export default function ApiErrors() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="errors.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="errors.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="errors.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="errors.ts" />}
         />
       </div>
     </DocsLayout>
