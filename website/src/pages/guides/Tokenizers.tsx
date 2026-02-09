@@ -163,9 +163,9 @@ export default function Tokenizers() {
             <tr>
               <td>Browser (WASM)</td>
               <td>
-                Fetched from a CDN URL → sha256-verified → cached in OPFS;
-                inline <code>dictData</code> injection supported for
-                offline/self-hosted deployments
+                Inline <code>dictData</code> from <code>@vane-rs/dict-zh</code>
+                (zero-CDN, transferable); jsdelivr CDN fallback when{' '}
+                <code>dictData</code> is omitted
               </td>
               <td>
                 On fetch failure, automatically degrades to{' '}
@@ -216,18 +216,30 @@ export default function Tokenizers() {
             />
           }
           browser={
-            <CodeBlock
-              lang="js"
-              title="user-dict.js"
-              code={`await col.setUserDict([
-  '布地奈德',
-  { term: 'PD-1抑制剂', freq: 100 },
-]);
-
-// Offline/self-hosted? Inject the base dictionary inline instead of
-// relying on the CDN fetch:
-//   db.collection('docs', schema, { tokenizer: 'jieba', dictData: bytes })`}
-            />
+            <>
+              <CodeBlock
+                lang="ts"
+                title="create-with-dict.ts"
+                code={`// vane.collection(name, schema, opts): Promise<number>
+// 域词须在 collection 创建时传入 userDict（Web 端无运行时 setUserDict）
+const col = await vane.collection('docs', schema, {
+  tokenizer: 'jieba',
+  userDict: [
+    '布地奈德',                        // bare term → highest built-in frequency
+    { term: 'PD-1抑制剂', freq: 100 }, // explicit frequency
+  ],
+});`}
+              />
+              <Callout type="gap" title="Web has no runtime setUserDict">
+                The <code>@vane-rs/web</code> <code>Vane</code> interface does not
+                expose <code>setUserDict</code>. Domain terms must be passed as{' '}
+                <code>userDict</code> at collection creation time; to change them
+                later, drop the collection and recreate, or use the Node / Go
+                binding. The base dictionary is loaded once at{' '}
+                <code>createVane</code> via <code>dictData</code>, not per
+                collection.
+              </Callout>
+            </>
           }
         />
         <Callout type="note" title="setUserDict stages, it does not apply">
