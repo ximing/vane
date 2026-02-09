@@ -34,14 +34,15 @@ err := col.Add([]vane.Doc{
 err = col.Flush()                          // atomically visible now
 removed, err := col.Delete([]string{"b"})  // → 1: tombstone count`;
 
-const BROWSER_SNIPPET = `// worker.add(col, docs): Promise<u64> (accepted count)
-await worker.add(col, [
+const BROWSER_SNIPPET = `// 假设 vane 已由 createVane({dictData}) 创建，col = await vane.collection(...)
+// vane.add(col, docs): Promise<number> (accepted count)
+const accepted = await vane.add(col, [
   { id: 'a', text: 'hello world', vector: [1, 0, 0, 0], meta: { lang: 'en' } },
   { id: 'b', text: 'foo bar',     vector: [0, 1, 0, 0], meta: { lang: 'en' } },
 ]);
 
-await worker.flush(col);                        // atomically visible now
-const removed = await worker.delete(col, ['b']); // → 1: tombstone count`;
+await vane.flush(col);                        // atomically visible now
+const removed = await vane.delete(col, ['b']); // → 1: tombstone count`;
 
 export default function ApiDocuments() {
   return (
@@ -61,7 +62,7 @@ export default function ApiDocuments() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="docs.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="docs.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="docs.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="docs.ts" />}
         />
 
         <h2 id="document">Document</h2>

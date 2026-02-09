@@ -40,18 +40,19 @@ if err := db.Export("./backup.vane"); err != nil {
 }
 db.Close()`;
 
-const BROWSER_SNIPPET = `await worker.compact(col);
+const BROWSER_SNIPPET = `// 假设 vane 已由 createVane({dictData}) 创建，col = await vane.collection(...)
+await vane.compact(col);
 
-// Browser: reindex runs to completion inside the call and
+// Web: reindex runs to completion inside the call and
 // resolves with the final progress (1.0 when done).
-await worker.reindex(col);
+const progress: number = await vane.reindex(col);
 
 // export writes the snapshot into the VFS container; readFile
 // returns its bytes for a Blob download in the main thread.
-await worker.export('backup.vane');
-const bytes = await worker.readFile('backup.vane'); // Uint8Array
+await vane.export('backup.vane');
+const bytes: Uint8Array = await vane.readFile('backup.vane');
 
-await worker.close();`;
+await vane.close();`;
 
 export default function ApiMaintenance() {
   return (
@@ -71,7 +72,7 @@ export default function ApiMaintenance() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="maintenance.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="maintenance.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="maintenance.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="maintenance.ts" />}
         />
 
         <h2 id="compact">compact</h2>
@@ -92,9 +93,8 @@ export default function ApiMaintenance() {
           stay read-only until an atomic switch, so queries keep working throughout. The
           returned{' '}
           <code>ReindexHandle</code> is pollable (<code>progress(): f32</code>) or
-          blocking (<code>wait(): Result&lt;()&gt;</code>). On the browser worker,{' '}
-          <code>reindex</code> runs synchronously inside the call and resolves with the
-          final progress (<code>1.0</code> when done). Full state machine:{' '}
+          blocking (<code>wait(): Result&lt;()&gt;</code>). On the browser, <code>vane.reindex(col)</code> runs synchronously
+          inside the call and resolves with the final progress (<code>1.0</code> when done). Full state machine:{' '}
           <Link to="/guides/reindex">Custom Dict &amp; Reindex</Link>.
         </p>
 
@@ -103,7 +103,7 @@ export default function ApiMaintenance() {
           <code>Db.export(destPath)</code> packs the whole database into a single-file
           snapshot — the backup and migration format. On the browser the snapshot is
           written inside the VFS container; read it back with{' '}
-          <code>worker.readFile(dest)</code> (<code>Uint8Array</code>) and hand it to a{' '}
+          <code>vane.readFile(dest)</code> (<code>Uint8Array</code>) and hand it to a{' '}
           <code>Blob</code> for download.
         </p>
 
@@ -111,7 +111,7 @@ export default function ApiMaintenance() {
         <p>
           Flushes pending state and releases the handle. After <code>close</code>, any
           further call on the object fails. In Go, collections have their own{' '}
-          <code>col.Close()</code>; in the browser, <code>worker.close()</code>{' '}
+          <code>col.Close()</code>; in the browser, <code>vane.close()</code>{' '}
           invalidates every handle the worker issued.
         </p>
 

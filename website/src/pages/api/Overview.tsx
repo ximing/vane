@@ -38,16 +38,31 @@ _ = col.Add(docs)
 _ = col.Flush()
 hits, err := col.Search(vane.SearchQuery{Text: "hello", TopK: 10})`;
 
-const BROWSER_SNIPPET = `import init, { VaneWorker } from './pkg/vane_wasm.js';
+const BROWSER_SNIPPET = `import { createVane } from '@vane-rs/web';
+import type { Schema, Hit } from '@vane-rs/web';
+import dictBinUrl from '@vane-rs/dict-zh/dict.bin';
 
-await init();
-const worker = await VaneWorker.create({ vfs: 'opfs', dbPath: 'vane.db' });
-await worker.open('vane.db', {});
-const col = await worker.collection('docs', schema, { tokenizer: 'standard' });
-await worker.add(col, docs);
-await worker.flush(col);
-const hits = JSON.parse(await worker.search(col, { text: 'hello', topK: 10 }));
-await worker.close();`;
+// npm install @vane-rs/web @vane-rs/dict-zh
+const dictData = new Uint8Array(await (await fetch(dictBinUrl)).arrayBuffer());
+const vane = await createVane({ vfs: 'opfs', dbPath: 'vane.db', dictData });
+
+await vane.open();
+const col = await vane.collection('docs', {
+  fields: [
+    { name: 'body', type: 'text' },
+    { name: 'vec', type: 'vector', dim: 4, metric: 'cosine' },
+  ],
+}, { tokenizer: 'jieba' });
+
+await vane.add(col, [
+  { id: 'a', text: 'hello world', vector: [1, 0, 0, 0] },
+  { id: 'b', text: 'foo bar baz', vector: [0, 1, 0, 0] },
+]);
+await vane.flush(col);
+const hits: Hit[] = await vane.search(col, {
+  text: 'hello', vector: [1, 0, 0, 0], topK: 3, mode: 'hybrid',
+});
+await vane.close();`;
 
 const NODE_ERR = `import vane, { VaneError } from '@vane-rs/node';
 
@@ -66,7 +81,7 @@ if errors.As(err, &ve) {
 }`;
 
 const BROWSER_ERR = `try {
-  await worker.search(col, { text: 'hello', topK: 2000 });
+  await vane.search(col, { text: 'hello', topK: 2000 });
 } catch (err) {
   // Rejected value's text carries the SPEC §10 error name.
   console.error(String(err)); // contains 'E_INVALID_ARG'
@@ -91,15 +106,17 @@ export default function ApiOverview() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="app.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="main.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="worker.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="main.ts" />}
         />
 
         <h2 id="verb-table">Verb table</h2>
         <p>
           The complete call surface (SPEC §4.1, frozen since M0) with its three-side
           signature mapping (SPEC §4.3). JS calls are async and return Promises; Go calls
-          block and are goroutine-safe. The browser binding exposes the same verbs through
-          the <code>VaneWorker</code> wasm glue, addressing collections by handle.
+          block and are goroutine-safe. The browser binding exposes the same verbs through a
+          <code>createVane</code> factory that returns a handle-based <code>Vane</code>{' '}
+          instance — <code>collection()</code> returns <code>Promise&lt;number&gt;</code>{' '}
+          and every subsequent verb takes <code>col: number</code> as its first argument.
         </p>
         <div className="api-table-wrap">
           <table className="api-table">
@@ -201,7 +218,7 @@ export default function ApiOverview() {
         <LangTabs
           node={<CodeBlock code={NODE_ERR} lang="js" title="errors.mjs" />}
           go={<CodeBlock code={GO_ERR} lang="go" title="errors.go" />}
-          browser={<CodeBlock code={BROWSER_ERR} lang="js" title="errors.js" />}
+          browser={<CodeBlock code={BROWSER_ERR} lang="ts" title="errors.ts" />}
         />
       </div>
     </DocsLayout>

@@ -35,14 +35,17 @@ if err != nil {
 }
 defer db.Close()`;
 
-const BROWSER_SNIPPET = `import init, { VaneWorker } from './pkg/vane_wasm.js';
+const BROWSER_SNIPPET = `import { createVane } from '@vane-rs/web';
+import dictBinUrl from '@vane-rs/dict-zh/dict.bin';
 
-await init();
-// In the browser the database lives inside a Dedicated Worker; open() goes
-// through the VaneWorker glue and the path is a logical name inside the VFS.
-const worker = await VaneWorker.create({ vfs: 'opfs', dbPath: 'vane.db' });
-await worker.open('vane.db', {
-  persistence: 'persistent', // requests navigator.storage.persist()
+// npm install @vane-rs/web @vane-rs/dict-zh
+const dictData = new Uint8Array(await (await fetch(dictBinUrl)).arrayBuffer());
+const vane = await createVane({ vfs: 'opfs', dbPath: 'vane.db', dictData });
+
+// open(path, opts) — path defaults to 'vane.db' and should match dbPath.
+// persistence: 'persistent' requests navigator.storage.persist().
+await vane.open('vane.db', {
+  persistence: 'persistent',
 });`;
 
 export default function ApiOpen() {
@@ -63,7 +66,7 @@ export default function ApiOpen() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="open.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="open.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="open.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="open.ts" />}
         />
 
         <h2 id="open-options">OpenOptions</h2>
@@ -126,7 +129,7 @@ export default function ApiOpen() {
           browser, a missing storage capability (no OPFS with no IndexedDB fallback
           enabled) fails with <code>E_UNSUPPORTED</code> (-10). Node rejects the returned
           Promise with a <code>VaneError</code>; Go returns a <code>*vane.VaneError</code>;
-          the browser worker rejects with the same error name. See{' '}
+          the browser rejects with the same error name. See{' '}
           <Link to="/api/errors">Error Codes</Link>.
         </p>
       </div>
