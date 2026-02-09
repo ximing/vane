@@ -51,8 +51,8 @@ M0 napi-rs 用法从未 CI 验证，release.yml 暴露连环兼容问题：
 
 ## 遗留
 - **P2 5万 Playwright 浏览器 CI**：用户跳过，post-发版可选
-- **napi-rs 2.x 锁定**：3.x 未跟进，未来升级需重测发布流程
-- **f32 距离 SIMD 未向量化**（M2-05 遗留）：post-发版 trait Distance SPEC 修订
+- ~~**napi-rs 2.x 锁定**：3.x 未跟进，未来升级需重测发布流程~~ → ✅ 已于 post-v0.1.1 升级 3.x（`@napi-rs/cli` ^3 + napi/napi-derive 3.x，ff-merge `chore/napi-cli-3x`）并发 v0.1.2；详见 `docs/plans/post-v0.1.1/napi-cli-3x-plan.md`。
+- ~~**f32 距离 SIMD 未向量化**（M2-05 遗留）：post-发版 trait Distance SPEC 修订~~ → ✅ 已于 post-v0.1.1 落地（f32x4 双路径 4 路累加归约逐位一致，SPEC v1.4 I-5 释义扩展）；详见 `docs/plans/post-v0.1.1/SUMMARY.md`。
 - **百万规模 #[ignore] CI heavy job**：可选增强
 - **双变体体积门禁**：可选增强
 

@@ -181,9 +181,11 @@ napi-build = "2"   # 不变（2.4.1）
 
 ## 6. 完成定义（DoD）
 
-- [ ] @napi-rs/cli 3.x 升级（devDep + release.yml 两处 pin + napi 配置 + scripts.prepublishOnly）。
-- [ ] release.yml 3.x 命令流程验证（workflow_dispatch build + release job 绿）。
-- [ ] 打 tag v0.1.2 发版 + `@vane-rs/node@0.1.2` + 4 平台包 published。
-- [ ] install-matrix 12/12 全绿。
-- [ ] CI 16 jobs 不回退。
-- [ ] 本计划 + 总结报告落 `docs/plans/post-v0.1.1/`。
+> ✅ 计划已完成（2026-08-11）。`chore/napi-cli-3x` 已 ff-merge 回 main；`@napi-rs/cli` ^3 + napi/napi-derive 3.x 落地；`@vane-rs/node@0.1.2` npm published（含 4 平台包），其后 v0.2.0 已在此基础上发版。状态以实际代码 + `npm view @vane-rs/node versions` 为准。
+
+- [x] @napi-rs/cli 3.x 升级（devDep + release.yml 两处 pin + napi 配置 + scripts.prepublishOnly）。
+- [x] release.yml 3.x 命令流程验证（workflow_dispatch build + release job 绿）。
+- [x] 打 tag v0.1.2 发版 + `@vane-rs/node@0.1.2` + 4 平台包 published。
+- [x] install-matrix 12/12 全绿。
+- [x] CI 16 jobs 不回退（M3 后 ci 19 jobs 全绿）。
+- [x] 本计划落 `docs/plans/post-v0.1.1/`（本文）。**注**：T6 计划的独立总结报告 `napi-cli-3x-summary.md` 未创建（3.x 正解见本文 §3，发版结果见 npm + GitHub Release v0.1.2），如需补档可后补。
