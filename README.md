@@ -142,16 +142,16 @@ embedded dictionary (degrades to `cjk_bigram`).
 ### Browser
 
 ```bash
-# Requires the wasm32-unknown-unknown target + wasm-opt (binaryen)
-bash scripts/build-wasm-variants.sh
-# → target/wasm-variants/vane_wasm_simd.wasm   (~312 KB gzip)
-#   target/wasm-variants/vane_wasm_scalar.wasm (~314 KB gzip)
+npm install @vane-rs/web @vane-rs/dict-zh
 ```
 
-Two variants are produced (SIMD128 + scalar); a runtime `WebAssembly.validate` probe picks
-the right one. The dictionary is never baked into the `.wasm` (size red line: core ≤ 800 KB
-gzip) — it is fetched from a CDN, sha256-verified, and cached in OPFS, degrading to
-`cjk_bigram` offline without error.
+The `@vane-rs/web` package ships a SIMD/scalar dual-variant wasm module and a Web Worker
+as ESM assets; `@vane-rs/dict-zh` ships the Chinese dictionary as a transferable
+`Uint8Array`. Vite 6+ and webpack 5 (with `outputModule`) recognize the
+`new URL('./worker.js', import.meta.url)` pattern natively — no wasm or worker plugins
+needed. See the
+[Web Integration guide](https://ximing.github.io/vane/guides/web-integration)
+for bundler configuration.
 
 ### Build from source
 
@@ -261,37 +261,65 @@ func main() {
 
 ### Quick start: Browser
 
-The browser surface is a Web Worker that wraps the wasm engine with a `postMessage` Promise
-boundary, OPFS persistence (IndexedDB fallback), and a CDN-fetched dictionary. The
-canonical end-to-end example is a pure-frontend Markdown search app:
-
 ```bash
-bash demo/build.sh                 # build the wasm dual variants + JS glue + dict.bin
-cd demo && python3 -m http.server 8765
-# open http://localhost:8765/ — drag in a folder of .md files and search
+npm install @vane-rs/web @vane-rs/dict-zh
 ```
 
-See [`demo/README.md`](demo/README.md) for the full Worker protocol, persistence, and the
-SIMD/CDN/offline-degradation story.
+```ts
+import { createVane } from '@vane-rs/web';
+import type { Schema, Hit } from '@vane-rs/web';
+import dictBinUrl from '@vane-rs/dict-zh/dict.bin';
+
+// Load the dictionary (inline, zero-copy transfer to the worker)
+const dictData = new Uint8Array(await (await fetch(dictBinUrl)).arrayBuffer());
+const vane = await createVane({ vfs: 'opfs', dbPath: 'vane.db', dictData });
+
+await vane.open();
+const col = await vane.collection('docs', {
+  fields: [
+    { name: 'body', type: 'text' },
+    { name: 'vec',  type: 'vector', dim: 4, metric: 'cosine' },
+  ],
+}, { tokenizer: 'jieba' });
+
+await vane.add(col, [
+  { id: 'a', text: 'hello world', vector: [1.0, 0.0, 0.0, 0.0] },
+  { id: 'b', text: 'foo bar baz', vector: [0.0, 1.0, 0.0, 0.0] },
+]);
+await vane.flush(col);
+const hits: Hit[] = await vane.search(col, {
+  text: 'hello', vector: [1.0, 0.0, 0.0, 0.0], topK: 3, mode: 'hybrid',
+});
+await vane.close();
+```
+
+See [`examples/vite/`](examples/vite/) and [`examples/webpack/`](examples/webpack/) for
+complete bundler-configured examples, or the
+[Web Integration guide](https://ximing.github.io/vane/guides/web-integration) for the full
+Worker / persistence / SIMD story.
 
 ## API reference
 
 The same six verbs (+ four management calls) appear across all bindings; only the casing
 and error style differ (JS `Promise`/`VaneError`; Go `(T, error)`).
 
-| Operation | Node.js | Go |
-|---|---|---|
-| Open a database | `open(path, opts)` → `VaneDb` | `vane.Open(path, *OpenOptions)` |
-| Create / open a collection | `db.collection(name, schema, opts)` | `db.Collection(name, Schema, *CollectionOptions)` |
-| List collections | `db.collections()` | — (not yet exposed) |
-| Add documents (batch upsert) | `col.add(docs)` → `{accepted}` | `col.Add([]Doc)` |
-| Make writes visible | `col.flush()` | `col.Flush()` |
-| Search | `col.search(query)` → `Hit[]` | `col.Search(SearchQuery)` |
-| Delete by id | `col.delete(ids)` | `col.Delete([]string)` |
-| Trigger segment compaction | `col.compact()` | `col.Compact()` |
-| Rebuild with a new tokenizer/dict | `col.reindex()` → handle | `col.Reindex()` |
-| Single-file snapshot export | `db.export(dest)` | `db.Export(dest)` |
-| Close | `db.close()` | `db.Close()` |
+| Operation | Node.js | Web | Go |
+|---|---|---|---|
+| Open a database | `open(path, opts)` → `VaneDb` | `createVane(opts)` → `Vane`; `vane.open(path)` | `vane.Open(path, *OpenOptions)` |
+| Create / open a collection | `db.collection(name, schema, opts)` | `vane.collection(name, schema, opts)` → `number` | `db.Collection(name, Schema, *CollectionOptions)` |
+| List collections | `db.collections()` | — (not yet exposed) | — (not yet exposed) |
+| Add documents (batch upsert) | `col.add(docs)` → `{accepted}` | `vane.add(col, docs)` → `number` | `col.Add([]Doc)` |
+| Make writes visible | `col.flush()` | `vane.flush(col)` | `col.Flush()` |
+| Search | `col.search(query)` → `Hit[]` | `vane.search(col, query)` → `Hit[]` | `col.Search(SearchQuery)` |
+| Delete by id | `col.delete(ids)` | `vane.delete(col, ids)` → `number` | `col.Delete([]string)` |
+| Trigger segment compaction | `col.compact()` | `vane.compact(col)` | `col.Compact()` |
+| Rebuild with a new tokenizer/dict | `col.reindex()` → handle | `vane.reindex(col)` → `number` | `col.Reindex()` |
+| Single-file snapshot export | `db.export(dest)` | `vane.export(dest)` | `db.Export(dest)` |
+| Close | `db.close()` | `vane.close()` | `db.Close()` |
+
+> **Web:** `collection()` returns a `number` handle; every subsequent verb takes `col` as
+> its first argument. See <https://ximing.github.io/vane/api/web> for the full type
+> reference.
 
 ### Schema & documents
 
@@ -421,14 +449,16 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 
 ## Status
 
-**v0.1.0** — the core engine is feature-complete through milestones M0–M2:
+**v0.2.0** — the core engine is feature-complete through milestones M0–M3:
 
 - ✅ Core API, VFS, tokenizer (standard/cjk_bigram/jieba), BM25, segment HNSW, RRF fusion
 - ✅ Persistence (segments + manifest + WAL), tombstone delete, compaction, snapshot export
 - ✅ Pre-filter bitmaps in core, SQ8 quantization, rayon parallel executor
 - ✅ `setUserDict` / `reindex` state machine, Chinese dictionary distribution (Node/Go/WASM)
 - ✅ Bindings: Node (napi-rs, 4 platforms), Go (cgo, 4 platforms + wazero stub), Browser
-  (wasm-bindgen + Worker, OPFS/IDB, SIMD dual variants)
+  (@vane-rs/web npm package — wasm-bindgen + Worker, OPFS/IDB, SIMD dual variants)
+- ✅ `@vane-rs/web` + `@vane-rs/dict-zh` npm packages (ESM, vite 6+/webpack 5 native,
+  dictData inline transfer, zero CDN)
 
 Known gaps: `filter` is wired in core but not yet exposed through the binding query parsers
 (see [Filtering](#filtering)); musl/linux-arm64/winx64-arm Node prebuilts and the wazero
@@ -439,8 +469,10 @@ pure-Go path are deferred.
 - [`examples/demo/`](examples/demo/) — Node: load 10k synthetic wiki abstracts and compare
   hybrid / vector / text rankings side by side (with a code-volume contrast vs a hand-rolled
   sqlite-vec + FTS5 setup).
-- [`demo/`](demo/) — Browser: drag in a folder of Markdown files for fully in-browser hybrid
-  search (jieba + OPFS + SIMD dual variants, no backend).
+- [`examples/vite/`](examples/vite/) — Browser (vite): `@vane-rs/web` + `@vane-rs/dict-zh`
+  end-to-end — createVane → open → collection(jieba) → add → search (recommended).
+- [`examples/webpack/`](examples/webpack/) — Browser (webpack 5): same flow with
+  `experiments.outputModule` + asset/resource config.
 - [`bindings/go/example/`](bindings/go/example/) — Go: open → load dict → add → search.
 
 The examples use deterministic **pseudo-vectors** (hash buckets) so they run without an
