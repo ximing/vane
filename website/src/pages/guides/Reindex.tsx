@@ -180,6 +180,13 @@ export default function Reindex() {
 console.log(handle.progress()); // 0..1, pollable
 await handle.wait();            // or block until the atomic switch`}
         />
+        <Callout type="note" title="Web: vane.reindex(col) returns a number, not a handle">
+          The browser binding has no <code>ReindexHandle</code>.{' '}
+          <code>vane.reindex(col)</code> runs the rebuild synchronously inside the
+          worker call and resolves with <code>Promise&lt;number&gt;</code> — the
+          final progress (<code>1.0</code> when done). There is no polling or{' '}
+          <code>wait()</code>; the call itself is the wait.
+        </Callout>
 
         <h2 id="best-practices">Best practices</h2>
         <p>
@@ -215,9 +222,10 @@ await handle.wait();            // or block until the atomic switch`}
           }
           browser={
             <CodeBlock
-              lang="js"
-              title="create-with-dict.js"
-              code={`const col = await db.collection('docs', schema, {
+              lang="ts"
+              title="create-with-dict.ts"
+              code={`// vane.collection(name, schema, opts): Promise<number>
+const col = await vane.collection('docs', schema, {
   tokenizer: 'jieba',
   userDict: ['布地奈德', { term: 'PD-1抑制剂', freq: 100 }],
 });`}

@@ -2,6 +2,7 @@ import DocsLayout from '../components/DocsLayout';
 import LangTabs from '../components/LangTabs';
 import CodeBlock from '../components/CodeBlock';
 import Callout from '../components/Callout';
+import { Link } from 'react-router-dom';
 import './QuickStart.css';
 
 const NODE_INSTALL = `npm install @vane-rs/node`;
@@ -16,10 +17,7 @@ cp target/release/libvane_ffi.a bindings/go/lib/$(go env GOOS)-$(go env GOARCH)/
 # 3. Add to your module
 go get github.com/ximing/vane/bindings/go`;
 
-const BROWSER_INSTALL = `# Requires the wasm32-unknown-unknown target + wasm-opt (binaryen)
-bash scripts/build-wasm-variants.sh
-# → target/wasm-variants/vane_wasm_simd.wasm   (~312 KB gzip)
-#   target/wasm-variants/vane_wasm_scalar.wasm (~314 KB gzip)`;
+const BROWSER_INSTALL = `npm install @vane-rs/web @vane-rs/dict-zh`;
 
 const NODE_OPEN = `import vane from '@vane-rs/node';
 const { open } = vane;
@@ -45,9 +43,13 @@ if b, err := dict.DictBytes(); err == nil {
 	_ = db.LoadDict(b) // on failure, jieba degrades to standard — collection creation won't fail
 }`;
 
-const BROWSER_OPEN = `bash demo/build.sh                 # build the wasm dual variants + JS glue + dict.bin
-cd demo && python3 -m http.server 8765
-# open http://localhost:8765/ — drag in a folder of .md files and search`;
+const BROWSER_OPEN = `import { createVane } from '@vane-rs/web';
+import dictBinUrl from '@vane-rs/dict-zh/dict.bin';
+
+// npm install @vane-rs/web @vane-rs/dict-zh
+const dictData = new Uint8Array(await (await fetch(dictBinUrl)).arrayBuffer());
+const vane = await createVane({ vfs: 'opfs', dbPath: 'vane.db', dictData });
+await vane.open();`;
 
 const NODE_INDEX = `// Declare a schema: one text field + one vector field. (One vector field per collection.)
 const col = await db.collection('docs', {
@@ -80,6 +82,22 @@ _ = col.Add([]vane.Doc{
 })
 _ = col.Flush()`;
 
+const BROWSER_INDEX = `// vane.collection(name, schema, opts): Promise<number> (collection 句柄)
+const col = await vane.collection('docs', {
+  fields: [
+    { name: 'body', type: 'text' },
+    { name: 'vec', type: 'vector', dim: 4, metric: 'cosine' },
+  ],
+}, { tokenizer: 'jieba' });
+
+// vane.add(col, docs): Promise<number> (accepted count)
+await vane.add(col, [
+  { id: 'a', text: 'hello world', vector: [1.0, 0.0, 0.0, 0.0] },
+  { id: 'b', text: 'foo bar baz', vector: [0.0, 1.0, 0.0, 0.0] },
+  { id: 'c', text: 'hello foo', vector: [0.7, 0.3, 0.0, 0.0] },
+]);
+await vane.flush(col); // data is now searchable`;
+
 const NODE_SEARCH = `// Hybrid search: BM25(text) + vector similarity, fused with RRF.
 const hits = await col.search({
   text: 'hello',
@@ -98,6 +116,20 @@ const GO_SEARCH = `hits, _ := col.Search(vane.SearchQuery{
 for _, h := range hits {
 	fmt.Printf("hit: id=%s score=%.4f\\n", h.ID, h.Score)
 }`;
+
+const BROWSER_SEARCH = `import type { Hit } from '@vane-rs/web';
+
+// vane.search(col, query): Promise<Hit[]> — 无需 JSON.parse
+const hits: Hit[] = await vane.search(col, {
+  text: 'hello',
+  vector: [1.0, 0.0, 0.0, 0.0],
+  topK: 3,
+  mode: 'hybrid',
+  fusion: 'rrf',
+});
+// hits = [{ id, score, fields }, ...]
+
+await vane.close();`;
 
 export default function QuickStart() {
   return (
@@ -132,9 +164,11 @@ export default function QuickStart() {
           }
           browser={
             <p>
-              <strong>Browser</strong> — wasm-bindgen wrapped in a Web Worker, with OPFS
-              persistence (IndexedDB fallback) and SIMD dual variants. The dictionary is
-              fetched from a CDN, sha256-verified, and cached in OPFS.
+              <strong>Browser</strong> — the <code>@vane-rs/web</code> npm package ships a
+              SIMD/scalar dual-variant wasm module, a Web Worker, and the Chinese dictionary
+              as a transferable <code>Uint8Array</code>. Inline the dictionary via{' '}
+              <code>@vane-rs/dict-zh</code> for zero-CDN production builds; a jsdelivr CDN
+              fallback exists for quick experiments.
             </p>
           }
         />
@@ -213,11 +247,12 @@ export default function QuickStart() {
             <>
               <CodeBlock code={BROWSER_INSTALL} lang="bash" title="terminal" />
               <p>
-                Two variants are produced (SIMD128 + scalar); a runtime{' '}
-                <code>WebAssembly.validate</code> probe picks the right one. The dictionary is
-                never baked into the <code>.wasm</code> (size red line: core ≤ 800 KB gzip) —
-                it is fetched from a CDN, sha256-verified, and cached in OPFS, degrading to{' '}
-                <code>cjk_bigram</code> offline without error.
+                <code>@vane-rs/web</code> ships SIMD128 + scalar dual wasm variants; a runtime
+                probe inside the worker picks the right one. The dictionary ships as a separate{' '}
+                <code>@vane-rs/dict-zh</code> package — inline it via <code>dictData</code> for
+                zero-CDN production builds, or let <code>@vane-rs/web</code> fall back to a
+                jsdelivr CDN URL for quick experiments (degrades to <code>cjk_bigram</code>{' '}
+                offline without error).
               </p>
             </>
           }
@@ -230,15 +265,16 @@ export default function QuickStart() {
           browser={
             <>
               <p>
-                The browser surface is a Web Worker that wraps the wasm engine with a{' '}
-                <code>postMessage</code> Promise boundary, OPFS persistence (IndexedDB
-                fallback), and a CDN-fetched dictionary. The canonical end-to-end example is a
-                pure-frontend Markdown search app:
+                <code>createVane</code> spawns a Web Worker that wraps the wasm engine with a{' '}
+                <code>postMessage</code> Promise boundary, OPFS persistence (IndexedDB fallback),
+                and a transferable <code>dictData</code> dictionary. See the{' '}
+                <Link to="/guides/web-integration">Web Integration</Link> guide for vite / webpack
+                configuration.
               </p>
-              <CodeBlock code={BROWSER_OPEN} lang="bash" title="terminal" />
+              <CodeBlock code={BROWSER_OPEN} lang="ts" title="open.ts" />
               <p>
-                You must access the page over <code>http://localhost</code> — under{' '}
-                <code>file://</code>, Worker / OPFS / ES modules are restricted.
+                You must access the page over <code>http://</code> or <code>https://</code> —
+                under <code>file://</code>, Worker / OPFS / ES modules are restricted.
               </p>
             </>
           }
@@ -248,32 +284,14 @@ export default function QuickStart() {
         <LangTabs
           node={<CodeBlock code={NODE_INDEX} lang="js" title="quickstart.js" />}
           go={<CodeBlock code={GO_INDEX} lang="go" title="main.go" />}
-          browser={
-            <p>
-              In the demo, click “加载示例” (load samples) to index the five bundled Chinese
-              Markdown files, or drag a folder of <code>.md</code> files onto the drop zone —
-              the page recursively parses each file into <code>{'{id, text, vector}'}</code>{' '}
-              documents. Wait for <code>[index] 完成</code> in the log. The data persists across
-              reloads via OPFS (IndexedDB fallback), and “导出备份” writes an{' '}
-              <code>export()</code> snapshot (<code>backup.vane</code>) into OPFS.
-            </p>
-          }
+          browser={<CodeBlock code={BROWSER_INDEX} lang="ts" title="index.ts" />}
         />
 
         <h2 id="search">4. Search</h2>
         <LangTabs
           node={<CodeBlock code={NODE_SEARCH} lang="js" title="quickstart.js" />}
           go={<CodeBlock code={GO_SEARCH} lang="go" title="main.go" />}
-          browser={
-            <p>
-              Type Chinese (e.g. <code>人工智能</code>) or English (e.g. <code>vector</code>) in
-              the search box — the query runs hybrid: BM25 plus vector similarity fused with
-              RRF. Behind the scenes, the <code>jieba</code> dictionary is fetched from the
-              jsdelivr gh CDN, sha256-verified, and cached in OPFS (the second visit needs zero
-              network); offline or a CDN failure degrades to <code>cjk_bigram</code> with a
-              warning, never an error.
-            </p>
-          }
+          browser={<CodeBlock code={BROWSER_SEARCH} lang="ts" title="search.ts" />}
         />
 
         <h2 id="about-the-demo-vectors">About the demo vectors</h2>
