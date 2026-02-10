@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import DocsLayout from '../components/DocsLayout';
 import CodeBlock from '../components/CodeBlock';
 import Callout from '../components/Callout';
@@ -10,16 +11,15 @@ npm run compare        # three-column ranking comparison
 npm run smoke:vector   # pseudo-vector module self-check
 npm run smoke:data     # data generator self-check`;
 
-const BROWSER_RUN = `# Prerequisites: Rust (wasm32-unknown-unknown target) + wasm-bindgen CLI
-# (+ wasm-opt, optional), Node.js ≥ 18 (e2e smoke test), Python 3
+const BROWSER_VITE_RUN = `cd examples/vite
+npm install
+npm run dev
+# open http://localhost:5173/`;
 
-# At the repository root — produces demo/pkg/ (JS glue, simd/scalar wasm,
-# dict.bin + sha256_prefix.bin)
-bash demo/build.sh
-
-cd demo
-python3 -m http.server 8765
-# open http://localhost:8765/index.html`;
+const BROWSER_WEBPACK_RUN = `cd examples/webpack
+npm install
+npm run serve
+# open http://localhost:8080/`;
 
 const GO_PREREQ = `# 1. Build the static lib (or download libvane_ffi-<lib_dir>.a from GitHub Releases)
 cargo build --release -p vane-ffi
@@ -155,52 +155,39 @@ export default function Examples() {
         </section>
 
         <section className="examples__card">
-          <h2 id="browser-markdown-search">Browser: pure-frontend Markdown search</h2>
+          <h2 id="browser-vite-webpack">Browser: vite + webpack integration</h2>
           <p className="examples__path">
-            <code>demo/</code> ·{' '}
-            <a href="https://github.com/ximing/vane/tree/main/demo">
-              github.com/ximing/vane → demo
+            <code>examples/vite/</code> ·{' '}
+            <a href="https://github.com/ximing/vane/tree/main/examples/vite">
+              github.com/ximing/vane → examples/vite
+            </a>
+            <br />
+            <code>examples/webpack/</code> ·{' '}
+            <a href="https://github.com/ximing/vane/tree/main/examples/webpack">
+              github.com/ximing/vane → examples/webpack
             </a>
           </p>
-          <img
-            className="examples__shot"
-            src={`${import.meta.env.BASE_URL}screenshots/browser-markdown-demo.jpg`}
-            width={1600}
-            height={800}
-            alt="Vane browser demo: hybrid search results for the Chinese query 人工智能 over a folder of Markdown files"
-            loading="lazy"
-          />
           <h3>What it does</h3>
-          <ul>
-            <li>
-              Drag in a folder — recursively parses <code>.md</code> files into{' '}
-              <code>{'{id, text, vector}'}</code> documents
-            </li>
-            <li>
-              Chinese search with <code>jieba</code> — dictionary fetched from the jsdelivr gh
-              CDN, sha256-verified, cached in OPFS; offline it degrades to bigram without an
-              error
-            </li>
-            <li>Hybrid search — text + vector fused with RRF (placeholder hash vectors)</li>
-            <li>OPFS persistence — data survives reloads (IndexedDB fallback)</li>
-            <li>
-              SIMD dual variants — a runtime <code>WebAssembly.validate</code> probe loads the
-              simd or scalar build
-            </li>
-            <li>
-              Export backup — <code>db.export("backup.vane")</code> writes a snapshot into OPFS
-            </li>
-          </ul>
-          <h3>How to run</h3>
           <p>
-            The wasm artifacts are build output, so you compile them locally before serving the
-            page:
+            Two minimal end-to-end projects that import <code>@vane-rs/web</code> from npm,
+            inline the dictionary via <code>@vane-rs/dict-zh</code>, and run a hybrid search
+            loop in the browser — no local Rust toolchain, no wasm-bindgen CLI, no build
+            script. Vite 6+ and webpack 5 both recognize the{' '}
+            <code>new Worker(new URL(..., import.meta.url))</code> idiom natively, so the
+            worker is emitted as a separate ESM chunk automatically.
           </p>
-          <CodeBlock code={BROWSER_RUN} lang="bash" title="terminal" />
-          <p>
-            You must access the page over <code>http://localhost</code> — under{' '}
-            <code>file://</code>, Worker / OPFS / ES modules are restricted.
-          </p>
+          <h3>How to run — vite</h3>
+          <CodeBlock code={BROWSER_VITE_RUN} lang="bash" title="terminal" />
+          <h3>How to run — webpack</h3>
+          <CodeBlock code={BROWSER_WEBPACK_RUN} lang="bash" title="terminal" />
+          <Callout type="note" title="Bundler configuration">
+            Both examples ship with the minimal config you actually need (Vite:{' '}
+            <code>assetsInclude: ['**/*.bin']</code>; webpack:{' '}
+            <code>experiments.outputModule</code> + asset rules). See the{' '}
+            <Link to="/guides/web-integration">Web Integration</Link> guide for the
+            rationale and the common pitfalls (file:// origin,{' '}
+            <code>scriptLoading</code>, dictData detach).
+          </Callout>
         </section>
 
         <section className="examples__card">

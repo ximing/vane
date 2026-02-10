@@ -13,6 +13,7 @@ import ApiDocuments from './pages/api/Documents';
 import ApiSearch from './pages/api/Search';
 import ApiMaintenance from './pages/api/Maintenance';
 import ApiErrors from './pages/api/Errors';
+import ApiWeb from './pages/api/Web';
 import Examples from './pages/Examples';
 
 export interface RouteDef {
@@ -40,5 +41,6 @@ export const routes: RouteDef[] = [
   { path: '/api/search', name: 'search', Component: ApiSearch },
   { path: '/api/maintenance', name: 'maintenance', Component: ApiMaintenance },
   { path: '/api/errors', name: 'Error Codes', Component: ApiErrors },
+  { path: '/api/web', name: 'Web (@vane-rs/web)', Component: ApiWeb },
   { path: '/examples', name: 'Examples', Component: Examples },
 ];

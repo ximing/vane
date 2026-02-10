@@ -44,13 +44,16 @@ for _, h := range hits {
     fmt.Printf("hit: id=%s score=%.4f\n", h.ID, h.Score)
 }`;
 
-const BROWSER_SNIPPET = `// worker.search(col, query): Promise<string> (JSON-encoded Hit[])
-const hits = JSON.parse(await worker.search(col, {
+const BROWSER_SNIPPET = `// 假设 vane 已由 createVane({dictData}) 创建，col = await vane.collection(...)
+import type { Hit } from '@vane-rs/web';
+
+// vane.search(col, query): Promise<Hit[]> — 无需 JSON.parse（worker 内部已反序列化）
+const hits: Hit[] = await vane.search(col, {
   text: 'hello',
   vector: [1.0, 0.0, 0.0, 0.0],
   topK: 3,
   mode: 'hybrid',
-}));
+});
 // hits = [{ id, score, fields }, ...]`;
 
 export default function ApiSearch() {
@@ -70,7 +73,7 @@ export default function ApiSearch() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="search.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="search.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="search.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="search.ts" />}
         />
 
         <h2 id="search-query">SearchQuery</h2>

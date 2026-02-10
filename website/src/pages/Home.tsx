@@ -271,12 +271,31 @@ hits, _ := col.Search(vane.SearchQuery{
 	Text: "hello", Vector: []float32{1.0, 0.0, 0.0, 0.0}, TopK: 3,
 })`;
 
-const BROWSER_SNIPPET = `# Build the wasm dual variants + JS glue + dict.bin
-bash demo/build.sh
+const BROWSER_SNIPPET = `import { createVane } from '@vane-rs/web';
+import type { Hit } from '@vane-rs/web';
+import dictBinUrl from '@vane-rs/dict-zh/dict.bin';
 
-cd demo && python3 -m http.server 8765
-# open http://localhost:8765/ — drag in a folder
-# of .md files and search, fully in-browser`;
+// npm install @vane-rs/web @vane-rs/dict-zh
+const dictData = new Uint8Array(await (await fetch(dictBinUrl)).arrayBuffer());
+const vane = await createVane({ vfs: 'opfs', dbPath: 'vane.db', dictData });
+
+await vane.open();
+const col = await vane.collection('docs', {
+  fields: [
+    { name: 'body', type: 'text' },
+    { name: 'vec', type: 'vector', dim: 4, metric: 'cosine' },
+  ],
+}, { tokenizer: 'jieba' });
+
+await vane.add(col, [
+  { id: 'a', text: 'hello world', vector: [1.0, 0.0, 0.0, 0.0] },
+  { id: 'b', text: 'foo bar baz', vector: [0.0, 1.0, 0.0, 0.0] },
+]);
+await vane.flush(col);
+
+const hits: Hit[] = await vane.search(col, {
+  text: 'hello', vector: [1.0, 0.0, 0.0, 0.0], topK: 3, mode: 'hybrid',
+});`;
 
 /* ------------------------------------------------------------------ */
 /* Comparison table (README "What is Vane").                           */
@@ -411,7 +430,7 @@ export default function Home() {
             node={<CodeBlock code={NODE_SNIPPET} lang="js" title="search.mjs" />}
             go={<CodeBlock code={GO_SNIPPET} lang="go" title="main.go" />}
             browser={
-              <CodeBlock code={BROWSER_SNIPPET} lang="bash" title="shell" />
+              <CodeBlock code={BROWSER_SNIPPET} lang="ts" title="main.ts" />
             }
           />
         </div>

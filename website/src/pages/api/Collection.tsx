@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import DocsLayout from '../../components/DocsLayout';
 import LangTabs from '../../components/LangTabs';
 import CodeBlock from '../../components/CodeBlock';
+import Callout from '../../components/Callout';
 import './api.css';
 
 const IDL = `Db.collection(name: string, schema: Schema & CollectionOptions) -> Collection
@@ -45,8 +46,9 @@ if err != nil {
     log.Fatalf("collection: %v", err)
 }`;
 
-const BROWSER_SNIPPET = `// worker.collection(name, schema, opts): Promise<u32> (collection handle)
-const col = await worker.collection('docs', {
+const BROWSER_SNIPPET = `// 假设 vane 已由 createVane({dictData}) 创建并 open
+// vane.collection(name, schema, opts): Promise<number> (collection 句柄)
+const col = await vane.collection('docs', {
   fields: [
     { name: 'title', type: 'text' },
     { name: 'body',  type: 'text' },
@@ -73,7 +75,7 @@ export default function ApiCollection() {
         <LangTabs
           node={<CodeBlock code={NODE_SNIPPET} lang="js" title="collection.mjs" />}
           go={<CodeBlock code={GO_SNIPPET} lang="go" title="collection.go" />}
-          browser={<CodeBlock code={BROWSER_SNIPPET} lang="js" title="collection.js" />}
+          browser={<CodeBlock code={BROWSER_SNIPPET} lang="ts" title="collection.ts" />}
         />
 
         <h2 id="schema">Schema</h2>
@@ -167,18 +169,17 @@ export default function ApiCollection() {
                   <Link to="/guides/reindex">Custom Dict &amp; Reindex</Link>.
                 </td>
               </tr>
-              <tr>
-                <td><code>dictData</code></td>
-                <td><code>bytes</code></td>
-                <td>—</td>
-                <td className="api-table__wide">
-                  M2 WASM only: inline jieba dictionary bytes for offline or self-hosted
-                  deployments, bypassing the CDN fetch.
-                </td>
-              </tr>
             </tbody>
           </table>
         </div>
+        <Callout type="note" title="dictData belongs on createVane, not here">
+          <code>CollectionOptions</code> has no <code>dictData</code> field. The
+          jieba dictionary is loaded once at <code>createVane</code> time via{' '}
+          <code>VaneWorkerOpts.dictData</code> / <code>dictUrl</code>, not per
+          collection. The <code>userDict</code> field above is for additional
+          domain terms injected at creation. See{' '}
+          <Link to="/api/web#createvane">createVane</Link>.
+        </Callout>
 
         <h3>Error handling</h3>
         <p>
