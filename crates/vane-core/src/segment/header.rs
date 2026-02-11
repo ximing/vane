@@ -36,7 +36,9 @@ pub fn encode_header(meta: &SegmentMeta) -> Result<Vec<u8>> {
 
 /// header.bin 解码。
 pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
-    if buf.len() < 8 {
+    // 9 = magic(4) + version(4) + ulid_len(1)。buf.len()==8 时 buf[8] 越界 panic，
+    // 故门限 < 9 而非 < 8（M4 阶段二 b fix：off-by-one → panic-on-corrupt）。
+    if buf.len() < 9 {
         return Err(VaneError::Corrupt("header too short".into()));
     }
     if &buf[0..4] != MAGIC {
@@ -85,4 +87,25 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         tokenizer_id: TokenizerId(tid),
         tombstones,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归测试：8 字节 header（magic+version，无 ulid_len）必须返 Corrupt 而非 panic。
+    /// 修复前：`< 8` 长度门允许 buf.len()==8，后续 `buf[8]`（ulid_len）越界 panic。
+    /// 修复后：`< 9` 拒绝 8 字节，返 `Corrupt("header too short")`。
+    #[test]
+    fn decode_header_8_bytes_returns_corrupt_not_panic() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&HEADER_FORMAT_V1.to_le_bytes());
+        assert_eq!(buf.len(), 8);
+        let result = decode_header(&buf);
+        assert!(
+            matches!(result, Err(VaneError::Corrupt(ref msg)) if msg.contains("too short")),
+            "8-byte header should return Corrupt(\"header too short\")"
+        );
+    }
 }

@@ -22,7 +22,8 @@ use vane_core::api::{
     CollectionOptions, Db, Doc, FusionSpec, OpenOptions, SearchMode, SearchQuery,
 };
 use vane_core::persistence::AutoCommitConfig;
-use vane_core::types::{FieldDef, Metric, Schema};
+use vane_core::segment::header::decode_header;
+use vane_core::types::{FieldDef, Metric, Schema, VaneError};
 use vane_core::vfs::fault::{Fault, FaultVfs, VfsOp};
 use vane_core::vfs::Vfs;
 
@@ -552,9 +553,14 @@ fn crash_5_partial_write() {
         assert_eq!(&buf[..4], b"VANE", "first 4 bytes should be magic 'VANE'");
         let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         assert_eq!(ver, 1, "bytes 4-8 should be format_version=1 (LE)");
-        // 8 字节恰好含 magic+version 但缺少 ulid_len 及后续字段 → 不完整 header
-        // decode_header 在 < 8 字节时返 Corrupt("header too short")；
-        // 8 字节恰好过长度门但缺 ulid_len → 无效段。recover 不尝试 open 孤儿段，直接清理。
+        // 8 字节恰好含 magic+version 但缺少 ulid_len 及后续字段 → 不完整 header。
+        // decode_header 长度门 < 9 拒绝 8 字节，返 Corrupt("header too short")（非 panic）。
+        // 覆盖 decode_header 拒绝路径：损坏段被校验拒绝，recover 不尝试 open 孤儿段，直接清理。
+        let decode_result = decode_header(&buf[..n]);
+        assert!(
+            matches!(decode_result, Err(VaneError::Corrupt(ref msg)) if msg.contains("too short")),
+            "decode_header on 8-byte corrupt header should return Corrupt(\"header too short\")"
+        );
 
         // 不 close（模拟崩溃）
     }
