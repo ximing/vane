@@ -17,6 +17,10 @@ pub mod memory;
 pub mod page_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod std_fs;
+// M4 §3.1：FaultVfs 故障注入 VFS，仅 cfg(test) 或 feature="fault-injection" 编译。
+// 绝不进生产/wasm 二进制（wasm32 check 不启此 feature，不设 test cfg）。
+#[cfg(any(test, feature = "fault-injection"))]
+pub mod fault;
 
 #[cfg(test)]
 mod tests;

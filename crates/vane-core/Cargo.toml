@@ -58,6 +58,11 @@ sq8 = []
 # default_executor() 在 executor-native off 时返 SerialExecutor（串行，等价 M1）。
 # cfg(target_arch) 仅在 executor/mod.rs（I-5 不变量核心）。
 executor-native = ["dep:rayon"]
+# fault-injection：FaultVfs 故障注入 VFS（M4 §3.1）。
+# dev/optional，默认不启用。cfg(test) 或本 feature 启用时编译 fault.rs，
+# 供崩溃恢复测试精确模拟 IO 错误 / 部分写 / ENOSPC / 延迟。
+# 绝不进生产/wasm 二进制——wasm32 check 不启此 feature、不设 test cfg。
+fault-injection = []
 
 [dev-dependencies]
 criterion = "0.5"
