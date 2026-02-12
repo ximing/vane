@@ -233,6 +233,20 @@ proptest! {
         );
         prop_assert_eq!(hits1.len(), hits2.len(), "same query must return same count");
 
+        // 不变量 1a-guard：Vector/Hybrid 模式非空——docs 非空 + query 有效向量
+        // → search 必返 ≥1 hit（cosine 对非零向量有定义，RRF 不过滤结果）。
+        // Text 模式 query 文本可能不命中任何文档，0 hits 合法，不强制非空。
+        // 此 guard 捕获 search 返 0 hits 的 bug（否则 windows(2) 空、cap1==cap2
+        // 两空全过 = 假绿）。
+        if matches!(q.mode, SearchMode::Vector | SearchMode::Hybrid) {
+            prop_assert!(
+                !hits1.is_empty(),
+                "Vector/Hybrid search returned 0 hits with {} docs, topK={}",
+                docs.len(),
+                q.top_k
+            );
+        }
+
         // 不变量 1b：score 单调非递增，且全部有限。
         for w in hits1.windows(2) {
             prop_assert!(
