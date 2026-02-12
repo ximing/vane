@@ -66,6 +66,12 @@ fault-injection = []
 
 [dev-dependencies]
 criterion = "0.5"
+# proptest：property-based 不变量测试（M4 §3.3）。
+# dev-dep，不进 wasm/native 生产构建（wasm32 check 不含 dev-deps）。
+# 传递依赖无黑名单项（regex/tokio/prost/tonic/openssl/lindera/ndarray/
+# wee_alloc/dashmap/parking_lot）——默认 features 不含 regex/regex-syntax，
+# cargo deny check 守护。Strategy 用 a-z 字符生成（非 string_regex），零 regex 路径。
+proptest = "1"
 
 [[bench]]
 name = "hybrid_search"
