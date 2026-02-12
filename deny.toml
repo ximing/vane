@@ -30,6 +30,12 @@ allow = [
     "Apache-2.0",
     "MIT",
     "MIT-0",
+    # NCSA = University of Illinois/NCSA Open Source License（LLVM/libFuzzer 许可证）。
+    # libfuzzer-sys v0.4.13 的 license = "(MIT OR Apache-2.0) AND NCSA"——
+    # NCSA 是 libFuzzer C++ 库的许可证（OSI approved + FSF Free/Libre）。
+    # M4 阶段一 a：vane-fuzz crate 引 libfuzzer-sys，需 allow NCSA。
+    # 仅 license 允许，不改 [bans] crate 黑名单语义（regex/tokio/prost/... 仍 ban）。
+    "NCSA",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
