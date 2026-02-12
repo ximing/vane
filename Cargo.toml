@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/vane-core", "crates/vane-ffi", "crates/vane-node", "crates/vane-dict-zh", "crates/vane-wasm"]
+members = ["crates/vane-core", "crates/vane-ffi", "crates/vane-node", "crates/vane-dict-zh", "crates/vane-wasm", "crates/vane-fuzz"]
+# vane-fuzz 需 nightly + libfuzzer-sys，stable cargo build/test/clippy 编不了；
+# default-members 排除 vane-fuzz，确保 `cargo build`/`cargo test`（不带 --workspace）
+# 的默认范围不含 fuzz。`cargo test --workspace` 显式列全部 members，仍需 --exclude
+# vane-fuzz（见 .github/workflows/ci.yml test/clippy job）。
+default-members = ["crates/vane-core", "crates/vane-ffi", "crates/vane-node", "crates/vane-dict-zh", "crates/vane-wasm"]
 resolver = "2"
 
 [workspace.package]
