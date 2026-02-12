@@ -1,0 +1,39 @@
+[package]
+name = "vane-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+# vane-fuzz 是 cargo-fuzz 集成 crate：libfuzzer-sys 绑定 C++ libFuzzer，
+# 需 nightly（-Z sanitizer）。绝不进 vane-core/wasm/ffi 生产构建——
+# workspace default-members 排除 vane-fuzz，CI test/clippy job 加 --exclude。
+# CI 的 fuzz-smoke/fuzz-long（nightly）由 Phase 6 新增 job 负责。
+[package.metadata]
+# cargo-fuzz 0.13+ 要求显式标记本 crate 为 fuzz crate（检测机制），
+# 否则 `cargo fuzz build` 报 "does not look like a cargo-fuzz manifest"。
+cargo-fuzz = true
+
+[dependencies]
+vane-core = { path = "../vane-core" }
+libfuzzer-sys = "0.4"
+
+# fuzz targets（每个独立 [[bin]]，#![no_main] + libfuzzer::fuzz_target!）
+[[bin]]
+name = "brute_search_fuzz"
+path = "fuzz_targets/brute_search_fuzz.rs"
+
+[[bin]]
+name = "hnsw_search_fuzz"
+path = "fuzz_targets/hnsw_search_fuzz.rs"
+
+[[bin]]
+name = "persist_roundtrip_fuzz"
+path = "fuzz_targets/persist_roundtrip_fuzz.rs"
+
+[[bin]]
+name = "merge_fuzz"
+path = "fuzz_targets/merge_fuzz.rs"
+
+[[bin]]
+name = "dict_load_fuzz"
+path = "fuzz_targets/dict_load_fuzz.rs"
