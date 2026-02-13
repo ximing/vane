@@ -63,6 +63,9 @@ impl Wal {
 
     /// 追加一条记录（JSON 行，每行一条；append 后 sync 保证崩溃前落盘）。
     pub fn append(&self, record: &WalRecord) -> Result<()> {
+        // M4 §3.5 tracing：WAL append 次数——记录值（Debug）。cfg 门控，编译期消除。
+        #[cfg(feature = "tracing")]
+        tracing::debug!(?record, "wal append");
         let mut line = serde_json::to_vec(record)
             .map_err(|e| VaneError::Corrupt(format!("wal serialize: {}", e)))?;
         line.push(b'\n');

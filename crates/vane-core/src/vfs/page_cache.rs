@@ -49,6 +49,9 @@ impl PageCache {
                     Some(data) => {
                         // 命中：移动到 LRU 尾
                         self.inner.touch(path.to_string(), page_idx);
+                        // M4 §3.5 tracing：缓存命中率——命中事件。cfg 门控，编译期消除。
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(hit = true, path = path, page_idx, "page_cache");
                         data
                     }
                     None => {
@@ -58,6 +61,15 @@ impl PageCache {
                         let n = vfs.read_at(path, &mut page_buf, page_start)?;
                         page_buf.truncate(n);
                         self.inner.put(path.to_string(), page_idx, page_buf.clone());
+                        // M4 §3.5 tracing：缓存命中率——未命中事件。cfg 门控，编译期消除。
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            hit = false,
+                            path = path,
+                            page_idx,
+                            bytes = n,
+                            "page_cache"
+                        );
                         page_buf
                     }
                 }

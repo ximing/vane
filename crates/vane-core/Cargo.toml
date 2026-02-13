@@ -35,6 +35,13 @@ web-time = "1"
 # 仅 executor-native feature 启用；wasm32 永不启用（无线程模型，红线）。
 # rayon 非依赖黑名单；传递依赖无黑名单项（cargo deny 守护）。
 rayon = { version = "1", optional = true }
+# tracing：可观测性埋点（M4 §3.5，I-5 能力开关）。
+# optional + cfg(feature="tracing") 门控，默认 off——不启用时编译期消除，
+# wasm/native 体积不变（800KB gzip 红线）。vane-wasm 不启用 tracing（守护红线）。
+# 不触黑名单：传递依赖 tracing-core/thread_local/cfg-if（无 regex/tokio/prost/tonic/
+# openssl/lindera/ndarray/wee_alloc/dashmap/parking_lot），cargo deny check 守护。
+# tracing-subscriber（消费侧）不进 core——vane-ffi/vane-node 按需加 dev-dep。
+tracing = { version = "0.1", optional = true }
 
 [features]
 # zstd-decode：启用 ruzstd 读期解码（stored.bin v2 + jieba dict.bin）。
@@ -63,6 +70,11 @@ executor-native = ["dep:rayon"]
 # 供崩溃恢复测试精确模拟 IO 错误 / 部分写 / ENOSPC / 延迟。
 # 绝不进生产/wasm 二进制——wasm32 check 不启此 feature、不设 test cfg。
 fault-injection = []
+# tracing：埋点能力开关（I-5，M4 §3.5）。启用时检索延迟/段数/merge 频率/
+# 缓存命中率/WAL append/词典状态指标可观测；不启用时编译期消除，wasm/native
+# 体积不变（800KB gzip 红线）。所有 tracing 调用经 `#[cfg(feature="tracing")]`
+# 门控。默认 off；vane-wasm 不启用（守护红线）；vane-ffi/vane-node native 可启。
+tracing = ["dep:tracing"]
 
 [dev-dependencies]
 criterion = "0.5"
