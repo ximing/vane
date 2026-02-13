@@ -460,6 +460,15 @@ impl Collection {
                 );
             }
         }
+        // M4 §3.5 tracing：flush 后段数 + 新段 ULID + 文档数。cfg 门控，编译期消除。
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            collection = %self.inner.name,
+            segment_ulid = %meta.ulid,
+            doc_count = meta.doc_count,
+            segment_count = self.segment_count(),
+            "flush done"
+        );
         Ok(())
     }
 
@@ -520,6 +529,15 @@ impl Collection {
                 .max()
                 .unwrap_or(0)
         };
+        // M4 §3.5 tracing：merge 频率——入口埋点（sources 数 + target base + 是否全合并）。
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            collection = %self.inner.name,
+            sources = source_ulids.len(),
+            target_docid_base,
+            full_merge = is_full_merge,
+            "merge start"
+        );
         let tokenizer_arc = self.inner.tokenizer.read().unwrap().clone();
         let tok_id = self.inner.tokenizer_id.read().unwrap().clone();
         let mut task = crate::merge::MergeTask::new(
@@ -631,6 +649,15 @@ impl Collection {
             hnsw_w.push(new_hnsw);
             scalar_w.push(new_scalar);
         }
+        // M4 §3.5 tracing：merge 完成——新段 ULID + 段数。cfg 门控，编译期消除。
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            collection = %self.inner.name,
+            new_segment_ulid = %new_meta.ulid,
+            new_doc_count = new_meta.doc_count,
+            segment_count = self.segment_count(),
+            "merge done"
+        );
         Ok(())
     }
 
@@ -680,6 +707,18 @@ impl Collection {
                 }
             },
         };
+        // M4 §3.5 tracing：检索延迟 span + elapsed。cfg 门控，tracing off 时编译期消除。
+        // 早期返回（topK 超限/缺 text+vector）不经此 span——属参数校验 fast-fail，无需埋点。
+        #[cfg(feature = "tracing")]
+        let _span = tracing::info_span!(
+            "search",
+            top_k = query.top_k,
+            mode = ?mode,
+            segment_count = self.segment_count(),
+            allow_hnsw
+        );
+        #[cfg(feature = "tracing")]
+        let _search_start = web_time::Instant::now();
         // dim 校验 + metric 一次性解析（hoist 出循环，避免每段重复 vector_field() 调用）
         let vf = if let Some(v) = &query.vector {
             let (_, dim, metric) = self.inner.schema.vector_field()?;
@@ -988,6 +1027,12 @@ impl Collection {
                 });
             }
         }
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            elapsed_us = _search_start.elapsed().as_micros() as u64,
+            hits = hits.len(),
+            "search done"
+        );
         Ok(hits)
     }
 
@@ -1134,6 +1179,15 @@ impl Collection {
         if *state == DictState::Rebuilding {
             return Err(VaneError::Busy);
         }
+        // M4 §3.5 tracing：词典状态迁移 Stable→PendingReindex（state transition）。
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            collection = %self.inner.name,
+            from = ?*state,
+            to = ?DictState::PendingReindex,
+            dict_entries = dict.len(),
+            "dict state transition"
+        );
         *self.inner.pending_dict.write().unwrap() = dict.to_vec();
         *state = DictState::PendingReindex;
         Ok(())
@@ -1184,6 +1238,14 @@ impl Collection {
         }
         // state → Rebuilding。
         *self.inner.dict_state.write().unwrap() = DictState::Rebuilding;
+        // M4 §3.5 tracing：词典状态迁移 PendingReindex→Rebuilding（state transition）。
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            collection = %self.inner.name,
+            from = ?DictState::PendingReindex,
+            to = ?DictState::Rebuilding,
+            "dict state transition"
+        );
         let result = self.run_reindex();
         match result {
             Ok(handle) => Ok(handle),
@@ -1361,6 +1423,14 @@ impl Collection {
 
         // state → Stable。
         *self.inner.dict_state.write().unwrap() = DictState::Stable;
+        // M4 §3.5 tracing：词典状态迁移 Rebuilding→Stable（reindex 完成）。
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            collection = %self.inner.name,
+            from = ?DictState::Rebuilding,
+            to = ?DictState::Stable,
+            "dict state transition"
+        );
         Ok(ReindexHandle::completed())
     }
 }
