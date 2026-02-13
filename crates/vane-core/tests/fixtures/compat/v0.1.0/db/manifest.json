@@ -1,0 +1,1 @@
+{"version":1,"collections":{"docs":{"schema":{"fields":[["body","Text"],["v",{"Vector":{"dim":4,"metric":"Cosine"}}],["tag",{"Scalar":{"kind":"Keyword"}}]]},"tokenizer_kind":"Standard","tokenizer_id":[2,239,175,198,55,74,249,62,221,85,48,237,150,3,122,142,123,93,234,87,101,141,201,186,22,64,67,252,206,105,33,166],"user_dict":[],"segment_ulids":["01KZRQ9VAJ0000000000000000"]}}}
