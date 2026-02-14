@@ -2,7 +2,7 @@
 
 - **分支**：`feat/m4-prod-readiness`
 - **BASE**：`0cb50e5`（M4 Phase 3 跨版本兼容报告/审查 artifacts 提交）
-- **commit**：`86a2b81`（`feat(core): tracing feature（cfg 门控零开销埋点，默认 off）（M4 阶段五 a）`）
+- **commit**：`dae29c6`（`feat(core): tracing feature（cfg 门控零开销埋点，默认 off）（M4 阶段五 a）`）
 - **范围**：`crates/vane-core` 首个触动生产代码的 M4 phase——新增 `tracing` feature + `#[cfg(feature="tracing")]` 门控埋点。纯新增，不改 M0-M3 冻结 pub API。
 - **brief**：`docs/plans/m4/phase0-design.md` §3.5（tracing feature 骨架）。
 
@@ -159,7 +159,7 @@ advisories ok, bans ok, licenses ok, sources ok
 ## 7. commit
 
 ```
-commit 86a2b81
+commit dae29c6
 Author: ximing
 Date:   Wed Aug 12 00:35:13 2026 +0800
 
