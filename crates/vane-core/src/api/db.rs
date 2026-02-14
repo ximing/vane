@@ -180,11 +180,82 @@ impl Db {
         Ok(())
     }
 
+    // ---- M4 §3.6 inspect API：纯新增 pub 方法，不改 M0-M3 冻结签名 ----
+
+    /// SPEC §9 inspect API：DB 级统计。
+    ///
+    /// 纯新增，不改 M0-M3 冻结 pub API。`&self` 返回 `DbStats`，遍历 collections
+    /// 构造各段统计（段数 / 文档数 / 健康状态）。健康检查见 §3.6 表。
+    pub fn stats(&self) -> super::inspect::DbStats {
+        let collections = self.inner.collections.read().unwrap();
+        let dict_available = self.dict_available_internal();
+        let mut col_stats: Vec<super::inspect::CollectionStats> = collections
+            .iter()
+            .map(|(name, col_inner)| {
+                super::inspect::build_collection_stats(
+                    name,
+                    col_inner,
+                    &self.inner.vfs,
+                    dict_available,
+                )
+            })
+            .collect();
+        // 按 name 排序保证输出确定性（HashMap 迭代顺序不固定）。
+        col_stats.sort_by(|a, b| a.name.cmp(&b.name));
+        super::inspect::DbStats {
+            db_path: self.inner.db_path.clone(),
+            collections: col_stats,
+            dict_available,
+            executor_kind: super::inspect::executor_kind(),
+        }
+    }
+
+    /// SPEC §9 inspect API：各段详细信息。
+    ///
+    /// 返回所有 collection 的所有段信息（ULID / doc_count / format_versions /
+    /// file_sizes / health）。遍历 snapshot readers，非热路径。
+    pub fn segment_info(&self) -> Vec<super::inspect::SegmentInfo> {
+        let collections = self.inner.collections.read().unwrap();
+        let mut result = Vec::new();
+        for col_inner in collections.values() {
+            result.extend(super::inspect::build_segment_info(
+                col_inner,
+                &self.inner.vfs,
+            ));
+        }
+        result
+    }
+
+    /// SPEC §9 inspect API：单个 collection 的段信息（便捷重载）。
+    ///
+    /// collection 不存在时返回 `None`。
+    pub fn collection_segment_info(&self, name: &str) -> Option<Vec<super::inspect::SegmentInfo>> {
+        let collections = self.inner.collections.read().unwrap();
+        let col_inner = collections.get(name)?;
+        Some(super::inspect::build_segment_info(
+            col_inner,
+            &self.inner.vfs,
+        ))
+    }
+
     /// jieba 词典是否可用（Db::open 时加载，dict-zh feature 启用）。
     /// 绑定层（vane-node）用此判断 collection 创建时是否需降级 CjkBigram（Task 3）。
     #[cfg(feature = "jieba")]
     pub fn jieba_dict_available(&self) -> bool {
         self.inner.jieba_dict.read().unwrap().is_some()
+    }
+
+    /// inspect API 内部用：dict_available 不受 jieba feature 门控。
+    /// jieba feature on → 读 `DbInner.jieba_dict`；off → 恒 false。
+    fn dict_available_internal(&self) -> bool {
+        #[cfg(feature = "jieba")]
+        {
+            self.inner.jieba_dict.read().unwrap().is_some()
+        }
+        #[cfg(not(feature = "jieba"))]
+        {
+            false
+        }
     }
 
     /// M2-11：运行时注入 jieba 词典（FFI `vane_load_dict` 调用）。
