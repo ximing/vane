@@ -46,13 +46,15 @@ pub(crate) struct CollectionInner {
     db_path: String,
     segments_dir: String,
     write_state: Mutex<WriteState>,
-    snapshot: RwLock<Vec<Arc<SegmentReader>>>,
+    // M4 §3.6 inspect API：pub(crate) 供 inspect 模块遍历段快照读元数据。
+    pub(crate) snapshot: RwLock<Vec<Arc<SegmentReader>>>,
     // 段 ULID → 全局 docid 基址
     seg_offsets: RwLock<HashMap<String, u64>>,
     // I7：InvertedIndexReader 随段快照缓存，search 直接用，避免每次重开
     inverted_readers: RwLock<Vec<Arc<InvertedIndexReader>>>,
     // 01-hnsw：HnswReader 随段快照缓存。Option 因 M0 段无 hnsw.bin（Q-5 → fallback brute）。
-    hnsw_readers: RwLock<Vec<Option<Arc<HnswReader>>>>,
+    // M4 §3.6 inspect API：pub(crate) 供 inspect 模块检测 hnsw 缺失（Degraded）。
+    pub(crate) hnsw_readers: RwLock<Vec<Option<Arc<HnswReader>>>>,
     // 03-pre-filter：ScalarReader 随段快照缓存（scalars.col），compile_filter 用。
     scalar_readers: RwLock<Vec<Arc<crate::segment::ScalarReader>>>,
     // 02-tombstone-merge：段 ULID → tombstone 位图（绝对 docid）。
@@ -63,7 +65,8 @@ pub(crate) struct CollectionInner {
     // 02-tombstone-merge：compact 进行中标志（防重入；06 reindex 状态机复用）。
     compacting: Mutex<bool>,
     // 06-userdict-reindex：§7.4 词表状态机。
-    dict_state: RwLock<DictState>,
+    // M4 §3.6 inspect API：pub(crate) 供 inspect 模块读 CollectionStats.dict_state。
+    pub(crate) dict_state: RwLock<DictState>,
     // 06-userdict-reindex：暂存新词表（setUserDict 后；reindex 时消费）。
     pending_dict: RwLock<Vec<UserDictEntry>>,
     // 07-dict-distribution-node：collection 级 jieba 词典副本（从 DbInner 克隆 Arc）。
