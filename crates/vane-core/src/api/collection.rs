@@ -265,9 +265,11 @@ impl Collection {
             if let (Some(dim), Some(v)) = (schema_dim, &doc.vector) {
                 if v.len() as u32 != dim {
                     return Err(VaneError::Schema(format!(
-                        "vector dim mismatch: got {} expected {}",
+                        "vector dim mismatch: got {} expected {} (op=add, collection={}, doc_id={}; 建议: 对齐 doc vector 维度与 schema 声明)",
                         v.len(),
-                        dim
+                        dim,
+                        self.inner.name,
+                        doc.id
                     )));
                 }
             }
@@ -580,7 +582,10 @@ impl Collection {
             .collections
             .get_mut(&self.inner.name)
             .ok_or_else(|| {
-                VaneError::NotFound(format!("collection not in manifest: {}", self.inner.name))
+                VaneError::NotFound(format!(
+                    "collection not in manifest: {} (op=merge, db={}; 建议: 确认 collection 已创建)",
+                    self.inner.name, self.inner.db_path
+                ))
             })?;
         col_meta.segment_ulids.retain(|u| !source_ulids.contains(u));
         col_meta.segment_ulids.push(new_meta.ulid.clone());
@@ -686,8 +691,8 @@ impl Collection {
     fn run_search(&self, query: &SearchQuery, allow_hnsw: bool) -> Result<Vec<Hit>> {
         if query.top_k > TOPK_MAX {
             return Err(VaneError::InvalidArg(format!(
-                "topK {} exceeds max {}",
-                query.top_k, TOPK_MAX
+                "topK {} exceeds max {} (op=search, collection={}; 建议: 减小 topK 至 {} 以内)",
+                query.top_k, TOPK_MAX, self.inner.name, TOPK_MAX
             )));
         }
         // 03-pre-filter：编译用户 filter 为 roaring 位图（SPEC §8.3）。
@@ -705,7 +710,7 @@ impl Collection {
                 (None, Some(_)) => SearchMode::Vector,
                 (None, None) => {
                     return Err(VaneError::InvalidArg(
-                        "search requires text or vector".into(),
+                        "search requires text or vector (op=search; 建议: 提供 text 或 vector 查询参数)".into(),
                     ))
                 }
             },
@@ -727,9 +732,10 @@ impl Collection {
             let (_, dim, metric) = self.inner.schema.vector_field()?;
             if v.len() as u32 != dim {
                 return Err(VaneError::Schema(format!(
-                    "query vector dim {} != schema dim {}",
+                    "query vector dim {} != schema dim {} (op=search, collection={}; 建议: 对齐 query vector 维度与 schema 声明)",
                     v.len(),
-                    dim
+                    dim,
+                    self.inner.name
                 )));
             }
             Some(metric)

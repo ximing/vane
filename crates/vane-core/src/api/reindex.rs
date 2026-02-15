@@ -223,10 +223,12 @@ pub(crate) fn update_manifest_after_reindex(
     new_meta: CollectionMeta,
 ) -> Result<()> {
     let mut manifest = manifest_store.load()?.unwrap_or_else(Manifest::empty);
-    let col = manifest
-        .collections
-        .get_mut(col_name)
-        .ok_or_else(|| VaneError::NotFound(format!("collection not in manifest: {}", col_name)))?;
+    let col = manifest.collections.get_mut(col_name).ok_or_else(|| {
+        VaneError::NotFound(format!(
+            "collection not in manifest: {} (op=reindex; 建议: 确认 collection 已创建)",
+            col_name
+        ))
+    })?;
     // 替换 ULID：移除旧 ULID，追加新 ULID（保持其余顺序）。
     col.segment_ulids.retain(|u| !old_ulids.contains(u));
     for u in &new_ulids {

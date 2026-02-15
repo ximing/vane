@@ -138,6 +138,31 @@ fn manifest_store_corrupt_returns_error() {
     assert!(store.load().is_err());
 }
 
+/// M4 阶段五 c：VaneError 诊断上下文——manifest parse 错误 String 含
+/// db 路径 + 操作 + 建议操作（§10 推荐"先丰富 String"）。
+#[test]
+fn m4_5c_manifest_parse_error_contains_context() {
+    use crate::types::VaneError;
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn Vfs>;
+    vfs.create("mydb/manifest.json").unwrap();
+    vfs.write_at("mydb/manifest.json", b"not json {{{", 0)
+        .unwrap();
+    let store = ManifestStore::new(vfs, "mydb");
+    match store.load() {
+        Err(VaneError::Corrupt(m)) => {
+            assert!(
+                m.contains("manifest parse"),
+                "original msg preserved: {}",
+                m
+            );
+            assert!(m.contains("mydb"), "msg must contain db path: {}", m);
+            assert!(m.contains("op=load manifest"), "msg must contain op: {}", m);
+            assert!(m.contains("建议"), "msg must contain suggestion: {}", m);
+        }
+        other => panic!("expected Corrupt, got {:?}", other.map_err(|e| e.name())),
+    }
+}
+
 #[test]
 fn auto_committer_default_is_on_1000_1000() {
     match AutoCommitConfig::default() {

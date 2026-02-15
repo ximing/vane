@@ -106,6 +106,26 @@ impl std::error::Error for VaneError {}
 
 pub type Result<T> = std::result::Result<T, VaneError>;
 
+/// M4 阶段五 c：VaneError 诊断上下文（§10 推荐"先丰富 String"）。
+///
+/// 为 VaneError 的 String payload 追加上下文后缀（段 ULID / docid / 操作 / 建议操作）。
+/// **不改错误码**（-1..-11 不变），不改 enum 签名（不加新字段），仅丰富 String 内容。
+/// 结构化上下文（独立字段）列为 Could，本任务用 String 丰富（§10 推荐路径）。
+///
+/// 无 String payload 的变体（Busy / DictTooLarge / DictUnavailable / Unsupported）原样返回。
+pub(crate) fn append_context(e: VaneError, ctx: &str) -> VaneError {
+    match e {
+        VaneError::Io(m) => VaneError::Io(format!("{}{}", m, ctx)),
+        VaneError::Schema(m) => VaneError::Schema(format!("{}{}", m, ctx)),
+        VaneError::NotFound(m) => VaneError::NotFound(format!("{}{}", m, ctx)),
+        VaneError::Corrupt(m) => VaneError::Corrupt(format!("{}{}", m, ctx)),
+        VaneError::Version(m) => VaneError::Version(format!("{}{}", m, ctx)),
+        VaneError::TokenizerMismatch(m) => VaneError::TokenizerMismatch(format!("{}{}", m, ctx)),
+        VaneError::InvalidArg(m) => VaneError::InvalidArg(format!("{}{}", m, ctx)),
+        other => other,
+    }
+}
+
 /// 检索结果文档（跨 bm25/vector-brute/fusion 模块）。
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScoredDoc {
@@ -289,6 +309,43 @@ mod tests {
         assert!(format!("{}", e).contains("topK exceeds 1000"));
         // std::error::Error trait 可调用 source()
         assert!(std::error::Error::source(&e).is_none());
+    }
+
+    /// M4 阶段五 c：append_context 丰富 String payload 但不改错误码（§10）。
+    #[test]
+    fn append_context_enriches_string_preserves_code() {
+        let ctx = " (seg=01H, op=open; 建议: 检查)";
+        // 带 String 的变体：上下文追加到 payload，code 不变。
+        let cases = [
+            (VaneError::Io("bad".into()), -1i32),
+            (VaneError::Schema("mismatch".into()), -2),
+            (VaneError::NotFound("missing".into()), -3),
+            (VaneError::Corrupt("bad magic".into()), -4),
+            (VaneError::Version("v2".into()), -5),
+            (VaneError::TokenizerMismatch("tok".into()), -6),
+            (VaneError::InvalidArg("topK".into()), -11),
+        ];
+        for (e, code) in cases {
+            let enriched = append_context(e, ctx);
+            assert_eq!(enriched.code(), code, "code must not change for {}", code);
+            let msg = format!("{}", enriched);
+            assert!(
+                msg.contains("seg=01H"),
+                "msg must contain seg context: {}",
+                msg
+            );
+            assert!(
+                msg.contains("op=open"),
+                "msg must contain op context: {}",
+                msg
+            );
+            assert!(msg.contains("建议"), "msg must contain suggestion: {}", msg);
+        }
+        // 无 String 的变体：原样返回（code 不变，无 String 可丰富）。
+        assert_eq!(append_context(VaneError::Busy, ctx).code(), -9);
+        assert_eq!(append_context(VaneError::DictTooLarge, ctx).code(), -7);
+        assert_eq!(append_context(VaneError::DictUnavailable, ctx).code(), -8);
+        assert_eq!(append_context(VaneError::Unsupported, ctx).code(), -10);
     }
 
     #[test]

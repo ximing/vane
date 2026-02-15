@@ -254,7 +254,9 @@ pub fn finalize_merge(
     ctx: &MergeContext,
 ) -> crate::types::Result<SegmentMeta> {
     let writer = task.writer.take().ok_or_else(|| {
-        crate::types::VaneError::InvalidArg("finalize_merge with no steps".into())
+        crate::types::VaneError::InvalidArg(
+            "finalize_merge with no steps (op=merge; 建议: 检查 merge 调用序列)".into(),
+        )
     })?;
     let meta = writer.finalize()?;
     let seg_dir = format!("{}/seg_{}", ctx.segments_dir, meta.ulid);

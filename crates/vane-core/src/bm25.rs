@@ -343,18 +343,24 @@ impl InvertedIndexReader {
         let n = vfs.read_at(&path, &mut header, 0)?;
         if n < 8 {
             return Err(VaneError::Corrupt(format!(
-                "inverted.bin truncated header: {}",
-                n
+                "inverted.bin truncated header: {}{}",
+                n,
+                crate::segment::seg_ctx(segment_dir, "open inverted.bin")
             )));
         }
         if &header[0..4] != MAGIC {
-            return Err(VaneError::Corrupt("inverted.bin bad magic".into()));
+            return Err(VaneError::Corrupt(format!(
+                "inverted.bin bad magic{}",
+                crate::segment::seg_ctx(segment_dir, "open inverted.bin")
+            )));
         }
         let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
         if version != FORMAT_VERSION {
             return Err(VaneError::Version(format!(
-                "inverted.bin version {} != supported {}",
-                version, FORMAT_VERSION
+                "inverted.bin version {} != supported {}{}",
+                version,
+                FORMAT_VERSION,
+                crate::segment::seg_ctx(segment_dir, "open inverted.bin")
             )));
         }
 

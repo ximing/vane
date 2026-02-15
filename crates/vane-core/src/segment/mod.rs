@@ -360,6 +360,27 @@ fn read_all(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// 从 segment_dir 路径末段 `seg_<ulid>` 提取 ULID 字符串（诊断上下文用）。
+/// M4 阶段五 c：VaneError 诊断 String 丰富——段级错误附 ULID 上下文。
+pub(crate) fn segment_ulid_from_dir(segment_dir: &str) -> &str {
+    segment_dir
+        .rsplit('/')
+        .next()
+        .and_then(|c| c.strip_prefix("seg_"))
+        .unwrap_or("unknown")
+}
+
+/// 段级诊断上下文后缀（M4 阶段五 c）。
+/// 用于 SegmentReader::open / load_vectors / InvertedIndexReader::open 等段级
+/// 错误路径的 VaneError String 丰富。不改错误码，仅追加 String 上下文。
+pub(crate) fn seg_ctx(segment_dir: &str, op: &str) -> String {
+    format!(
+        " (seg={}, op={}; 建议: 检查段文件完整性或从备份恢复)",
+        segment_ulid_from_dir(segment_dir),
+        op
+    )
+}
+
 impl SegmentReader {
     /// M2-07 冷启动懒加载：open 仅读 header + id_map + 廉价头探测（SPEC v1.2 §13.1 元数据 open<1s）。
     /// vectors/stored payload 改 OnceLock 首次访问按需加载；dim 首次访问按需计算（v2 头含 dim；v1 回退）。
@@ -371,7 +392,9 @@ impl SegmentReader {
         // 读 header
         let hpath = format!("{}/header.bin", segment_dir);
         let hbuf = read_all(vfs.as_ref(), &hpath)?;
-        let meta = header::decode_header(&hbuf)?;
+        let meta = header::decode_header(&hbuf).map_err(|e| {
+            crate::types::append_context(e, &seg_ctx(segment_dir, "open header.bin"))
+        })?;
 
         // 读 id_map（小文件，open 时读）
         let id_map = Self::load_id_map(vfs.as_ref(), segment_dir)?;
@@ -385,7 +408,10 @@ impl SegmentReader {
             let mut hdr = [0u8; 12];
             let n = vfs.read_at(&vpath, &mut hdr, 0)?;
             if n < 8 || &hdr[0..4] != crate::types::MAGIC {
-                return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
+                return Err(VaneError::Corrupt(format!(
+                    "vectors.bin bad magic{}",
+                    seg_ctx(segment_dir, "open vectors.bin")
+                )));
             }
             let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
             match version {
@@ -393,18 +419,20 @@ impl SegmentReader {
                 v if v == crate::types::VECTORS_FORMAT_V2 => {
                     // v2：dim 字段在 offset 8..12（M2-08 写入，本模块读）。
                     if n < 12 {
-                        return Err(VaneError::Corrupt(
-                            "vectors.bin v2 header truncated (need 12 bytes)".into(),
-                        ));
+                        return Err(VaneError::Corrupt(format!(
+                            "vectors.bin v2 header truncated (need 12 bytes){}",
+                            seg_ctx(segment_dir, "open vectors.bin")
+                        )));
                     }
                     Some(u32::from_le_bytes(hdr[8..12].try_into().unwrap()))
                 }
                 _ => {
                     return Err(VaneError::Version(format!(
-                        "vectors.bin unsupported format_version: {} (expected {} or {})",
+                        "vectors.bin unsupported format_version: {} (expected {} or {}){}",
                         version,
                         crate::types::VECTORS_FORMAT_V1,
-                        crate::types::VECTORS_FORMAT_V2
+                        crate::types::VECTORS_FORMAT_V2,
+                        seg_ctx(segment_dir, "open vectors.bin")
                     )));
                 }
             }
@@ -419,15 +447,19 @@ impl SegmentReader {
             let mut shdr = [0u8; 8];
             let n = vfs.read_at(&spath, &mut shdr, 0)?;
             if n < 8 || &shdr[0..4] != crate::types::MAGIC {
-                return Err(VaneError::Corrupt("stored.bin bad magic".into()));
+                return Err(VaneError::Corrupt(format!(
+                    "stored.bin bad magic{}",
+                    seg_ctx(segment_dir, "open stored.bin")
+                )));
             }
             let sver = u32::from_le_bytes(shdr[4..8].try_into().unwrap());
             if sver != crate::types::STORED_FORMAT_V1 && sver != crate::types::STORED_FORMAT_V2 {
                 return Err(VaneError::Version(format!(
-                    "stored.bin unsupported format_version: {} (expected {} or {})",
+                    "stored.bin unsupported format_version: {} (expected {} or {}){}",
                     sver,
                     crate::types::STORED_FORMAT_V1,
-                    crate::types::STORED_FORMAT_V2
+                    crate::types::STORED_FORMAT_V2,
+                    seg_ctx(segment_dir, "open stored.bin")
                 )));
             }
         }
@@ -454,7 +486,10 @@ impl SegmentReader {
         let vpath = format!("{}/vectors.bin", segment_dir);
         let vbuf = read_all(vfs, &vpath)?;
         if vbuf.len() < 8 || &vbuf[0..4] != crate::types::MAGIC {
-            return Err(VaneError::Corrupt("vectors.bin bad magic".into()));
+            return Err(VaneError::Corrupt(format!(
+                "vectors.bin bad magic{}",
+                seg_ctx(segment_dir, "load vectors")
+            )));
         }
         let version = u32::from_le_bytes(vbuf[4..8].try_into().unwrap());
         // M2-08：字面量 2 替换为 VECTORS_FORMAT_V2 常量。v1=VECTORS_FORMAT_V1，v2 含 dim 头。
@@ -463,15 +498,19 @@ impl SegmentReader {
             v if v == crate::types::VECTORS_FORMAT_V2 => 12,
             _ => {
                 return Err(VaneError::Version(format!(
-                    "vectors.bin unsupported format_version: {} (expected {} or {})",
+                    "vectors.bin unsupported format_version: {} (expected {} or {}){}",
                     version,
                     crate::types::VECTORS_FORMAT_V1,
-                    crate::types::VECTORS_FORMAT_V2
+                    crate::types::VECTORS_FORMAT_V2,
+                    seg_ctx(segment_dir, "load vectors")
                 )));
             }
         };
         if vbuf.len() < payload_off {
-            return Err(VaneError::Corrupt("vectors.bin truncated".into()));
+            return Err(VaneError::Corrupt(format!(
+                "vectors.bin truncated{}",
+                seg_ctx(segment_dir, "load vectors")
+            )));
         }
         Ok(vbuf[payload_off..]
             .chunks_exact(4)
