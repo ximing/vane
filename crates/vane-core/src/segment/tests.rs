@@ -731,6 +731,44 @@ fn m2_07_open_rejects_truncated_v2_header() {
     );
 }
 
+/// M4 阶段五 c：VaneError 诊断上下文——SegmentReader::open 的错误 String
+/// 含段 ULID + 操作 + 建议操作（§10 推荐"先丰富 String"）。
+/// 断言非 vacuous：检 String 含 seg=ULID、op=open、建议关键词。
+#[test]
+fn m4_5c_open_error_contains_segment_context() {
+    use crate::types::VaneError;
+    let (vfs, seg_dir) = build_v1_segment(4, &[("a", &[1.0, 2.0, 3.0, 4.0])]);
+    // 提取段 ULID（seg_dir 末段 seg_<ulid>）
+    let ulid = seg_dir.rsplit('/').next().unwrap();
+    let ulid = ulid.strip_prefix("seg_").unwrap_or(ulid);
+
+    // corrupt vectors.bin magic → Corrupt error 含 seg=<ulid> + op=open
+    let vpath = format!("{}/vectors.bin", seg_dir);
+    let mut hdr = [0u8; 8];
+    let _ = vfs.read_at(&vpath, &mut hdr, 0).unwrap();
+    hdr[0] = b'X';
+    vfs.write_at(&vpath, &hdr, 0).unwrap();
+    let r = SegmentReader::open(&vfs, &seg_dir);
+    match r {
+        Err(VaneError::Corrupt(m)) => {
+            assert!(
+                m.contains("vectors.bin bad magic"),
+                "original message preserved: {}",
+                m
+            );
+            assert!(
+                m.contains(ulid),
+                "msg must contain segment ULID {}: {}",
+                ulid,
+                m
+            );
+            assert!(m.contains("op=open"), "msg must contain operation: {}", m);
+            assert!(m.contains("建议"), "msg must contain suggestion: {}", m);
+        }
+        other => panic!("expected Corrupt, got {:?}", other.err().map(|e| e.name())),
+    }
+}
+
 /// 评审测试缺口：reindex/merge 路径首次访问前 vectors.get().is_none()、后 .is_some()。
 /// 用 merge 路径验证（merge_ctx 读 reader.vectors()）——这里直接验证 SegmentReader
 /// 在 reindex/merge 典型调用顺序（dim 先于 vectors）下的懒加载行为。

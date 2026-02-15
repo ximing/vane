@@ -181,3 +181,24 @@ fn recover_empty_segments_dir_no_error() {
     let _tombstones = recover(&vfs, "db", &manifest).unwrap();
     // 无异常即通过。
 }
+
+/// M4 阶段五 c：VaneError 诊断上下文——wal parse 错误 String 含
+/// wal 路径 + 操作 + 建议操作（§10 推荐"先丰富 String"）。
+#[test]
+fn m4_5c_wal_parse_error_contains_context() {
+    use crate::types::VaneError;
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn crate::vfs::Vfs>;
+    // 写损坏的 wal.log（非 JSON 行）
+    vfs.create("mydb/wal.log").unwrap();
+    vfs.write_at("mydb/wal.log", b"not json {{{\n", 0).unwrap();
+    let wal = Wal::open(vfs, "mydb").unwrap();
+    match wal.read_all() {
+        Err(VaneError::Corrupt(m)) => {
+            assert!(m.contains("wal parse"), "original msg preserved: {}", m);
+            assert!(m.contains("mydb"), "msg must contain path: {}", m);
+            assert!(m.contains("op=wal recover"), "msg must contain op: {}", m);
+            assert!(m.contains("建议"), "msg must contain suggestion: {}", m);
+        }
+        other => panic!("expected Corrupt, got {:?}", other.map_err(|e| e.name())),
+    }
+}

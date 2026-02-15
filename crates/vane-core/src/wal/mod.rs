@@ -66,8 +66,12 @@ impl Wal {
         // M4 §3.5 tracing：WAL append 次数——记录值（Debug）。cfg 门控，编译期消除。
         #[cfg(feature = "tracing")]
         tracing::debug!(?record, "wal append");
-        let mut line = serde_json::to_vec(record)
-            .map_err(|e| VaneError::Corrupt(format!("wal serialize: {}", e)))?;
+        let mut line = serde_json::to_vec(record).map_err(|e| {
+            VaneError::Corrupt(format!(
+                "wal serialize: {} (path={}, op=wal append; 建议: 检查 wal.log 完整性或重新操作)",
+                e, self.path
+            ))
+        })?;
         line.push(b'\n');
         self.vfs.append(&self.path, &line)?;
         self.vfs.sync(&self.path)?;
@@ -96,8 +100,12 @@ impl Wal {
             if line.is_empty() {
                 continue;
             }
-            let r: WalRecord = serde_json::from_slice(line)
-                .map_err(|e| VaneError::Corrupt(format!("wal parse: {}", e)))?;
+            let r: WalRecord = serde_json::from_slice(line).map_err(|e| {
+                VaneError::Corrupt(format!(
+                    "wal parse: {} (path={}, op=wal recover; 建议: wal.log 损坏，检查崩溃恢复或清除 wal.log 重试)",
+                    e, self.path
+                ))
+            })?;
             records.push(r);
         }
         Ok(records)

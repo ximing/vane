@@ -89,8 +89,12 @@ impl ManifestStore {
         if buf.is_empty() {
             return Ok(None);
         }
-        let m: Manifest = serde_json::from_slice(&buf)
-            .map_err(|e| VaneError::Corrupt(format!("manifest parse: {}", e)))?;
+        let m: Manifest = serde_json::from_slice(&buf).map_err(|e| {
+            VaneError::Corrupt(format!(
+                "manifest parse: {} (db={}, op=load manifest; 建议: 检查 manifest.json 完整性或从备份恢复)",
+                e, self.db_path
+            ))
+        })?;
         Ok(Some(m))
     }
 
@@ -98,8 +102,12 @@ impl ManifestStore {
     /// 不变量 I-6：任何崩溃后 manifest 指向完整状态（rename 前崩溃 → 旧 manifest 完好；
     /// rename 是原子操作 → manifest 永远指向完整新状态或完整旧状态）。
     pub fn save_atomic(&self, manifest: &Manifest) -> Result<()> {
-        let json = serde_json::to_vec(manifest)
-            .map_err(|e| VaneError::Corrupt(format!("manifest serialize: {}", e)))?;
+        let json = serde_json::to_vec(manifest).map_err(|e| {
+            VaneError::Corrupt(format!(
+                "manifest serialize: {} (db={}, op=save manifest; 建议: 重试或检查磁盘空间)",
+                e, self.db_path
+            ))
+        })?;
         let tmp = self.tmp_path();
         let target = self.manifest_path();
         // I16 裁决：先清理可能残留的 tmp（忽略错误，tmp 可能不存在），处理上次崩溃残留。
@@ -115,10 +123,12 @@ impl ManifestStore {
     /// 在指定 collection 的 segment_ulids 中追加一个 ULID（去重），并原子保存。
     pub fn add_segment(&self, collection: &str, ulid: &str) -> Result<()> {
         let mut m = self.load()?.unwrap_or_else(Manifest::empty);
-        let col = m
-            .collections
-            .get_mut(collection)
-            .ok_or_else(|| VaneError::NotFound(format!("collection not found: {}", collection)))?;
+        let col = m.collections.get_mut(collection).ok_or_else(|| {
+            VaneError::NotFound(format!(
+                "collection not found: {} (db={}, seg={}, op=add_segment; 建议: 确认 collection 名称正确)",
+                collection, self.db_path, ulid
+            ))
+        })?;
         if !col.segment_ulids.contains(&ulid.to_string()) {
             col.segment_ulids.push(ulid.to_string());
         }
