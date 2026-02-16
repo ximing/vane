@@ -45,6 +45,9 @@ pub(crate) struct CollectionInner {
     vfs: Arc<dyn Vfs>,
     db_path: String,
     segments_dir: String,
+    // M4 Phase 4 fix（Bug 1）：共享 DbInner 的 Arc<ManifestStore>，跨线程 / 跨 collection
+    // 共用同一 save_lock → 并发 flush/merge 的 manifest 原子保存被序列化。
+    manifest_store: Arc<ManifestStore>,
     write_state: Mutex<WriteState>,
     // M4 §3.6 inspect API：pub(crate) 供 inspect 模块遍历段快照读元数据。
     pub(crate) snapshot: RwLock<Vec<Arc<SegmentReader>>>,
@@ -186,6 +189,7 @@ impl CollectionInner {
             vfs: db.vfs.clone(),
             db_path: db.db_path.clone(),
             segments_dir,
+            manifest_store: db.manifest_store.clone(),
             write_state: Mutex::new(WriteState {
                 buffer: Vec::new(),
                 auto_committer: AutoCommitter::new(auto_commit),
@@ -316,7 +320,26 @@ impl Collection {
             return Ok(());
         }
         let docs = std::mem::take(&mut state.buffer);
-        let base_docid = docs.first().map(|d| d.docid).unwrap_or(0);
+        // M4 Phase 4 fix Bug 2：base_docid 选择——检测缓冲文档 docid 是否连续。
+        // - 连续（无并发 merge 在 add 之间 bump next_docid）→ 用首文档 docid 作 base
+        //   （保持 inspect base=0 语义；merge 的 target_docid_base 已并入 next_docid，
+        //   读 next_docid=first+count 后 target_base >= first+count，新段在本段之上）。
+        // - 非连续（并发 merge 在 add 之间 bump 了 next_docid，docid 有 gap）→
+        //   用首文档 stale docid 作 base 写连续 [base, base+count) 会与 merge 新段
+        //   重叠 → rebase 到当前 next_docid（merge 已 bump 到新段末尾之上）。
+        let count = docs.len() as u64;
+        let first_docid = docs.first().map(|d| d.docid).unwrap_or(0);
+        let contiguous = docs
+            .iter()
+            .enumerate()
+            .all(|(i, d)| d.docid == first_docid + i as u64);
+        let base_docid = if contiguous {
+            first_docid
+        } else {
+            let base = state.next_docid;
+            state.next_docid = base + count;
+            base
+        };
         state.auto_committer.reset();
         drop(state);
 
@@ -430,9 +453,11 @@ impl Collection {
             ulid: meta.ulid.clone(),
         })?;
 
-        // 更新 manifest（I-6 原子切换）
-        let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
-        manifest_store.add_segment(&self.inner.name, &meta.ulid)?;
+        // 更新 manifest（I-6 原子切换）。M4 Phase 4 fix Bug 1：复用共享
+        // Arc<ManifestStore>，add_segment 内部 save_lock 序列化并发原子切换。
+        self.inner
+            .manifest_store
+            .add_segment(&self.inner.name, &meta.ulid)?;
 
         // 更新段快照（Arc swap 语义：写锁替换 Vec）
         // I7：open 一次 InvertedIndexReader 并缓存
@@ -483,7 +508,40 @@ impl Collection {
     }
 
     /// 选最小两段合并（auto-merge on exceeding SEGMENT_MAX，SPEC §3.3）。
+    ///
+    /// M4 Phase 4 fix（Bug 2）：auto-merge 原先不获取 compacting 锁，与并发
+    /// compact/reindex 竞争 → 段未正确移除 → double-count。现 try-lock compacting：
+    /// 若并发 compact/reindex 已持锁 → skip（return Ok，auto-merge 是 best-effort
+    /// 优化，skip 安全降级，下次 flush 段数仍超阈值时再 merge）。复用 compact/reindex
+    /// 的 CompactingGuard（M-minor-1 panic-safe Drop 复位 false，避免一次 panic 致
+    /// 永久 E_BUSY）。guard 不持其他锁——Drop 时重新取 compacting 锁复位（与原模式等价）。
     fn auto_merge_two_smallest(&self) -> Result<()> {
+        // try-lock compacting：WouldBlock → skip；Poisoned → 恢复（设 true 继续 merge）。
+        {
+            let mut guard = match self.inner.compacting.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // 并发 compact/reindex 持锁 → skip（best-effort 降级）
+                    return Ok(());
+                }
+                Err(std::sync::TryLockError::Poisoned(e)) => {
+                    // 上次 panic 致锁中毒：恢复（取 guard 继续），guard drop 复位。
+                    e.into_inner()
+                }
+            };
+            if *guard {
+                // 理论上 try_lock 成功时 *guard=false（正常路径）；Poisoned 恢复路径
+                // 若残留 true → skip（保守降级，下次再 merge）。
+                return Ok(());
+            }
+            *guard = true;
+            // 显式 drop MutexGuard：CompactingGuard 的 Drop 会重新取锁复位，
+            // 此处先释放避免后续 merge_segments 取其他锁时的持有顺序歧义
+            // （与 compact/reindex 的 finally 模式一致）。
+        }
+        let _cg = CompactingGuard {
+            flag: &self.inner.compacting,
+        };
         let snap = self.inner.snapshot.read().unwrap().clone();
         if snap.len() < 2 {
             return Ok(());
@@ -516,23 +574,52 @@ impl Collection {
         let offsets = self.inner.seg_offsets.read().unwrap().clone();
         let tombstones = self.inner.tombstones.read().unwrap().clone();
         let snap = self.inner.snapshot.read().unwrap().clone();
-        // target_docid_base 选择（02-review B-2 修复）：
+        // target_docid_base 选择（02-review B-2 修复 + M4 Phase 4 fix Bug 2）：
         // - compact 全合并（source 覆盖全部段，无保留段）：0（从 0 起合理）。
-        // - partial auto-merge（合并 2/N 段）：max(保留段 base + count)，
+        // - partial auto-merge（合并 2/N 段）：max(保留段 base + count, next_docid)，
         //   新段 docid 从所有保留段的最大 docid 之后开始，避免与任何保留段
         //   docid 空间重叠（否则 search 回填误命中、fusion 去重丢文档）。
+        //   M4 Phase 4 fix Bug 2：并入 next_docid——next_docid 是 add 已分配但
+        //   尚未 flush 的缓冲文档 docid 上界。并发 flush 的缓冲 docid 在
+        //   [old_next_docid, next_docid) 区间，若 merge 的 target_base 不计入
+        //   next_docid，新段会与 about-to-flush 的缓冲段 docid 重叠 → fusion
+        //   去重丢文档 + 回填误命中 → search double-count/missing。
         let is_full_merge = snap.iter().all(|r| source_ulids.contains(&r.meta().ulid));
-        let target_docid_base = if is_full_merge {
-            0
-        } else {
-            snap.iter()
-                .filter(|r| !source_ulids.contains(&r.meta().ulid))
-                .map(|r| {
-                    let base = offsets.get(&r.meta().ulid).copied().unwrap_or(0);
-                    base + r.doc_count() as u64
-                })
-                .max()
-                .unwrap_or(0)
+        let max_non_source_end: u64 = snap
+            .iter()
+            .filter(|r| !source_ulids.contains(&r.meta().ulid))
+            .map(|r| {
+                let base = offsets.get(&r.meta().ulid).copied().unwrap_or(0);
+                base + r.doc_count() as u64
+            })
+            .max()
+            .unwrap_or(0);
+        // estimate = source 段 doc_count 之和（上界，tombstone 清除后实际
+        // new_count <= estimate；多预留的区间留空，无危害）。
+        let estimated_new_count: u64 = snap
+            .iter()
+            .filter(|r| source_ulids.contains(&r.meta().ulid))
+            .map(|r| r.doc_count() as u64)
+            .sum();
+        // M4 Phase 4 fix Bug 2：**原子地**读 next_docid + 算 target_docid_base +
+        // bump next_docid 到 reserved_end（一次 write_state lock 内完成）。若分两步
+        // （先读 next_docid 释放锁，再 bump），并发 add 会在两步之间分配 docid =
+        // 旧 next_docid，而 merge 的 target_base = 旧 next_docid → 新段与 about-to-
+        // flush 的缓冲段 docid 重叠。原子 read+bump 消除该窗口：并发 add 在本块
+        // 之前/之后拿锁，看到的 next_docid 都已 bump 到 reserved_end，其分配的
+        // docid 推到 merge 新段之后。
+        let target_docid_base = {
+            let mut state = self.inner.write_state.lock().unwrap();
+            let tdb = if is_full_merge {
+                0
+            } else {
+                max_non_source_end.max(state.next_docid)
+            };
+            let reserved_end = tdb + estimated_new_count;
+            if reserved_end > state.next_docid {
+                state.next_docid = reserved_end;
+            }
+            tdb
         };
         // M4 §3.5 tracing：merge 频率——入口埋点（sources 数 + target base + 是否全合并）。
         #[cfg(feature = "tracing")]
@@ -573,38 +660,39 @@ impl Collection {
             }
         }
 
-        // 更新 manifest（I-6）。
-        let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
-        let mut manifest = manifest_store
-            .load()?
-            .unwrap_or_else(crate::persistence::Manifest::empty);
-        let col_meta = manifest
-            .collections
-            .get_mut(&self.inner.name)
-            .ok_or_else(|| {
-                VaneError::NotFound(format!(
-                    "collection not in manifest: {} (op=merge, db={}; 建议: 确认 collection 已创建)",
-                    self.inner.name, self.inner.db_path
-                ))
-            })?;
-        col_meta.segment_ulids.retain(|u| !source_ulids.contains(u));
-        col_meta.segment_ulids.push(new_meta.ulid.clone());
-        // 04-wal：manifest 切换前 append 段增删记录（SPEC §6.4）：
-        // DeleteSegment(旧) + AddSegment(新)。crash 在 manifest 切换前 →
-        // AddSegment(new) 不在 manifest → 孤儿清理；DeleteSegment(old) → 旧段保留。
-        // B-2：truncate 仅 compact 调（此处 merge_segments 不 truncate）。
-        let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
-        for u in &source_ulids {
-            wal.append(&crate::wal::WalRecord::DeleteSegment {
+        // 更新 manifest（I-6）。M4 Phase 4 fix Bug 1：用 update 闭包把
+        // load-modify-WAL-save 整个事务包在 save_lock 内，杜绝并发 flush/merge 的
+        // lost-update 与 manifest.json.tmp 覆盖竞态。WAL → manifest 的 §6.4 顺序保持
+        // （WAL append 在闭包内、save_atomic_locked 在闭包返回后）。
+        self.inner.manifest_store.update(|manifest| {
+            let col_meta = manifest
+                .collections
+                .get_mut(&self.inner.name)
+                .ok_or_else(|| {
+                    VaneError::NotFound(format!(
+                        "collection not in manifest: {} (op=merge, db={}; 建议: 确认 collection 已创建)",
+                        self.inner.name, self.inner.db_path
+                    ))
+                })?;
+            col_meta.segment_ulids.retain(|u| !source_ulids.contains(u));
+            col_meta.segment_ulids.push(new_meta.ulid.clone());
+            // 04-wal：manifest 切换前 append 段增删记录（SPEC §6.4）：
+            // DeleteSegment(旧) + AddSegment(新)。crash 在 manifest 切换前 →
+            // AddSegment(new) 不在 manifest → 孤儿清理；DeleteSegment(old) → 旧段保留。
+            // B-2：truncate 仅 compact 调（此处 merge_segments 不 truncate）。
+            let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
+            for u in &source_ulids {
+                wal.append(&crate::wal::WalRecord::DeleteSegment {
+                    collection: self.inner.name.clone(),
+                    ulid: u.clone(),
+                })?;
+            }
+            wal.append(&crate::wal::WalRecord::AddSegment {
                 collection: self.inner.name.clone(),
-                ulid: u.clone(),
+                ulid: new_meta.ulid.clone(),
             })?;
-        }
-        wal.append(&crate::wal::WalRecord::AddSegment {
-            collection: self.inner.name.clone(),
-            ulid: new_meta.ulid.clone(),
+            Ok(())
         })?;
-        manifest_store.save_atomic(&manifest)?;
 
         // 更新内存快照。
         let new_reader = Arc::new(SegmentReader::open(&self.inner.vfs, &new_seg_dir)?);
@@ -631,10 +719,12 @@ impl Collection {
             for (i, r) in old_snap.iter().enumerate() {
                 if !source_ulids.contains(&r.meta().ulid) {
                     snap_w.push(r.clone());
-                    offsets_w.insert(
-                        r.meta().ulid.clone(),
-                        offsets.get(&r.meta().ulid).copied().unwrap_or(0),
-                    );
+                    // M4 Phase 4 fix Bug 2：保留段不覆写 offsets_w——offsets_w 在写锁内
+                    // 已含并发 flush 新推入段的正确 base。若用 merge 入口读的 stale
+                    // `offsets` 覆写，并发 flush 在 merge 读 offsets（line 555）后推入的
+                    // 段会落入 unwrap_or(0) → 偏移被错置为 0 → search 回填算错 docid
+                    // → 活文档「丢失」（reopen 重建 offsets 后又可见，故 manifest 一致）。
+                    // 段不可变（I-1），保留段 offset 不变，无需 re-insert。
                     if let Some(inv) = old_inv.get(i) {
                         inv_w.push(inv.clone());
                     }
@@ -1306,7 +1396,8 @@ impl Collection {
         }
 
         // 原子切换 manifest（I-6）：ULID 替换 + tokenizer_id/user_dict 更新。
-        let manifest_store = ManifestStore::new(self.inner.vfs.clone(), &self.inner.db_path);
+        // M4 Phase 4 fix Bug 1：复用共享 Arc<ManifestStore>（save_lock 序列化并发）。
+        let manifest_store = &self.inner.manifest_store;
         let new_ulids: Vec<String> = new_segments.iter().map(|s| s.ulid.clone()).collect();
         // 04-wal（06 遗留 #1）：manifest 切换前 append 段增删 + re-keyed tombstone 记录。
         // - AddSegment(新段)：crash 在 manifest 前 → 孤儿清理。
@@ -1350,7 +1441,7 @@ impl Collection {
             segment_ulids: new_ulids.clone(),
         };
         crate::api::reindex::update_manifest_after_reindex(
-            &manifest_store,
+            manifest_store,
             &self.inner.name,
             &old_ulids,
             new_ulids.clone(),

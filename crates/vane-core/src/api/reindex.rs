@@ -9,7 +9,7 @@
 
 use crate::bm25::{write_inverted, InvertedIndexBuilder, InvertedIndexReader};
 use crate::hnsw::{write_hnsw, HnswReader, HnswWriter};
-use crate::persistence::{CollectionMeta, Manifest, ManifestStore};
+use crate::persistence::{CollectionMeta, ManifestStore};
 use crate::segment::{ScalarReader, SegmentReader, SegmentWriter};
 use crate::tokenizer::Tokenizer;
 use crate::types::{Result, Schema, TokenizerId, VaneError};
@@ -215,6 +215,9 @@ pub(crate) fn reindex_segment(
 }
 
 /// 更新 manifest 中的 collection meta（段 ULID 替换 + tokenizer_id/user_dict 更新）。
+///
+/// M4 Phase 4 fix（Bug 1）：用 `update` 闭包把 load-modify-save 包在 save_lock 内，
+/// 杜绝并发 reindex/flush 的 lost-update 与 tmp 覆盖。
 pub(crate) fn update_manifest_after_reindex(
     manifest_store: &ManifestStore,
     col_name: &str,
@@ -222,21 +225,22 @@ pub(crate) fn update_manifest_after_reindex(
     new_ulids: Vec<String>,
     new_meta: CollectionMeta,
 ) -> Result<()> {
-    let mut manifest = manifest_store.load()?.unwrap_or_else(Manifest::empty);
-    let col = manifest.collections.get_mut(col_name).ok_or_else(|| {
-        VaneError::NotFound(format!(
-            "collection not in manifest: {} (op=reindex; 建议: 确认 collection 已创建)",
-            col_name
-        ))
-    })?;
-    // 替换 ULID：移除旧 ULID，追加新 ULID（保持其余顺序）。
-    col.segment_ulids.retain(|u| !old_ulids.contains(u));
-    for u in &new_ulids {
-        if !col.segment_ulids.contains(u) {
-            col.segment_ulids.push(u.clone());
+    manifest_store.update(|manifest| {
+        let col = manifest.collections.get_mut(col_name).ok_or_else(|| {
+            VaneError::NotFound(format!(
+                "collection not in manifest: {} (op=reindex; 建议: 确认 collection 已创建)",
+                col_name
+            ))
+        })?;
+        // 替换 ULID：移除旧 ULID，追加新 ULID（保持其余顺序）。
+        col.segment_ulids.retain(|u| !old_ulids.contains(u));
+        for u in &new_ulids {
+            if !col.segment_ulids.contains(u) {
+                col.segment_ulids.push(u.clone());
+            }
         }
-    }
-    col.tokenizer_id = new_meta.tokenizer_id;
-    col.user_dict = new_meta.user_dict;
-    manifest_store.save_atomic(&manifest)
+        col.tokenizer_id = new_meta.tokenizer_id;
+        col.user_dict = new_meta.user_dict;
+        Ok(())
+    })
 }
