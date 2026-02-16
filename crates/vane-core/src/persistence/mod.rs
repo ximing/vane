@@ -8,7 +8,7 @@ use crate::tokenizer::{BuiltinTokenizer, UserDictEntry};
 use crate::types::{Result, Schema, TokenizerId, VaneError};
 use crate::vfs::Vfs;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 mod tests;
@@ -49,6 +49,13 @@ const MANIFEST_TMP: &str = "manifest.json.tmp";
 pub struct ManifestStore {
     vfs: Arc<dyn Vfs>,
     db_path: String,
+    // M4 Phase 4 fix（Bug 1）：序列化 manifest 原子保存。并发 save_atomic 共享固定
+    // tmp 路径 `manifest.json.tmp`，delete/create/write_at/sync/rename 交错会互相覆写
+    // tmp → manifest 损坏（E_CORRUPT）。save_lock 串行化原子的 manifest 切换；
+    // 段文件写仍并发（各自 seg_<ulid>/ 目录，互不冲突）。private 字段，不改 pub API。
+    // 共享实例（DbInner 持 Arc<ManifestStore>，CollectionInner 克隆同一 Arc）→ 跨
+    // collection / 跨线程的 save_atomic 全部序列化，覆盖同一 db_path 的并发场景。
+    save_lock: Mutex<()>,
 }
 
 impl ManifestStore {
@@ -56,6 +63,7 @@ impl ManifestStore {
         Self {
             vfs,
             db_path: db_path.to_string(),
+            save_lock: Mutex::new(()),
         }
     }
 
@@ -101,7 +109,20 @@ impl ManifestStore {
     /// SPEC §6.4 原子切换：写临时文件 → sync → rename。
     /// 不变量 I-6：任何崩溃后 manifest 指向完整状态（rename 前崩溃 → 旧 manifest 完好；
     /// rename 是原子操作 → manifest 永远指向完整新状态或完整旧状态）。
+    ///
+    /// M4 Phase 4 fix（Bug 1）：入口获取 save_lock，串行化并发原子切换。并发 save_atomic
+    /// 共享固定 tmp 路径 `manifest.json.tmp`，无锁则 delete/create/write_at/sync/rename
+    /// 交错覆写 → manifest 损坏（E_CORRUPT）。段文件写仍并发（各自 seg_<ulid>/ 目录）。
     pub fn save_atomic(&self, manifest: &Manifest) -> Result<()> {
+        let _save_guard = self.save_lock.lock().unwrap();
+        self.save_atomic_locked(manifest)
+    }
+
+    /// save_atomic 的落盘实现——调用者**必须**已持有 save_lock。
+    ///
+    /// 拆出私有方法是为了让 [`add_segment`] / [`update`] 在持锁的 load-modify-save
+    /// 事务中复用落盘逻辑而不重入 save_lock（std::sync::Mutex 不可重入，重入死锁）。
+    fn save_atomic_locked(&self, manifest: &Manifest) -> Result<()> {
         let json = serde_json::to_vec(manifest).map_err(|e| {
             VaneError::Corrupt(format!(
                 "manifest serialize: {} (db={}, op=save manifest; 建议: 重试或检查磁盘空间)",
@@ -121,7 +142,11 @@ impl ManifestStore {
     }
 
     /// 在指定 collection 的 segment_ulids 中追加一个 ULID（去重），并原子保存。
+    ///
+    /// M4 Phase 4 fix（Bug 1）：load-modify-save 须在同一 save_lock 内完成，否则
+    /// 并发 add_segment 的 load 互相看不到对方未保存的修改 → lost-update（一方段 ULID 丢失）。
     pub fn add_segment(&self, collection: &str, ulid: &str) -> Result<()> {
+        let _save_guard = self.save_lock.lock().unwrap();
         let mut m = self.load()?.unwrap_or_else(Manifest::empty);
         let col = m.collections.get_mut(collection).ok_or_else(|| {
             VaneError::NotFound(format!(
@@ -132,7 +157,20 @@ impl ManifestStore {
         if !col.segment_ulids.contains(&ulid.to_string()) {
             col.segment_ulids.push(ulid.to_string());
         }
-        self.save_atomic(&m)
+        self.save_atomic_locked(&m)
+    }
+
+    /// 在 save_lock 保护下执行 load→f→save 原子事务（M4 Phase 4 fix，Bug 1）。
+    ///
+    /// 用于 `merge_segments` / `update_manifest_after_reindex` / `Db::collection` 等
+    /// 需要自定义 load-modify-save 序列的路径：整个事务在持锁期间完成，杜绝并发
+    /// lost-update 与 tmp 覆盖。`f` 修改 manifest（并可在此期间做 WAL append——
+    /// WAL → manifest 的 §6.4 顺序保持）。`pub(crate)`：同 crate 内调用，不扩 pub API。
+    pub(crate) fn update<F: FnOnce(&mut Manifest) -> Result<()>>(&self, f: F) -> Result<()> {
+        let _save_guard = self.save_lock.lock().unwrap();
+        let mut m = self.load()?.unwrap_or_else(Manifest::empty);
+        f(&mut m)?;
+        self.save_atomic_locked(&m)
     }
 }
 

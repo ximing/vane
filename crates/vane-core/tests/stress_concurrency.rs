@@ -4,12 +4,15 @@
 // 改造 vane-core，侵入大；vane-core 用 std::sync 非 loom::sync）。loom 列为 Could defer。
 //
 // 测试安全：全用 MemoryVfs（主力，无真 fs 副作用）+ tempdir（StdFsVfs conformance）。
-// 不改生产代码（只写新测试文件）。不碰 SPEC/CI/fault.rs/crash_recovery/vane-fuzz/proptest。
+// 不碰 SPEC/CI/fault.rs/crash_recovery/vane-fuzz/proptest。
 //
 // 并发模型（vane-core 用 std::sync）：
 // - write_state: Mutex<WriteState> — add/flush 互斥（next_docid 自增 + buffer push/take）
 // - snapshot: RwLock<Vec<Arc<SegmentReader>>> — search 读 / flush+merge 写
-// - compacting: Mutex<bool> — compact 重入保护（非重入返 E_BUSY）
+// - compacting: Mutex<bool> — compact/reindex 重入保护（非重入返 E_BUSY）；
+//   auto_merge_two_smallest try-lock，并发 compact 持锁则 skip（best-effort 降级）
+// - ManifestStore.save_lock: Mutex<()> — 序列化 manifest 原子保存（save_atomic /
+//   add_segment / update 闭包），杜绝并发 tmp 覆盖 + lost-update（M4 Phase 4 Bug 1 fix）
 // - 锁序一致（snapshot → offsets → inv_readers → hnsw → scalars → tombstones），无 lock-order deadlock
 //
 // 并发安全边界（本测试验证）：
@@ -18,19 +21,18 @@
 // - 并发 add + search：安全（add 锁 write_state，search 锁 snapshot read，不同锁）
 // - 并发 compact：安全（compacting Mutex 重入保护，非重入返 E_BUSY）
 // - 并发 search + compact：安全（search 读 snapshot，compact 写 snapshot，RwLock 互斥不死锁）
-//
-// flush 的并发边界（本测试用外部 Mutex 序列化）：
-// vane-core 的 flush() 在 write_state lock 释放后执行 manifest save_atomic + snapshot swap。
-// save_atomic 用固定路径 manifest.json.tmp，并发调用会互相覆盖 → manifest 损坏。
-// flush 内的 auto_merge_two_smallest 不检查 compacting 锁，与并发 compact/auto-merge 竞争。
-// 故本测试用 flush_lock: Mutex<()> 序列化 flush 调用——验 write_state 锁竞争 + snapshot 锁
-// 竞争 + auto-merge 串行安全，不触发 manifest tmp 覆盖竞态。此为已知并发限制（见 report）。
+// - 并发 flush：安全（save_lock 序列化 manifest 原子保存；段文件写并发因 ULID 唯一不冲突）
+//   —— M4 Phase 4 Bug 1 fix 后，无需外部 flush_lock workaround（原 stress 用外部 Mutex
+//   序列化 flush 是临时规避；fix 后直测并发 flush 不损坏 manifest）
+// - 并发 auto-merge：安全（compacting try-lock 串行化，skip 安全降级）
+//   —— M4 Phase 4 Bug 2 fix 后，并发 auto-merge 不再 double-count
 //
 // 数据一致性断言：
 // - 无 panic / 无死锁（测试在 timeout 内完成）
 // - 无丢失：所有 insert 且未 delete 的文档最终可 search 到
 // - 无 double-count：search 结果无重复 external_id
 // - 一致的段状态：compact 后活文档全集不变；segment_ulids 无重复
+// - 并发 flush 后 reopen Db 加载 manifest 不 E_CORRUPT（manifest 一致）
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -113,17 +115,6 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
     ))
 }
 
-/// 序列化 flush 调用——避免 manifest.json.tmp 覆盖竞态 + auto-merge 竞争。
-/// vane-core flush() 在 write_state 释放后执行 save_atomic + snapshot swap，
-/// 并发 flush 会互相覆盖 tmp 文件。此 Mutex 确保同时只有一个 flush 执行。
-fn serialized_flush(
-    col: &vane_core::api::Collection,
-    lock: &Mutex<()>,
-) -> vane_core::types::Result<()> {
-    let _guard = lock.lock().unwrap();
-    col.flush()
-}
-
 // ---------------------------------------------------------------------------
 // 1. Send/Sync 静态断言
 // ---------------------------------------------------------------------------
@@ -189,13 +180,18 @@ fn cross_thread_shared_basic() {
 /// N 线程 M 轮并发 add + flush + search，验证无 panic + 无丢失 + 无 double-count。
 ///
 /// 线程数 4 / 轮数 100 = 400 文档，MemoryVfs（快、无真 fs 副作用）。
-/// 每轮：add 1 文档 → 每 flush_interval 轮 flush（serialized_flush 避免 manifest 竞态）。
-/// 段数超 SEGMENT_MAX(10) 时 flush 自动触发 auto_merge_two_smallest（串行安全）。
+/// 每轮：add 1 文档 → 每 flush_interval 轮 flush（直接并发 flush，无外部序列化）。
+/// 段数超 SEGMENT_MAX(10) 时 flush 自动触发 auto_merge_two_smallest。
+///
+/// M4 Phase 4 fix 后（Bug 1 save_lock + Bug 2 auto-merge compacting guard），
+/// 并发 flush 不再损坏 manifest，并发 auto-merge 不再 double-count —— 本测试
+/// 直测修复后的并发路径（原 stress 用外部 flush_lock Mutex 序列化是临时规避，已去）。
 ///
 /// 并发维度：
 /// - add 互斥（write_state Mutex）：多线程 add 序列化
 /// - search 并发（snapshot RwLock read）：多线程 search 同时读
-/// - flush 串行（flush_lock Mutex）：避免 manifest tmp 覆盖 + auto-merge 竞争
+/// - flush 并发（save_lock 序列化 manifest 切换；段文件写 ULID 唯一不冲突）
+/// - auto-merge 串行化（compacting try-lock，并发持锁则 skip）
 /// - search + add + flush 混合并发：验证不同锁不冲突
 #[test]
 fn stress_concurrent_add_flush_search() {
@@ -210,10 +206,8 @@ fn run_stress_add_flush_search(
     flush_interval: usize,
 ) {
     let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
-    let db = Db::open(vfs, db_path, OpenOptions::default()).unwrap();
+    let db = Db::open(vfs.clone(), db_path, OpenOptions::default()).unwrap();
     let col = db.collection("c", schema(), col_opts()).unwrap();
-
-    let flush_lock = Mutex::new(()); // 序列化 flush（见文件头注释）
 
     // 共享 id 跟踪
     let inserted_ids = Mutex::new(HashSet::new());
@@ -229,7 +223,6 @@ fn run_stress_add_flush_search(
             let inserted_ids = &inserted_ids;
             let errors = &errors;
             let search_count = &search_count;
-            let flush_lock = &flush_lock;
 
             s.spawn(move || {
                 for r in 0..n_rounds {
@@ -244,9 +237,9 @@ fn run_stress_add_flush_search(
                     }
                     inserted_ids.lock().unwrap().insert(id);
 
-                    // flush 每 flush_interval 轮（serialized 避免 manifest 竞态）
+                    // flush 每 flush_interval 轮（直接并发——save_lock 序列化 manifest）
                     if r > 0 && r % flush_interval == 0 {
-                        if let Err(e) = serialized_flush(&col, flush_lock) {
+                        if let Err(e) = col.flush() {
                             errors
                                 .lock()
                                 .unwrap()
@@ -265,7 +258,7 @@ fn run_stress_add_flush_search(
                     search_count.fetch_add(1, Ordering::Relaxed);
                 }
                 // 线程结束前最终 flush（确保所有 buffer 文档落盘）
-                if let Err(e) = serialized_flush(&col, flush_lock) {
+                if let Err(e) = col.flush() {
                     errors
                         .lock()
                         .unwrap()
@@ -321,6 +314,19 @@ fn run_stress_add_flush_search(
         ulids.len(),
         "duplicate segment ULIDs: {:?}",
         ulids
+    );
+
+    // 并发 flush 后 manifest 一致：reopen Db 加载 manifest 不 E_CORRUPT，
+    // 且 reopen 后文档数一致（manifest 指向完整状态）。
+    let db2 = Db::open(vfs, db_path, OpenOptions::default()).unwrap();
+    let col2 = db2.collection("c", schema(), col_opts()).unwrap();
+    let hits2 = col2.search(&text_query(top_k)).unwrap();
+    assert_eq!(
+        hits2.len(),
+        hits.len(),
+        "reopen changed hit count (manifest inconsistency; got={}, prev={})",
+        hits2.len(),
+        hits.len()
     );
 
     eprintln!(
@@ -677,7 +683,8 @@ fn stress_concurrent_add_during_compact() {
 /// StdFsVfs + tempdir 小规模并发，验证行为与 MemoryVfs 一致（真 fs 路径）。
 ///
 /// 2 线程 × 50 轮 = 100 文档。StdFsVfs 用真 std::fs（native 唯一）。
-/// tempdir 隔离（不污染宿主机）。flush 串行（flush_lock）避免 manifest 竞态。
+/// tempdir 隔离（不污染宿主机）。M4 Phase 4 fix 后直接并发 flush（save_lock
+/// 序列化 manifest 原子保存，无需外部 flush_lock workaround）。
 /// 验证无 panic + 无丢失 + 无 double-count。
 #[test]
 fn stress_stdfs_conformance() {
@@ -693,7 +700,6 @@ fn stress_stdfs_conformance() {
         const N_THREADS: usize = 2;
         const N_ROUNDS: usize = 50;
 
-        let flush_lock = Mutex::new(());
         let inserted_ids = Mutex::new(HashSet::new());
         let errors = Mutex::new(Vec::new());
 
@@ -702,7 +708,6 @@ fn stress_stdfs_conformance() {
                 let col = col.clone();
                 let inserted_ids = &inserted_ids;
                 let errors = &errors;
-                let flush_lock = &flush_lock;
                 s.spawn(move || {
                     for r in 0..N_ROUNDS {
                         let id = format!("t{}r{}", t, r);
@@ -715,7 +720,8 @@ fn stress_stdfs_conformance() {
                         }
                         inserted_ids.lock().unwrap().insert(id);
                         if r > 0 && r % 10 == 0 {
-                            if let Err(e) = serialized_flush(&col, flush_lock) {
+                            // 直接并发 flush——save_lock 序列化 manifest 原子保存
+                            if let Err(e) = col.flush() {
                                 errors
                                     .lock()
                                     .unwrap()
@@ -729,7 +735,7 @@ fn stress_stdfs_conformance() {
                                 .push(format!("t{}r{} search: {}", t, r, e));
                         }
                     }
-                    if let Err(e) = serialized_flush(&col, flush_lock) {
+                    if let Err(e) = col.flush() {
                         errors.lock().unwrap().push(format!("t{} final: {}", t, e));
                     }
                 });
@@ -766,17 +772,257 @@ fn stress_stdfs_conformance() {
 // 8. 多次跑确认无 flaky
 // ---------------------------------------------------------------------------
 
-/// 连续 3 次运行 stress（不同 db_path 独立状态），验证无 flaky。
+/// 连续 5 次运行 stress（不同 db_path 独立状态），验证无 flaky。
 ///
 /// 竞态若存在，多次跑可能暴露（线程调度非确定性 → 不同 interleaving）。
 /// 每次用独立 db_path + 独立 MemoryVfs（完全隔离，无状态泄漏）。
-/// flush_interval=25 → 每线程 2 次 flush = 8 段 < SEGMENT_MAX(10) → 不触发 auto-merge
-/// （auto-merge 在 flush 串行下仍偶发段状态竞争，见 report concerns；此测试验稳定性）。
+/// flush_interval=10 → 4x50=200 docs/run，每线程 5 次 flush = 20 段 > SEGMENT_MAX(10)
+/// → 触发 auto_merge_two_smallest（M4 Phase 4 fix 后并发 auto-merge 安全，不再
+/// double-count）。此测试验修复后并发 flush + auto-merge 多次跑稳定性。
 #[test]
 fn stress_multi_run_stability() {
-    for run in 0..3 {
+    for run in 0..5 {
         let db_path = format!("db_run{}", run);
-        // 4x50=200 docs/run，flush_interval=25 → 8 段 < 10，不触发 auto-merge
-        run_stress_add_flush_search(&db_path, 4, 50, 25);
+        // flush_interval=10 → 每线程 5 次 flush = 20 段 > 10 → 触发 auto-merge
+        run_stress_add_flush_search(&db_path, 4, 50, 10);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 9. 并发 flush 不损坏 manifest（Bug 1 fix 验证）
+// ---------------------------------------------------------------------------
+
+/// 多线程并发 flush（无外部序列化），验证 manifest 不损坏 + 数据不丢 + 无 E_CORRUPT。
+///
+/// M4 Phase 4 fix（Bug 1）前：并发 flush 的 save_atomic 共享固定 tmp 路径
+/// manifest.json.tmp → delete/create/write_at/sync/rename 交错覆写 → E_CORRUPT。
+/// fix 后：ManifestStore.save_lock 序列化原子切换；段文件写仍并发（ULID 唯一）。
+///
+/// 本测试直测修复路径：4 线程各 15 轮 add + 每轮 flush（60 次并发 flush）。
+/// 断言：无 E_CORRUPT / 无错误 + 全部文档可搜到 + reopen Db 加载 manifest 一致。
+#[test]
+fn stress_concurrent_flush_no_corruption() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+    let col = db.collection("c", schema(), col_opts()).unwrap();
+
+    // 预填 1 段（让并发 flush 有初始状态）
+    col.add(&[make_doc("seed0"), make_doc("seed1")]).unwrap();
+    col.flush().unwrap();
+
+    const N_THREADS: usize = 4;
+    const N_ROUNDS: usize = 15;
+    let errors = Mutex::new(Vec::new());
+    let inserted_ids = Mutex::new(HashSet::new());
+    let flush_count = AtomicUsize::new(0);
+
+    thread::scope(|s| {
+        for t in 0..N_THREADS {
+            let col = col.clone();
+            let errors = &errors;
+            let inserted_ids = &inserted_ids;
+            let flush_count = &flush_count;
+            s.spawn(move || {
+                for r in 0..N_ROUNDS {
+                    let id = format!("t{}r{}", t, r);
+                    if let Err(e) = col.add(&[make_doc(&id)]) {
+                        errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("t{}r{} add err: {}", t, r, e));
+                        return;
+                    }
+                    inserted_ids.lock().unwrap().insert(id);
+                    // 直接并发 flush——save_lock 序列化 manifest 原子保存
+                    if let Err(e) = col.flush() {
+                        errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("t{}r{} flush err: {}", t, r, e));
+                    }
+                    flush_count.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+
+    let errs = errors.into_inner().unwrap();
+    assert!(
+        errs.is_empty(),
+        "concurrent flush produced errors (Bug 1 regression?): {:?}",
+        errs
+    );
+    assert_eq!(
+        flush_count.load(Ordering::Relaxed),
+        N_THREADS * N_ROUNDS,
+        "flush count"
+    );
+
+    // 全部文档可搜到（无丢失）
+    let expected: HashSet<_> = inserted_ids.into_inner().unwrap();
+    // seed 文档也应可见
+    let mut expected_all = expected.clone();
+    expected_all.insert("seed0".to_string());
+    expected_all.insert("seed1".to_string());
+    let top_k = (expected_all.len() + 10).min(TOPK_MAX as usize) as u32;
+    let hits = col.search(&text_query(top_k)).unwrap();
+    let found: HashSet<_> = hits.iter().map(|h| h.id.clone()).collect();
+    // 无 double-count
+    assert_eq!(
+        found.len(),
+        hits.len(),
+        "double-count after concurrent flush (Bug 1 regression?)"
+    );
+    for id in &expected_all {
+        assert!(
+            found.contains(id),
+            "doc {} lost after concurrent flush (Bug 1 regression?)",
+            id
+        );
+    }
+
+    // reopen Db 加载 manifest 不 E_CORRUPT（manifest 一致性核心断言）
+    let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col2 = db2.collection("c", schema(), col_opts()).unwrap();
+    let hits2 = col2.search(&text_query(top_k)).unwrap();
+    assert_eq!(
+        hits2.len(),
+        hits.len(),
+        "reopen changed hit count (manifest corruption; Bug 1 regression?)"
+    );
+
+    // 段 ULID 无重复
+    let ulids = col.segment_ulids();
+    let ulid_set: HashSet<_> = ulids.iter().cloned().collect();
+    assert_eq!(
+        ulid_set.len(),
+        ulids.len(),
+        "duplicate ULIDs after concurrent flush (Bug 1 regression?)"
+    );
+
+    eprintln!(
+        "stress_concurrent_flush_no_corruption: {} threads x {} flushes = {} concurrent flushes, {} docs, {} segments",
+        N_THREADS,
+        N_ROUNDS,
+        flush_count.load(Ordering::Relaxed),
+        expected_all.len(),
+        ulids.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. 并发 auto-merge 不 double-count（Bug 2 fix 验证）
+// ---------------------------------------------------------------------------
+
+/// 多线程并发 flush 触发 auto-merge，验证不 double-count + 活文档全集无重复。
+///
+/// M4 Phase 4 fix（Bug 2）前：auto_merge_two_smallest 不获取 compacting 锁，
+/// 与并发 compact/auto-merge 竞争 → 段未正确移除 → double-count（search 结果
+/// 出现重复 external_id）。fix 后：auto_merge try-lock compacting，并发持锁则
+/// skip（best-effort 降级），下次 flush 段数仍超阈值时再 merge。
+///
+/// 本测试预填 > SEGMENT_MAX(10) 段强制 auto-merge 活跃，再 4 线程并发 flush
+/// 持续触发 auto-merge。断言：无 double-count + 全部文档可搜到 + ULID 无重复。
+#[test]
+fn stress_concurrent_auto_merge_no_double_count() {
+    let vfs = Arc::new(MemoryVfs::new()) as Arc<dyn Vfs>;
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col = db.collection("c", schema(), col_opts()).unwrap();
+
+    // 预填 12 段（> SEGMENT_MAX=10，触发 auto-merge），每段 1 文档
+    for i in 0..12 {
+        col.add(&[make_doc(&format!("seed{}", i))]).unwrap();
+        col.flush().unwrap();
+    }
+
+    const N_THREADS: usize = 4;
+    const N_ROUNDS: usize = 15;
+    let errors = Mutex::new(Vec::new());
+    let inserted_ids = Mutex::new(HashSet::new());
+    let flush_count = AtomicUsize::new(0);
+
+    thread::scope(|s| {
+        for t in 0..N_THREADS {
+            let col = col.clone();
+            let errors = &errors;
+            let inserted_ids = &inserted_ids;
+            let flush_count = &flush_count;
+            s.spawn(move || {
+                for r in 0..N_ROUNDS {
+                    let id = format!("t{}r{}", t, r);
+                    if let Err(e) = col.add(&[make_doc(&id)]) {
+                        errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("t{}r{} add err: {}", t, r, e));
+                        return;
+                    }
+                    inserted_ids.lock().unwrap().insert(id);
+                    // flush 触发 auto-merge（段数 > 10）
+                    if let Err(e) = col.flush() {
+                        errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("t{}r{} flush err: {}", t, r, e));
+                    }
+                    flush_count.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+
+    let errs = errors.into_inner().unwrap();
+    assert!(
+        errs.is_empty(),
+        "concurrent auto-merge produced errors (Bug 2 regression?): {:?}",
+        errs
+    );
+
+    // 全部文档可搜到（无丢失）—— seed + 线程文档
+    let mut expected: HashSet<String> = (0..12).map(|i| format!("seed{}", i)).collect();
+    for t in 0..N_THREADS {
+        for r in 0..N_ROUNDS {
+            expected.insert(format!("t{}r{}", t, r));
+        }
+    }
+    let top_k = (expected.len() + 10).min(TOPK_MAX as usize) as u32;
+    let hits = col.search(&text_query(top_k)).unwrap();
+    let found: HashSet<_> = hits.iter().map(|h| h.id.clone()).collect();
+    // 无 double-count（Bug 2 核心断言）
+    assert_eq!(
+        found.len(),
+        hits.len(),
+        "double-count after concurrent auto-merge (Bug 2 regression?): unique={}, total hits={}",
+        found.len(),
+        hits.len()
+    );
+    for id in &expected {
+        assert!(
+            found.contains(id),
+            "doc {} lost after concurrent auto-merge (Bug 2 regression?)",
+            id
+        );
+    }
+    assert_eq!(
+        found, expected,
+        "found != expected after concurrent auto-merge"
+    );
+
+    // 段 ULID 无重复（auto-merge 误移除段会导致 ULID 残留重复）
+    let ulids = col.segment_ulids();
+    let ulid_set: HashSet<_> = ulids.iter().cloned().collect();
+    assert_eq!(
+        ulid_set.len(),
+        ulids.len(),
+        "duplicate ULIDs after concurrent auto-merge (Bug 2 regression?): {:?}",
+        ulids
+    );
+
+    eprintln!(
+        "stress_concurrent_auto_merge_no_double_count: {} threads x {} flushes, {} docs, {} segments",
+        N_THREADS,
+        N_ROUNDS,
+        expected.len(),
+        ulids.len()
+    );
 }

@@ -17,7 +17,9 @@ pub struct Db {
 pub(crate) struct DbInner {
     pub(crate) vfs: Arc<dyn Vfs>,
     pub(crate) db_path: String,
-    pub(crate) manifest_store: ManifestStore,
+    // M4 Phase 4 fix（Bug 1）：Arc<ManifestStore> → CollectionInner 克隆同一 Arc，
+    // 共享 save_lock。跨 collection / 跨线程的 save_atomic 全部序列化。
+    pub(crate) manifest_store: Arc<ManifestStore>,
     pub(crate) collections: RwLock<HashMap<String, Arc<CollectionInner>>>,
     // M2-10：Executor（SPEC §11）。open 时经 executor::default_executor() 工厂构造，
     // 平台分支集中在 executor/mod.rs（I-5）。search 路径用 Executor::scope 并行搜各段。
@@ -39,7 +41,7 @@ pub(crate) struct DbInner {
 
 impl Db {
     pub fn open(vfs: Arc<dyn Vfs>, path: &str, opts: OpenOptions) -> Result<Self> {
-        let manifest_store = ManifestStore::new(vfs.clone(), path);
+        let manifest_store = Arc::new(ManifestStore::new(vfs.clone(), path));
         let manifest = manifest_store.load()?.unwrap_or_else(Manifest::empty);
         let collections = RwLock::new(HashMap::new());
         // 07：dict-zh feature 启用时 Db::open 自动加载预编译 dict.bin（冷加载 <150ms，§13.1）。
@@ -139,23 +141,19 @@ impl Db {
             .write()
             .unwrap()
             .insert(name.to_string(), arc.clone());
-        // 持久化 manifest
-        let mut m = self
-            .inner
-            .manifest_store
-            .load()?
-            .unwrap_or_else(Manifest::empty);
-        m.collections.insert(
-            name.to_string(),
-            CollectionMeta {
-                schema,
-                tokenizer_kind: opts.tokenizer,
-                tokenizer_id: tok_id,
-                user_dict: opts.user_dict,
-                segment_ulids: vec![],
-            },
-        );
-        self.inner.manifest_store.save_atomic(&m)?;
+        // 持久化 manifest（M4 Phase 4 fix Bug 1：update 闭包内 load-modify-save
+        // 在 save_lock 内，杜绝并发建表/flush 的 lost-update 与 tmp 覆盖）。
+        let col_meta = CollectionMeta {
+            schema,
+            tokenizer_kind: opts.tokenizer,
+            tokenizer_id: tok_id,
+            user_dict: opts.user_dict,
+            segment_ulids: vec![],
+        };
+        self.inner.manifest_store.update(|m| {
+            m.collections.insert(name.to_string(), col_meta);
+            Ok(())
+        })?;
         Ok(Collection { inner: arc })
     }
 
