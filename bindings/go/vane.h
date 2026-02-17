@@ -81,6 +81,15 @@ int32_t vane_load_dict(uint64_t h, const uint8_t *dict_ptr, size_t dict_len);
 // 查询词典版本（JSON）。out_ptr 须 vane_string_free。未加载返回 E_DICT_UNAVAILABLE。
 int32_t vane_dict_version(uint8_t **out_ptr, size_t *out_len);
 
+// ---- M4 §9 inspect API ----
+
+// DB 级统计（collections / 文档数 / 健康状态）。out_arena 返回 DbStats JSON（须 vane_string_free）。
+int32_t vane_db_stats(uint64_t db_h, uint8_t **out_arena, size_t *out_len);
+
+// 各段详细信息（ULID / doc_count / format_versions / file_sizes / health）。
+// out_arena 返回 SegmentInfo[] JSON（须 vane_string_free）。
+int32_t vane_db_segment_info(uint64_t db_h, uint8_t **out_arena, size_t *out_len);
+
 // ---- 生命周期 ----
 
 // 关闭句柄（Db/Collection/Reindex 均可）。注销后使用返 E_NOT_FOUND。

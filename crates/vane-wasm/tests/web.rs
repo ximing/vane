@@ -113,3 +113,57 @@ fn version_nonempty() {
     let v = vane_wasm::vane_version();
     assert!(!v.is_empty(), "version should be non-empty");
 }
+
+/// M4 §9 inspect API：vane_db_stats 返回有效 DbStats JSON。
+#[wasm_bindgen_test]
+fn db_stats_returns_valid_json() {
+    let db = vane_wasm::vane_open("inspect-stats-db", "{}").expect("open");
+    let schema = r#"{"fields":[{"name":"body","type":"text"},{"name":"vec","type":"vector","dim":2,"metric":"cosine"}]}"#;
+    let col = vane_wasm::vane_collection(db, "docs", schema, "{}").expect("collection");
+    let docs = r#"[{"id":"a","text":"hello","vector":[1.0,0.0]},{"id":"b","text":"world","vector":[0.0,1.0]}]"#;
+    vane_wasm::vane_add(col, docs).expect("add");
+    vane_wasm::vane_flush(col).expect("flush");
+
+    let stats_json = vane_wasm::vane_db_stats(db).expect("stats");
+    let v: serde_json::Value = serde_json::from_str(&stats_json).expect("stats parse");
+    assert!(v.is_object());
+    let obj = v.as_object().unwrap();
+    assert_eq!(
+        obj.get("dbPath").and_then(|v| v.as_str()),
+        Some("inspect-stats-db")
+    );
+    let cols = obj.get("collections").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(cols.len(), 1);
+    let col0 = cols[0].as_object().unwrap();
+    assert_eq!(col0.get("name").and_then(|v| v.as_str()), Some("docs"));
+    assert_eq!(col0.get("segmentCount").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(col0.get("totalDocs").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(col0.get("health").and_then(|v| v.as_str()), Some("healthy"));
+
+    vane_wasm::vane_close(col).expect("close col");
+    vane_wasm::vane_close(db).expect("close db");
+}
+
+/// M4 §9 inspect API：vane_db_segment_info 返回有效 SegmentInfo[] JSON。
+#[wasm_bindgen_test]
+fn db_segment_info_returns_valid_json() {
+    let db = vane_wasm::vane_open("inspect-seg-db", "{}").expect("open");
+    let schema = r#"{"fields":[{"name":"body","type":"text"},{"name":"vec","type":"vector","dim":2,"metric":"cosine"}]}"#;
+    let col = vane_wasm::vane_collection(db, "docs", schema, "{}").expect("collection");
+    let docs = r#"[{"id":"a","text":"hello","vector":[1.0,0.0]}]"#;
+    vane_wasm::vane_add(col, docs).expect("add");
+    vane_wasm::vane_flush(col).expect("flush");
+
+    let seg_json = vane_wasm::vane_db_segment_info(db).expect("segment_info");
+    let v: serde_json::Value = serde_json::from_str(&seg_json).expect("seg parse");
+    assert!(v.is_array());
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "1 segment after 1 flush");
+    let seg = arr[0].as_object().unwrap();
+    assert!(!seg.get("ulid").and_then(|v| v.as_str()).unwrap().is_empty());
+    assert_eq!(seg.get("docCount").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(seg.get("health").and_then(|v| v.as_str()), Some("healthy"));
+
+    vane_wasm::vane_close(col).expect("close col");
+    vane_wasm::vane_close(db).expect("close db");
+}

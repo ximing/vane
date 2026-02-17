@@ -5,8 +5,9 @@
 use napi::bindgen_prelude::*;
 use serde_json::Value;
 use vane_core::api::{
-    CollectionOptions, Doc, FusionSpec, Hit, OpenOptions, PersistenceMode, ScalarValue, SearchMode,
-    SearchQuery,
+    CollectionOptions, DbStats, DictState, Doc, ExecutorKind, FormatVersions, FusionSpec, Health,
+    Hit, OpenOptions, PersistenceMode, ScalarValue, SearchMode, SearchQuery, SegmentFileSizes,
+    SegmentInfo,
 };
 use vane_core::persistence::AutoCommitConfig;
 use vane_core::tokenizer::{BuiltinTokenizer, UserDictEntry};
@@ -276,6 +277,100 @@ pub fn hits_to_json(hits: Vec<Hit>) -> Value {
             })
             .collect(),
     )
+}
+
+// ---- M4 §9 inspect API JSON 序列化（core 结构未 derive Serialize，手写薄壳） ----
+
+fn health_to_str(h: Health) -> &'static str {
+    match h {
+        Health::Healthy => "healthy",
+        Health::Degraded => "degraded",
+        Health::Corrupt => "corrupt",
+    }
+}
+
+fn executor_kind_to_str(e: ExecutorKind) -> &'static str {
+    match e {
+        ExecutorKind::Serial => "serial",
+        ExecutorKind::Rayon => "rayon",
+    }
+}
+
+fn dict_state_to_str(d: DictState) -> &'static str {
+    match d {
+        DictState::Stable => "stable",
+        DictState::PendingReindex => "pendingReindex",
+        DictState::Rebuilding => "rebuilding",
+    }
+}
+
+fn format_versions_to_json(f: &FormatVersions) -> Value {
+    serde_json::json!({
+        "header": f.header,
+        "vectors": f.vectors,
+        "stored": f.stored,
+        "idmap": f.idmap,
+        "scalars": f.scalars,
+        "inverted": f.inverted,
+        "hnsw": f.hnsw
+    })
+}
+
+fn segment_file_sizes_to_json(s: &SegmentFileSizes) -> Value {
+    serde_json::json!({
+        "header": s.header,
+        "vectors": s.vectors,
+        "stored": s.stored,
+        "idmap": s.idmap,
+        "scalars": s.scalars,
+        "inverted": s.inverted,
+        "hnsw": s.hnsw
+    })
+}
+
+pub fn segment_info_to_json(infos: &[SegmentInfo]) -> Value {
+    Value::Array(
+        infos
+            .iter()
+            .map(|info| {
+                serde_json::json!({
+                    "ulid": info.ulid,
+                    "docCount": info.doc_count,
+                    "docidBase": info.docid_base,
+                    "tombstonedCount": info.tombstoned_count,
+                    "formatVersions": format_versions_to_json(&info.format_versions),
+                    "fileSizes": segment_file_sizes_to_json(&info.file_sizes),
+                    "health": health_to_str(info.health)
+                })
+            })
+            .collect(),
+    )
+}
+
+pub fn db_stats_to_json(stats: &DbStats) -> Value {
+    let collections: Vec<Value> = stats
+        .collections
+        .iter()
+        .map(|cs| {
+            serde_json::json!({
+                "name": cs.name,
+                "segmentCount": cs.segment_count,
+                "totalDocs": cs.total_docs,
+                "liveDocs": cs.live_docs,
+                "tombstonedDocs": cs.tombstoned_docs,
+                "indexBytes": cs.index_bytes,
+                "dictState": dict_state_to_str(cs.dict_state),
+                "tokenizerId": cs.tokenizer_id.to_hex(),
+                "health": health_to_str(cs.health)
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "dbPath": stats.db_path,
+        "collections": collections,
+        "dictAvailable": stats.dict_available,
+        "executorKind": executor_kind_to_str(stats.executor_kind)
+    })
 }
 
 #[cfg(test)]
