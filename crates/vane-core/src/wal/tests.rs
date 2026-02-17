@@ -182,8 +182,8 @@ fn recover_empty_segments_dir_no_error() {
     // 无异常即通过。
 }
 
-/// M4 阶段五 c：VaneError 诊断上下文——wal parse 错误 String 含
-/// wal 路径 + 操作 + 建议操作（§10 推荐"先丰富 String"）。
+/// M4 诊断重构：wal parse 错误的结构化 ErrorContext（op + hint）。
+/// message 含 wal parse + path，op/hint 为独立字段。
 #[test]
 fn m4_5c_wal_parse_error_contains_context() {
     use crate::types::VaneError;
@@ -193,11 +193,19 @@ fn m4_5c_wal_parse_error_contains_context() {
     vfs.write_at("mydb/wal.log", b"not json {{{\n", 0).unwrap();
     let wal = Wal::open(vfs, "mydb").unwrap();
     match wal.read_all() {
-        Err(VaneError::Corrupt(m)) => {
-            assert!(m.contains("wal parse"), "original msg preserved: {}", m);
-            assert!(m.contains("mydb"), "msg must contain path: {}", m);
-            assert!(m.contains("op=wal recover"), "msg must contain op: {}", m);
-            assert!(m.contains("建议"), "msg must contain suggestion: {}", m);
+        Err(VaneError::Corrupt(ctx)) => {
+            assert!(
+                ctx.message.contains("wal parse"),
+                "message preserved: {}",
+                ctx.message
+            );
+            assert!(
+                ctx.message.contains("mydb"),
+                "message must contain path: {}",
+                ctx.message
+            );
+            assert_eq!(ctx.op, Some("wal recover"), "op field: {:?}", ctx.op);
+            assert!(ctx.hint.is_some(), "hint field must be set");
         }
         other => panic!("expected Corrupt, got {:?}", other.map_err(|e| e.name())),
     }

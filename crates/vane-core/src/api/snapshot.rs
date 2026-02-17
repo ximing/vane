@@ -131,10 +131,9 @@ pub fn write_snapshot(vfs: &dyn Vfs, db_path: &str, dest: &str) -> Result<()> {
     // manifest.json 必须存在（有效库）。
     let manifest_abs = format!("{}/{}", db_path, MANIFEST_REL);
     if !file_exists(vfs, &manifest_abs)? {
-        return Err(VaneError::Corrupt(format!(
-            "manifest.json not found at {}",
-            manifest_abs
-        )));
+        return Err(VaneError::Corrupt(
+            format!("manifest.json not found at {}", manifest_abs).into(),
+        ));
     }
 
     let tmp = format!("{}.tmp", dest);
@@ -150,8 +149,9 @@ pub fn write_snapshot(vfs: &dyn Vfs, db_path: &str, dest: &str) -> Result<()> {
     // 逐文件：path_len | path | file_len | file_bytes
     for rel in &rels {
         let abs = format!("{}/{}", db_path, rel);
-        let content = read_file_full(vfs, &abs)?
-            .ok_or_else(|| VaneError::Corrupt(format!("file vanished during snapshot: {}", abs)))?;
+        let content = read_file_full(vfs, &abs)?.ok_or_else(|| {
+            VaneError::Corrupt(format!("file vanished during snapshot: {}", abs).into())
+        })?;
         append_u32(vfs, &tmp, rel.len() as u32)?;
         append_bytes(vfs, &tmp, rel.as_bytes())?;
         append_u64(vfs, &tmp, content.len() as u64)?;
@@ -179,7 +179,7 @@ pub fn read_snapshot(vfs: &dyn Vfs, src: &str, db_path: &str) -> Result<()> {
         let n = match vfs.read_at(src, &mut tmp, off) {
             Ok(n) => n,
             Err(VaneError::Io(_)) => {
-                return Err(VaneError::Io(format!("snapshot not found: {}", src)));
+                return Err(VaneError::Io(format!("snapshot not found: {}", src).into()));
             }
             Err(e) => return Err(e),
         };
@@ -202,10 +202,9 @@ pub fn read_snapshot(vfs: &dyn Vfs, src: &str, db_path: &str) -> Result<()> {
 
     let version = read_u32(&snap, &mut pos)?;
     if version != SNAPSHOT_VERSION {
-        return Err(VaneError::Version(format!(
-            "unsupported snapshot version {}",
-            version
-        )));
+        return Err(VaneError::Version(
+            format!("unsupported snapshot version {}", version).into(),
+        ));
     }
     let num_files = read_u32(&snap, &mut pos)?;
 
@@ -215,15 +214,14 @@ pub fn read_snapshot(vfs: &dyn Vfs, src: &str, db_path: &str) -> Result<()> {
             return Err(VaneError::Corrupt("snapshot path truncated".into()));
         }
         let rel = std::str::from_utf8(&snap[pos..pos + path_len])
-            .map_err(|e| VaneError::Corrupt(format!("snapshot path not utf-8: {}", e)))?
+            .map_err(|e| VaneError::Corrupt(format!("snapshot path not utf-8: {}", e).into()))?
             .to_string();
         pos += path_len;
         let file_len = read_u64(&snap, &mut pos)? as usize;
         if pos + file_len > snap.len() {
-            return Err(VaneError::Corrupt(format!(
-                "snapshot file content truncated: {}",
-                rel
-            )));
+            return Err(VaneError::Corrupt(
+                format!("snapshot file content truncated: {}", rel).into(),
+            ));
         }
         let content = &snap[pos..pos + file_len];
         pos += file_len;

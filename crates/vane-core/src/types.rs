@@ -35,19 +35,95 @@ pub const SCALARS_FORMAT_V1: u32 = 1;
 pub const HNSW_FORMAT_V1: u32 = 1;
 
 /// SPEC §10 错误码。code() 返回值与 SPEC §10 表一一对应。
+///
+/// M4 诊断重构：所有 11 变体统一携带 `ErrorContext`（结构化字段），
+/// 替代旧的 `String` payload + `append_context` 拼接模式。消费者可程序化访问
+/// `context()` 拿 seg/docid/op/hint 字段，无需 parse Display 字符串。
+/// 错误码 -1..-11 + 名称 E_IO 等不变（SPEC §10 硬约束）。
 #[derive(Debug, Clone)]
 pub enum VaneError {
-    Io(String),
-    Schema(String),
-    NotFound(String),
-    Corrupt(String),
-    Version(String),
-    TokenizerMismatch(String),
-    DictTooLarge,
-    DictUnavailable,
-    Busy,
-    Unsupported,
-    InvalidArg(String),
+    Io(ErrorContext),
+    Schema(ErrorContext),
+    NotFound(ErrorContext),
+    Corrupt(ErrorContext),
+    Version(ErrorContext),
+    TokenizerMismatch(ErrorContext),
+    DictTooLarge(ErrorContext),
+    DictUnavailable(ErrorContext),
+    Busy(ErrorContext),
+    Unsupported(ErrorContext),
+    InvalidArg(ErrorContext),
+}
+
+/// 结构化错误上下文（M4 诊断重构）。
+///
+/// 替代旧 `String` payload。`message` 是核心描述（必填），
+/// `seg`/`docid`/`op`/`hint` 是结构化诊断字段（可选）。
+/// Display 输出 `E_CODE: message [seg=... op=... docid=... hint=...]`，
+/// `From<String>`/`From<&str>` 让简单构造点低摩擦迁移。
+#[derive(Debug, Clone)]
+pub struct ErrorContext {
+    /// 核心错误描述（必填）。
+    pub message: String,
+    /// 段 ULID（段级错误附）。
+    pub seg: Option<String>,
+    /// 文档 ID（文档级错误附）。
+    pub docid: Option<u64>,
+    /// 操作名（flush/merge/search/open...）。
+    pub op: Option<&'static str>,
+    /// 建议操作。
+    pub hint: Option<String>,
+}
+
+impl ErrorContext {
+    /// 创建仅含核心消息的 ErrorContext（简单构造点用）。
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            seg: None,
+            docid: None,
+            op: None,
+            hint: None,
+        }
+    }
+
+    /// 设置段 ULID（builder 链式）。
+    pub fn seg(mut self, seg: impl Into<String>) -> Self {
+        self.seg = Some(seg.into());
+        self
+    }
+
+    /// 设置文档 ID（builder 链式）。
+    pub fn docid(mut self, docid: u64) -> Self {
+        self.docid = Some(docid);
+        self
+    }
+
+    /// 设置操作名（builder 链式）。
+    pub fn op(mut self, op: &'static str) -> Self {
+        self.op = Some(op);
+        self
+    }
+
+    /// 设置建议操作（builder 链式）。
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+/// `From<String>`/`From<&str>` 让 `VaneError::Io("msg".into())` /
+/// `VaneError::Io(format!(...).into())` 直接可用，低摩擦迁移。
+impl From<String> for ErrorContext {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ErrorContext {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
 }
 
 impl VaneError {
@@ -59,10 +135,10 @@ impl VaneError {
             Self::Corrupt(_) => -4,
             Self::Version(_) => -5,
             Self::TokenizerMismatch(_) => -6,
-            Self::DictTooLarge => -7,
-            Self::DictUnavailable => -8,
-            Self::Busy => -9,
-            Self::Unsupported => -10,
+            Self::DictTooLarge(_) => -7,
+            Self::DictUnavailable(_) => -8,
+            Self::Busy(_) => -9,
+            Self::Unsupported(_) => -10,
             Self::InvalidArg(_) => -11,
         }
     }
@@ -75,56 +151,106 @@ impl VaneError {
             Self::Corrupt(_) => "E_CORRUPT",
             Self::Version(_) => "E_VERSION",
             Self::TokenizerMismatch(_) => "E_TOKENIZER_MISMATCH",
-            Self::DictTooLarge => "E_DICT_TOO_LARGE",
-            Self::DictUnavailable => "E_DICT_UNAVAILABLE",
-            Self::Busy => "E_BUSY",
-            Self::Unsupported => "E_UNSUPPORTED",
+            Self::DictTooLarge(_) => "E_DICT_TOO_LARGE",
+            Self::DictUnavailable(_) => "E_DICT_UNAVAILABLE",
+            Self::Busy(_) => "E_BUSY",
+            Self::Unsupported(_) => "E_UNSUPPORTED",
             Self::InvalidArg(_) => "E_INVALID_ARG",
         }
+    }
+
+    /// 取结构化上下文的不可变引用（跨绑定层用，替代旧 String payload match）。
+    pub fn context(&self) -> &ErrorContext {
+        match self {
+            Self::Io(c) => c,
+            Self::Schema(c) => c,
+            Self::NotFound(c) => c,
+            Self::Corrupt(c) => c,
+            Self::Version(c) => c,
+            Self::TokenizerMismatch(c) => c,
+            Self::DictTooLarge(c) => c,
+            Self::DictUnavailable(c) => c,
+            Self::Busy(c) => c,
+            Self::Unsupported(c) => c,
+            Self::InvalidArg(c) => c,
+        }
+    }
+
+    /// 取结构化上下文的可变引用（内部 `with_*` 方法用）。
+    fn context_mut(&mut self) -> &mut ErrorContext {
+        match self {
+            Self::Io(c) => c,
+            Self::Schema(c) => c,
+            Self::NotFound(c) => c,
+            Self::Corrupt(c) => c,
+            Self::Version(c) => c,
+            Self::TokenizerMismatch(c) => c,
+            Self::DictTooLarge(c) => c,
+            Self::DictUnavailable(c) => c,
+            Self::Busy(c) => c,
+            Self::Unsupported(c) => c,
+            Self::InvalidArg(c) => c,
+        }
+    }
+
+    /// 追加段 ULID 上下文（替代旧 `append_context`，builder 风格）。
+    pub(crate) fn with_seg(mut self, seg: impl Into<String>) -> Self {
+        self.context_mut().seg = Some(seg.into());
+        self
+    }
+
+    /// 追加文档 ID 上下文。
+    pub(crate) fn with_docid(mut self, docid: u64) -> Self {
+        self.context_mut().docid = Some(docid);
+        self
+    }
+
+    /// 追加操作名上下文。
+    pub(crate) fn with_op(mut self, op: &'static str) -> Self {
+        self.context_mut().op = Some(op);
+        self
+    }
+
+    /// 追加建议操作上下文。
+    pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.context_mut().hint = Some(hint.into());
+        self
     }
 }
 
 impl fmt::Display for VaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(m) => write!(f, "E_IO: {}", m),
-            Self::Schema(m) => write!(f, "E_SCHEMA: {}", m),
-            Self::NotFound(m) => write!(f, "E_NOT_FOUND: {}", m),
-            Self::Corrupt(m) => write!(f, "E_CORRUPT: {}", m),
-            Self::Version(m) => write!(f, "E_VERSION: {}", m),
-            Self::TokenizerMismatch(m) => write!(f, "E_TOKENIZER_MISMATCH: {}", m),
-            Self::DictTooLarge => write!(f, "E_DICT_TOO_LARGE"),
-            Self::DictUnavailable => write!(f, "E_DICT_UNAVAILABLE"),
-            Self::Busy => write!(f, "E_BUSY"),
-            Self::Unsupported => write!(f, "E_UNSUPPORTED"),
-            Self::InvalidArg(m) => write!(f, "E_INVALID_ARG: {}", m),
+        let ctx = self.context();
+        write!(f, "{}: {}", self.name(), ctx.message)?;
+        // 追加结构化上下文（任一字段存在时输出 [seg=... op=... docid=... hint=...]）。
+        // 不分配 Vec——直接流式写入，sep 追踪是否需前导空格。
+        let mut sep = " [";
+        if let Some(seg) = &ctx.seg {
+            write!(f, "{}seg={}", sep, seg)?;
+            sep = " ";
         }
+        if let Some(op) = ctx.op {
+            write!(f, "{}op={}", sep, op)?;
+            sep = " ";
+        }
+        if let Some(docid) = ctx.docid {
+            write!(f, "{}docid={}", sep, docid)?;
+            sep = " ";
+        }
+        if let Some(hint) = &ctx.hint {
+            write!(f, "{}hint={}", sep, hint)?;
+            sep = " ";
+        }
+        if sep != " [" {
+            write!(f, "]")?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for VaneError {}
 
 pub type Result<T> = std::result::Result<T, VaneError>;
-
-/// M4 阶段五 c：VaneError 诊断上下文（§10 推荐"先丰富 String"）。
-///
-/// 为 VaneError 的 String payload 追加上下文后缀（段 ULID / docid / 操作 / 建议操作）。
-/// **不改错误码**（-1..-11 不变），不改 enum 签名（不加新字段），仅丰富 String 内容。
-/// 结构化上下文（独立字段）列为 Could，本任务用 String 丰富（§10 推荐路径）。
-///
-/// 无 String payload 的变体（Busy / DictTooLarge / DictUnavailable / Unsupported）原样返回。
-pub(crate) fn append_context(e: VaneError, ctx: &str) -> VaneError {
-    match e {
-        VaneError::Io(m) => VaneError::Io(format!("{}{}", m, ctx)),
-        VaneError::Schema(m) => VaneError::Schema(format!("{}{}", m, ctx)),
-        VaneError::NotFound(m) => VaneError::NotFound(format!("{}{}", m, ctx)),
-        VaneError::Corrupt(m) => VaneError::Corrupt(format!("{}{}", m, ctx)),
-        VaneError::Version(m) => VaneError::Version(format!("{}{}", m, ctx)),
-        VaneError::TokenizerMismatch(m) => VaneError::TokenizerMismatch(format!("{}{}", m, ctx)),
-        VaneError::InvalidArg(m) => VaneError::InvalidArg(format!("{}{}", m, ctx)),
-        other => other,
-    }
-}
 
 /// 检索结果文档（跨 bm25/vector-brute/fusion 模块）。
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -162,10 +288,9 @@ impl TokenizerId {
 
     pub fn from_hex(s: &str) -> Result<Self> {
         if s.len() != 64 {
-            return Err(VaneError::InvalidArg(format!(
-                "TokenizerId hex must be 64 chars, got {}",
-                s.len()
-            )));
+            return Err(VaneError::InvalidArg(
+                format!("TokenizerId hex must be 64 chars, got {}", s.len()).into(),
+            ));
         }
         let mut out = [0u8; 32];
         for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
@@ -182,10 +307,9 @@ fn hex_val(c: u8) -> Result<u8> {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
         b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(VaneError::InvalidArg(format!(
-            "invalid hex char: {:?}",
-            c as char
-        ))),
+        _ => Err(VaneError::InvalidArg(
+            format!("invalid hex char: {:?}", c as char).into(),
+        )),
     }
 }
 
@@ -248,19 +372,17 @@ impl Schema {
             if let FieldDef::Vector { dim, .. } = def {
                 vec_count += 1;
                 if *dim > DIM_MAX {
-                    return Err(VaneError::Schema(format!(
-                        "dim {} exceeds max {}",
-                        dim, DIM_MAX
-                    )));
+                    return Err(VaneError::Schema(
+                        format!("dim {} exceeds max {}", dim, DIM_MAX).into(),
+                    ));
                 }
             }
         }
         // SPEC §3.1：恰好一个 vector 字段（M0–M2 限制）
         if vec_count != 1 {
-            return Err(VaneError::Schema(format!(
-                "expected exactly 1 vector field, got {}",
-                vec_count
-            )));
+            return Err(VaneError::Schema(
+                format!("expected exactly 1 vector field, got {}", vec_count).into(),
+            ));
         }
         Ok(())
     }
@@ -278,10 +400,10 @@ mod tests {
         assert_eq!(VaneError::Corrupt("x".into()).code(), -4);
         assert_eq!(VaneError::Version("x".into()).code(), -5);
         assert_eq!(VaneError::TokenizerMismatch("x".into()).code(), -6);
-        assert_eq!(VaneError::DictTooLarge.code(), -7);
-        assert_eq!(VaneError::DictUnavailable.code(), -8);
-        assert_eq!(VaneError::Busy.code(), -9);
-        assert_eq!(VaneError::Unsupported.code(), -10);
+        assert_eq!(VaneError::DictTooLarge("x".into()).code(), -7);
+        assert_eq!(VaneError::DictUnavailable("x".into()).code(), -8);
+        assert_eq!(VaneError::Busy("x".into()).code(), -9);
+        assert_eq!(VaneError::Unsupported("x".into()).code(), -10);
         assert_eq!(VaneError::InvalidArg("x".into()).code(), -11);
     }
 
@@ -296,10 +418,16 @@ mod tests {
             VaneError::TokenizerMismatch("x".into()).name(),
             "E_TOKENIZER_MISMATCH"
         );
-        assert_eq!(VaneError::DictTooLarge.name(), "E_DICT_TOO_LARGE");
-        assert_eq!(VaneError::DictUnavailable.name(), "E_DICT_UNAVAILABLE");
-        assert_eq!(VaneError::Busy.name(), "E_BUSY");
-        assert_eq!(VaneError::Unsupported.name(), "E_UNSUPPORTED");
+        assert_eq!(
+            VaneError::DictTooLarge("x".into()).name(),
+            "E_DICT_TOO_LARGE"
+        );
+        assert_eq!(
+            VaneError::DictUnavailable("x".into()).name(),
+            "E_DICT_UNAVAILABLE"
+        );
+        assert_eq!(VaneError::Busy("x".into()).name(), "E_BUSY");
+        assert_eq!(VaneError::Unsupported("x".into()).name(), "E_UNSUPPORTED");
         assert_eq!(VaneError::InvalidArg("x".into()).name(), "E_INVALID_ARG");
     }
 
@@ -311,41 +439,53 @@ mod tests {
         assert!(std::error::Error::source(&e).is_none());
     }
 
-    /// M4 阶段五 c：append_context 丰富 String payload 但不改错误码（§10）。
+    /// M4 诊断重构：ErrorContext 结构化字段 + builder + with_* 链式 + Display 格式。
     #[test]
-    fn append_context_enriches_string_preserves_code() {
-        let ctx = " (seg=01H, op=open; 建议: 检查)";
-        // 带 String 的变体：上下文追加到 payload，code 不变。
-        let cases = [
-            (VaneError::Io("bad".into()), -1i32),
-            (VaneError::Schema("mismatch".into()), -2),
-            (VaneError::NotFound("missing".into()), -3),
-            (VaneError::Corrupt("bad magic".into()), -4),
-            (VaneError::Version("v2".into()), -5),
-            (VaneError::TokenizerMismatch("tok".into()), -6),
-            (VaneError::InvalidArg("topK".into()), -11),
-        ];
-        for (e, code) in cases {
-            let enriched = append_context(e, ctx);
-            assert_eq!(enriched.code(), code, "code must not change for {}", code);
-            let msg = format!("{}", enriched);
-            assert!(
-                msg.contains("seg=01H"),
-                "msg must contain seg context: {}",
-                msg
-            );
-            assert!(
-                msg.contains("op=open"),
-                "msg must contain op context: {}",
-                msg
-            );
-            assert!(msg.contains("建议"), "msg must contain suggestion: {}", msg);
-        }
-        // 无 String 的变体：原样返回（code 不变，无 String 可丰富）。
-        assert_eq!(append_context(VaneError::Busy, ctx).code(), -9);
-        assert_eq!(append_context(VaneError::DictTooLarge, ctx).code(), -7);
-        assert_eq!(append_context(VaneError::DictUnavailable, ctx).code(), -8);
-        assert_eq!(append_context(VaneError::Unsupported, ctx).code(), -10);
+    fn error_context_structured_fields_and_display() {
+        // builder 链式构造
+        let e = VaneError::Corrupt(
+            ErrorContext::new("vectors.bin bad magic")
+                .seg("01HXYZ")
+                .op("open vectors.bin")
+                .hint("检查段文件完整性"),
+        );
+        assert_eq!(e.code(), -4);
+        assert_eq!(e.name(), "E_CORRUPT");
+        let ctx = e.context();
+        assert_eq!(ctx.message, "vectors.bin bad magic");
+        assert_eq!(ctx.seg.as_deref(), Some("01HXYZ"));
+        assert_eq!(ctx.op, Some("open vectors.bin"));
+        assert_eq!(ctx.hint.as_deref(), Some("检查段文件完整性"));
+        assert!(ctx.docid.is_none());
+
+        // Display 含 message + 结构化字段
+        let msg = format!("{}", e);
+        assert!(msg.contains("E_CORRUPT: vectors.bin bad magic"));
+        assert!(msg.contains("seg=01HXYZ"));
+        assert!(msg.contains("op=open vectors.bin"));
+        assert!(msg.contains("hint=检查段文件完整性"));
+
+        // with_* 链式（替代旧 append_context）
+        let e2 = VaneError::Io("disk full".into())
+            .with_seg("01HABC")
+            .with_op("flush")
+            .with_hint("检查磁盘空间");
+        assert_eq!(e2.code(), -1);
+        let ctx2 = e2.context();
+        assert_eq!(ctx2.seg.as_deref(), Some("01HABC"));
+        assert_eq!(ctx2.op, Some("flush"));
+
+        // 无结构化字段的 Display 仅输出 name: message（无方括号）
+        let e3 = VaneError::InvalidArg("bad arg".into());
+        let msg3 = format!("{}", e3);
+        assert_eq!(msg3, "E_INVALID_ARG: bad arg");
+        assert!(!msg3.contains("["));
+
+        // From<String> 让简单构造低摩擦
+        let e4: ErrorContext = "simple".into();
+        assert_eq!(e4.message, "simple");
+        let e5: ErrorContext = String::from("owned").into();
+        assert_eq!(e5.message, "owned");
     }
 
     #[test]

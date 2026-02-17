@@ -100,11 +100,9 @@ impl SegmentWriter {
                 ));
             }
             if v.len() as u32 != self.dim {
-                return Err(VaneError::Schema(format!(
-                    "vector dim mismatch: got {} expected {}",
-                    v.len(),
-                    self.dim
-                )));
+                return Err(VaneError::Schema(
+                    format!("vector dim mismatch: got {} expected {}", v.len(), self.dim).into(),
+                ));
             }
             self.vectors.extend_from_slice(v);
         } else if self.dim > 0 {
@@ -144,9 +142,9 @@ impl SegmentWriter {
             return Err(VaneError::Schema("set_scalar called before add_doc".into()));
         }
         // 校验字段在 schema 且为 Scalar。
-        let kind = self
-            .schema_scalar_kind(field)
-            .ok_or_else(|| VaneError::Schema(format!("field '{}' not a scalar field", field)))?;
+        let kind = self.schema_scalar_kind(field).ok_or_else(|| {
+            VaneError::Schema(format!("field '{}' not a scalar field", field).into())
+        })?;
         // 校验 value 变体与 ScalarKind 匹配。
         let ok = matches!(
             (&value, kind),
@@ -156,10 +154,9 @@ impl SegmentWriter {
                 | (crate::api::ScalarValue::Keyword(_), ScalarKind::Keyword)
         );
         if !ok {
-            return Err(VaneError::Schema(format!(
-                "scalar value kind mismatch for field '{}'",
-                field
-            )));
+            return Err(VaneError::Schema(
+                format!("scalar value kind mismatch for field '{}'", field).into(),
+            ));
         }
         let local = (self.next_docid - 1) as usize;
         let col = self
@@ -361,7 +358,6 @@ fn read_all(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
 }
 
 /// 从 segment_dir 路径末段 `seg_<ulid>` 提取 ULID 字符串（诊断上下文用）。
-/// M4 阶段五 c：VaneError 诊断 String 丰富——段级错误附 ULID 上下文。
 pub(crate) fn segment_ulid_from_dir(segment_dir: &str) -> &str {
     segment_dir
         .rsplit('/')
@@ -370,15 +366,17 @@ pub(crate) fn segment_ulid_from_dir(segment_dir: &str) -> &str {
         .unwrap_or("unknown")
 }
 
-/// 段级诊断上下文后缀（M4 阶段五 c）。
-/// 用于 SegmentReader::open / load_vectors / InvertedIndexReader::open 等段级
-/// 错误路径的 VaneError String 丰富。不改错误码，仅追加 String 上下文。
-pub(crate) fn seg_ctx(segment_dir: &str, op: &str) -> String {
-    format!(
-        " (seg={}, op={}; 建议: 检查段文件完整性或从备份恢复)",
-        segment_ulid_from_dir(segment_dir),
-        op
-    )
+/// 段级 ErrorContext builder（M4 诊断重构，替代旧 `seg_ctx` String 拼接）。
+/// 返回含段 ULID + 操作 + 默认 hint 的 ErrorContext，供段级错误路径用。
+pub(crate) fn seg_err(
+    message: impl Into<String>,
+    segment_dir: &str,
+    op: &'static str,
+) -> crate::types::ErrorContext {
+    crate::types::ErrorContext::new(message)
+        .seg(segment_ulid_from_dir(segment_dir))
+        .op(op)
+        .hint("检查段文件完整性或从备份恢复")
 }
 
 impl SegmentReader {
@@ -393,7 +391,9 @@ impl SegmentReader {
         let hpath = format!("{}/header.bin", segment_dir);
         let hbuf = read_all(vfs.as_ref(), &hpath)?;
         let meta = header::decode_header(&hbuf).map_err(|e| {
-            crate::types::append_context(e, &seg_ctx(segment_dir, "open header.bin"))
+            e.with_seg(segment_ulid_from_dir(segment_dir))
+                .with_op("open header.bin")
+                .with_hint("检查段文件完整性或从备份恢复")
         })?;
 
         // 读 id_map（小文件，open 时读）
@@ -408,9 +408,10 @@ impl SegmentReader {
             let mut hdr = [0u8; 12];
             let n = vfs.read_at(&vpath, &mut hdr, 0)?;
             if n < 8 || &hdr[0..4] != crate::types::MAGIC {
-                return Err(VaneError::Corrupt(format!(
-                    "vectors.bin bad magic{}",
-                    seg_ctx(segment_dir, "open vectors.bin")
+                return Err(VaneError::Corrupt(seg_err(
+                    "vectors.bin bad magic",
+                    segment_dir,
+                    "open vectors.bin",
                 )));
             }
             let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
@@ -419,20 +420,24 @@ impl SegmentReader {
                 v if v == crate::types::VECTORS_FORMAT_V2 => {
                     // v2：dim 字段在 offset 8..12（M2-08 写入，本模块读）。
                     if n < 12 {
-                        return Err(VaneError::Corrupt(format!(
-                            "vectors.bin v2 header truncated (need 12 bytes){}",
-                            seg_ctx(segment_dir, "open vectors.bin")
+                        return Err(VaneError::Corrupt(seg_err(
+                            "vectors.bin v2 header truncated (need 12 bytes)",
+                            segment_dir,
+                            "open vectors.bin",
                         )));
                     }
                     Some(u32::from_le_bytes(hdr[8..12].try_into().unwrap()))
                 }
                 _ => {
-                    return Err(VaneError::Version(format!(
-                        "vectors.bin unsupported format_version: {} (expected {} or {}){}",
-                        version,
-                        crate::types::VECTORS_FORMAT_V1,
-                        crate::types::VECTORS_FORMAT_V2,
-                        seg_ctx(segment_dir, "open vectors.bin")
+                    return Err(VaneError::Version(seg_err(
+                        format!(
+                            "vectors.bin unsupported format_version: {} (expected {} or {})",
+                            version,
+                            crate::types::VECTORS_FORMAT_V1,
+                            crate::types::VECTORS_FORMAT_V2
+                        ),
+                        segment_dir,
+                        "open vectors.bin",
                     )));
                 }
             }
@@ -447,19 +452,23 @@ impl SegmentReader {
             let mut shdr = [0u8; 8];
             let n = vfs.read_at(&spath, &mut shdr, 0)?;
             if n < 8 || &shdr[0..4] != crate::types::MAGIC {
-                return Err(VaneError::Corrupt(format!(
-                    "stored.bin bad magic{}",
-                    seg_ctx(segment_dir, "open stored.bin")
+                return Err(VaneError::Corrupt(seg_err(
+                    "stored.bin bad magic",
+                    segment_dir,
+                    "open stored.bin",
                 )));
             }
             let sver = u32::from_le_bytes(shdr[4..8].try_into().unwrap());
             if sver != crate::types::STORED_FORMAT_V1 && sver != crate::types::STORED_FORMAT_V2 {
-                return Err(VaneError::Version(format!(
-                    "stored.bin unsupported format_version: {} (expected {} or {}){}",
-                    sver,
-                    crate::types::STORED_FORMAT_V1,
-                    crate::types::STORED_FORMAT_V2,
-                    seg_ctx(segment_dir, "open stored.bin")
+                return Err(VaneError::Version(seg_err(
+                    format!(
+                        "stored.bin unsupported format_version: {} (expected {} or {})",
+                        sver,
+                        crate::types::STORED_FORMAT_V1,
+                        crate::types::STORED_FORMAT_V2
+                    ),
+                    segment_dir,
+                    "open stored.bin",
                 )));
             }
         }
@@ -486,9 +495,10 @@ impl SegmentReader {
         let vpath = format!("{}/vectors.bin", segment_dir);
         let vbuf = read_all(vfs, &vpath)?;
         if vbuf.len() < 8 || &vbuf[0..4] != crate::types::MAGIC {
-            return Err(VaneError::Corrupt(format!(
-                "vectors.bin bad magic{}",
-                seg_ctx(segment_dir, "load vectors")
+            return Err(VaneError::Corrupt(seg_err(
+                "vectors.bin bad magic",
+                segment_dir,
+                "load vectors",
             )));
         }
         let version = u32::from_le_bytes(vbuf[4..8].try_into().unwrap());
@@ -497,19 +507,23 @@ impl SegmentReader {
             v if v == crate::types::VECTORS_FORMAT_V1 => 8,
             v if v == crate::types::VECTORS_FORMAT_V2 => 12,
             _ => {
-                return Err(VaneError::Version(format!(
-                    "vectors.bin unsupported format_version: {} (expected {} or {}){}",
-                    version,
-                    crate::types::VECTORS_FORMAT_V1,
-                    crate::types::VECTORS_FORMAT_V2,
-                    seg_ctx(segment_dir, "load vectors")
+                return Err(VaneError::Version(seg_err(
+                    format!(
+                        "vectors.bin unsupported format_version: {} (expected {} or {})",
+                        version,
+                        crate::types::VECTORS_FORMAT_V1,
+                        crate::types::VECTORS_FORMAT_V2
+                    ),
+                    segment_dir,
+                    "load vectors",
                 )));
             }
         };
         if vbuf.len() < payload_off {
-            return Err(VaneError::Corrupt(format!(
-                "vectors.bin truncated{}",
-                seg_ctx(segment_dir, "load vectors")
+            return Err(VaneError::Corrupt(seg_err(
+                "vectors.bin truncated",
+                segment_dir,
+                "load vectors",
             )));
         }
         Ok(vbuf[payload_off..]
@@ -659,16 +673,19 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
         return Ok(std::collections::HashMap::new());
     }
     if &buf[0..4] != crate::types::MAGIC {
-        return Err(VaneError::Corrupt(format!("{} bad magic", label)));
+        return Err(VaneError::Corrupt(format!("{} bad magic", label).into()));
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
     if version != crate::types::IDMAP_FORMAT_V1 {
-        return Err(VaneError::Version(format!(
-            "{} unsupported format_version: {} (expected {})",
-            label,
-            version,
-            crate::types::IDMAP_FORMAT_V1
-        )));
+        return Err(VaneError::Version(
+            format!(
+                "{} unsupported format_version: {} (expected {})",
+                label,
+                version,
+                crate::types::IDMAP_FORMAT_V1
+            )
+            .into(),
+        ));
     }
     let count = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
     let mut pos = 12;
@@ -682,10 +699,12 @@ fn decode_kv_map(buf: &[u8], label: &str) -> Result<std::collections::HashMap<u6
         let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + len > buf.len() {
-            return Err(VaneError::Corrupt(format!("{} entry truncated", label)));
+            return Err(VaneError::Corrupt(
+                format!("{} entry truncated", label).into(),
+            ));
         }
         let s = std::str::from_utf8(&buf[pos..pos + len])
-            .map_err(|e| VaneError::Corrupt(format!("{} utf8: {}", label, e)))?
+            .map_err(|e| VaneError::Corrupt(format!("{} utf8: {}", label, e).into()))?
             .to_string();
         pos += len;
         map.insert(docid, s);
@@ -760,12 +779,15 @@ fn decode_stored(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredRead
             parse_stored_entries(count, &buf[12..])
         }
         v if v == crate::types::STORED_FORMAT_V2 => decode_stored_v2(buf),
-        _ => Err(VaneError::Version(format!(
-            "stored unsupported format_version: {} (expected {} or {})",
-            version,
-            crate::types::STORED_FORMAT_V1,
-            crate::types::STORED_FORMAT_V2
-        ))),
+        _ => Err(VaneError::Version(
+            format!(
+                "stored unsupported format_version: {} (expected {} or {})",
+                version,
+                crate::types::STORED_FORMAT_V1,
+                crate::types::STORED_FORMAT_V2
+            )
+            .into(),
+        )),
     }
 }
 
@@ -787,17 +809,22 @@ fn decode_stored_v2(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredR
         return Err(VaneError::Corrupt("stored v2 zstd_block truncated".into()));
     }
     let mut decoder = ruzstd::streaming_decoder::StreamingDecoder::new(&buf[16..16 + zstd_len])
-        .map_err(|e| VaneError::Corrupt(format!("stored v2 zstd decompress failed: {}", e)))?;
+        .map_err(|e| {
+            VaneError::Corrupt(format!("stored v2 zstd decompress failed: {}", e).into())
+        })?;
     let mut owned = Vec::with_capacity(raw_len);
     decoder
         .read_to_end(&mut owned)
-        .map_err(|e| VaneError::Corrupt(format!("stored v2 zstd read failed: {}", e)))?;
+        .map_err(|e| VaneError::Corrupt(format!("stored v2 zstd read failed: {}", e).into()))?;
     if owned.len() != raw_len {
-        return Err(VaneError::Corrupt(format!(
-            "stored v2 raw_payload_len mismatch: header {} actual {}",
-            raw_len,
-            owned.len()
-        )));
+        return Err(VaneError::Corrupt(
+            format!(
+                "stored v2 raw_payload_len mismatch: header {} actual {}",
+                raw_len,
+                owned.len()
+            )
+            .into(),
+        ));
     }
     if owned.len() < 4 {
         return Err(VaneError::Corrupt("stored v2 raw_payload too short".into()));
@@ -810,7 +837,7 @@ fn decode_stored_v2(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredR
 /// 此分支仅在 vane-core 裸用且未启 zstd-decode 时命中——上游应启 zstd-decode 读 v2）。
 #[cfg(not(feature = "zstd-decode"))]
 fn decode_stored_v2(_buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredReadEntry>> {
-    Err(VaneError::Unsupported)
+    Err(VaneError::Unsupported("platform capability missing".into()))
 }
 
 /// 解析 stored entries（v1/v2 共享 body 布局）：
@@ -839,7 +866,7 @@ fn parse_stored_entries(
             ));
         }
         let text = std::str::from_utf8(&body[pos..pos + text_len])
-            .map_err(|e| VaneError::Corrupt(format!("stored text utf8: {}", e)))?
+            .map_err(|e| VaneError::Corrupt(format!("stored text utf8: {}", e).into()))?
             .to_string();
         pos += text_len;
         // meta_json
@@ -854,7 +881,7 @@ fn parse_stored_entries(
             ));
         }
         let meta_json = std::str::from_utf8(&body[pos..pos + meta_len])
-            .map_err(|e| VaneError::Corrupt(format!("stored meta utf8: {}", e)))?
+            .map_err(|e| VaneError::Corrupt(format!("stored meta utf8: {}", e).into()))?
             .to_string();
         pos += meta_len;
         map.insert(docid, StoredReadEntry { text, meta_json });
@@ -957,11 +984,14 @@ fn decode_scalars(buf: &[u8]) -> Result<ScalarReader> {
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
     if version != crate::types::SCALARS_FORMAT_V1 {
-        return Err(VaneError::Version(format!(
-            "scalars.col unsupported format_version: {} (expected {})",
-            version,
-            crate::types::SCALARS_FORMAT_V1
-        )));
+        return Err(VaneError::Version(
+            format!(
+                "scalars.col unsupported format_version: {} (expected {})",
+                version,
+                crate::types::SCALARS_FORMAT_V1
+            )
+            .into(),
+        ));
     }
     let num_fields = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
     let mut pos = 12;
@@ -976,7 +1006,7 @@ fn decode_scalars(buf: &[u8]) -> Result<ScalarReader> {
             return Err(VaneError::Corrupt("scalars.col name truncated".into()));
         }
         let name = std::str::from_utf8(&buf[pos..pos + name_len])
-            .map_err(|e| VaneError::Corrupt(format!("scalars.col name utf8: {}", e)))?
+            .map_err(|e| VaneError::Corrupt(format!("scalars.col name utf8: {}", e).into()))?
             .to_string();
         pos += name_len;
         if pos + 5 > buf.len() {
@@ -1055,7 +1085,9 @@ fn decode_scalars(buf: &[u8]) -> Result<ScalarReader> {
                         }
                         let s = std::str::from_utf8(&buf[pos..pos + len])
                             .map_err(|e| {
-                                VaneError::Corrupt(format!("scalars.col keyword utf8: {}", e))
+                                VaneError::Corrupt(
+                                    format!("scalars.col keyword utf8: {}", e).into(),
+                                )
                             })?
                             .to_string();
                         pos += len;
@@ -1127,10 +1159,9 @@ fn scalar_kind_from_u8(b: u8) -> Result<ScalarKind> {
         1 => Ok(ScalarKind::Float),
         2 => Ok(ScalarKind::Bool),
         3 => Ok(ScalarKind::Keyword),
-        _ => Err(VaneError::Corrupt(format!(
-            "scalars.col unknown scalar kind byte: {}",
-            b
-        ))),
+        _ => Err(VaneError::Corrupt(
+            format!("scalars.col unknown scalar kind byte: {}", b).into(),
+        )),
     }
 }
 

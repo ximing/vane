@@ -30,7 +30,9 @@ impl Vfs for MemoryVfs {
     fn create(&self, path: &str) -> Result<()> {
         let mut files = self.files.write().unwrap();
         if files.contains_key(path) {
-            return Err(VaneError::Io(format!("file already exists: {}", path)));
+            return Err(VaneError::Io(
+                format!("file already exists: {}", path).into(),
+            ));
         }
         files.insert(path.to_string(), Vec::new());
         Ok(())
@@ -40,7 +42,7 @@ impl Vfs for MemoryVfs {
         let files = self.files.read().unwrap();
         let file = files
             .get(path)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
         let off = offset as usize;
         if off >= file.len() {
             return Ok(0);
@@ -55,7 +57,7 @@ impl Vfs for MemoryVfs {
         let mut files = self.files.write().unwrap();
         let file = files
             .get_mut(path)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
         let off = offset as usize;
         let end = off + buf.len();
         if file.len() < end {
@@ -69,7 +71,7 @@ impl Vfs for MemoryVfs {
         let mut files = self.files.write().unwrap();
         let file = files
             .get_mut(path)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
         let offset = file.len() as u64;
         file.extend_from_slice(buf);
         Ok(offset)
@@ -83,7 +85,7 @@ impl Vfs for MemoryVfs {
         let mut files = self.files.write().unwrap();
         let data = files
             .remove(from)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", from)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", from).into()))?;
         files.insert(to.to_string(), data);
         Ok(())
     }
@@ -92,7 +94,7 @@ impl Vfs for MemoryVfs {
         let mut files = self.files.write().unwrap();
         files
             .remove(path)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
         Ok(())
     }
 

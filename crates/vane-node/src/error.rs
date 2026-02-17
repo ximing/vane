@@ -15,20 +15,9 @@ use vane_core::types::VaneError as CoreErr;
 
 /// 取 VaneError 的纯消息（不含 name 前缀），保证 reason 编码为
 /// `{code}:{name}:{msg}` 而非 `{code}:{name}:{name}: {msg}`。
+/// M4 诊断重构：所有变体统一携带 ErrorContext，直接取 context().message。
 fn message(e: &CoreErr) -> String {
-    match e {
-        CoreErr::Io(m) => m.clone(),
-        CoreErr::Schema(m) => m.clone(),
-        CoreErr::NotFound(m) => m.clone(),
-        CoreErr::Corrupt(m) => m.clone(),
-        CoreErr::Version(m) => m.clone(),
-        CoreErr::TokenizerMismatch(m) => m.clone(),
-        CoreErr::InvalidArg(m) => m.clone(),
-        // 无 payload 变体：msg 留空，name 已编码前缀。
-        CoreErr::DictTooLarge | CoreErr::DictUnavailable | CoreErr::Busy | CoreErr::Unsupported => {
-            String::new()
-        }
-    }
+    e.context().message.clone()
 }
 
 /// napi::Status 映射（S15/S20 裁决）：M0 略粗糙，JS 侧用 `.code` 判定。
@@ -66,8 +55,8 @@ mod tests {
 
     #[test]
     fn reason_round_trip_unsupported() {
-        let e = to_napi_error(CoreErr::Unsupported);
-        assert_eq!(e.reason, "-10:E_UNSUPPORTED:");
+        let e = to_napi_error(CoreErr::Unsupported("platform capability missing".into()));
+        assert_eq!(e.reason, "-10:E_UNSUPPORTED:platform capability missing");
     }
 
     #[test]
@@ -86,7 +75,7 @@ mod tests {
     fn code_passthrough_not_remapped() {
         // §10：code 原值透传，不得吞并为 GenericFailure 等模糊码。
         // 即便 E_UNSUPPORTED 的 Status 是 GenericFailure，reason 仍带 -10。
-        let e = to_napi_error(CoreErr::Unsupported);
+        let e = to_napi_error(CoreErr::Unsupported("platform capability missing".into()));
         assert!(e.reason.starts_with("-10:E_UNSUPPORTED"));
     }
 }

@@ -91,7 +91,7 @@ impl Fault {
 
     fn to_action(&self) -> FaultAction {
         match self {
-            Fault::IoError { msg, .. } => FaultAction::ReturnErr(VaneError::Io(msg.clone())),
+            Fault::IoError { msg, .. } => FaultAction::ReturnErr(VaneError::Io(msg.clone().into())),
             Fault::PartialWrite {
                 bytes_before_fail, ..
             } => FaultAction::PartialWrite(*bytes_before_fail),
@@ -228,16 +228,18 @@ impl Vfs for FaultVfs {
                 if n > 0 {
                     self.inner.write_at(path, &buf[..n], offset)?;
                 }
-                return Err(VaneError::Io(format!(
-                    "partial write at {} ({} bytes written before failure)",
-                    path, n
-                )));
+                return Err(VaneError::Io(
+                    format!(
+                        "partial write at {} ({} bytes written before failure)",
+                        path, n
+                    )
+                    .into(),
+                ));
             }
             Some(FaultAction::Enospc) => {
-                return Err(VaneError::Io(format!(
-                    "ENOSPC: write_at {} (simulated, no bytes written)",
-                    path
-                )));
+                return Err(VaneError::Io(
+                    format!("ENOSPC: write_at {} (simulated, no bytes written)", path).into(),
+                ));
             }
             Some(FaultAction::DelayMs(ms)) => sleep_ms(ms),
             None => {}
@@ -253,16 +255,18 @@ impl Vfs for FaultVfs {
                 if n > 0 {
                     self.inner.append(path, &buf[..n])?;
                 }
-                return Err(VaneError::Io(format!(
-                    "partial append at {} ({} bytes written before failure)",
-                    path, n
-                )));
+                return Err(VaneError::Io(
+                    format!(
+                        "partial append at {} ({} bytes written before failure)",
+                        path, n
+                    )
+                    .into(),
+                ));
             }
             Some(FaultAction::Enospc) => {
-                return Err(VaneError::Io(format!(
-                    "ENOSPC: append {} (simulated, no bytes written)",
-                    path
-                )));
+                return Err(VaneError::Io(
+                    format!("ENOSPC: append {} (simulated, no bytes written)", path).into(),
+                ));
             }
             Some(FaultAction::DelayMs(ms)) => sleep_ms(ms),
             None => {}

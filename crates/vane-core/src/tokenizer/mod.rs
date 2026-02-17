@@ -69,7 +69,7 @@ pub(crate) fn is_cjk(c: char) -> bool {
 ///
 /// - `Standard` / `CjkBigram`：M0 完整实现。
 /// - `Jieba`：需先加载词典（`JiebaDict::load`）再调 `build_jieba_tokenizer`；
-///   无词典实例时返回 `Err(VaneError::DictUnavailable)`（M0 行为不变，wasm32 永不启用 jieba feature）。
+///   无词典实例时返回 `Err(VaneError::DictUnavailable("jieba dict not loaded".into()))`（M0 行为不变，wasm32 永不启用 jieba feature）。
 /// - `user_dict.len() > 100_000`：返回 `Err(VaneError::DictTooLarge)`（SPEC §5.3），优先于 jieba 可用性。
 pub fn build_tokenizer(
     kind: BuiltinTokenizer,
@@ -78,13 +78,15 @@ pub fn build_tokenizer(
     use crate::types::VaneError;
 
     if user_dict.len() > MAX_USER_DICT_ENTRIES {
-        return Err(VaneError::DictTooLarge);
+        return Err(VaneError::DictTooLarge(
+            "user dict exceeds 100000 entries".into(),
+        ));
     }
 
     match kind {
         BuiltinTokenizer::Standard => Ok(Box::new(standard::StandardTokenizer::new(user_dict))),
         BuiltinTokenizer::CjkBigram => Ok(Box::new(cjk_bigram::CjkBigramTokenizer::new(user_dict))),
-        BuiltinTokenizer::Jieba => Err(VaneError::DictUnavailable),
+        BuiltinTokenizer::Jieba => Err(VaneError::DictUnavailable("jieba dict not loaded".into())),
     }
 }
 
@@ -100,7 +102,9 @@ pub fn build_jieba_tokenizer(
 ) -> crate::types::Result<Box<dyn Tokenizer>> {
     use crate::types::VaneError;
     if user_dict.len() > MAX_USER_DICT_ENTRIES {
-        return Err(VaneError::DictTooLarge);
+        return Err(VaneError::DictTooLarge(
+            "user dict exceeds 100000 entries".into(),
+        ));
     }
     Ok(Box::new(jieba::JiebaTokenizer::new(dict, user_dict)?))
 }
@@ -145,7 +149,7 @@ mod factory_tests {
     fn build_jieba_returns_dict_unavailable() {
         let err = build_tokenizer(BuiltinTokenizer::Jieba, &[]).err().unwrap();
         assert!(
-            matches!(err, VaneError::DictUnavailable),
+            matches!(err, VaneError::DictUnavailable(_)),
             "M0 jieba 必须返回 DictUnavailable，实际: {:?}",
             err
         );
@@ -172,7 +176,7 @@ mod factory_tests {
             .err()
             .unwrap();
         assert!(
-            matches!(err, VaneError::DictTooLarge),
+            matches!(err, VaneError::DictTooLarge(_)),
             "超限必须返回 DictTooLarge，实际: {:?}",
             err
         );
@@ -188,7 +192,7 @@ mod factory_tests {
         let err = build_tokenizer(BuiltinTokenizer::Jieba, &dict)
             .err()
             .unwrap();
-        assert!(matches!(err, VaneError::DictTooLarge));
+        assert!(matches!(err, VaneError::DictTooLarge(_)));
     }
 
     #[test]
@@ -217,6 +221,6 @@ mod factory_tests {
         // build_tokenizer(Jieba) 无词典实例时返回 DictUnavailable（M0 行为不变）。
         // wasm32 永不启用 jieba feature → 此分支是 wasm 侧降级前的最后防线。
         let r = build_tokenizer(BuiltinTokenizer::Jieba, &[]);
-        assert!(matches!(r, Err(VaneError::DictUnavailable)));
+        assert!(matches!(r, Err(VaneError::DictUnavailable(_))));
     }
 }

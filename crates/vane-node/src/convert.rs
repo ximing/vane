@@ -11,7 +11,7 @@ use vane_core::api::{
 };
 use vane_core::persistence::AutoCommitConfig;
 use vane_core::tokenizer::{BuiltinTokenizer, UserDictEntry};
-use vane_core::types::{FieldDef, Metric, ScalarKind, Schema, VaneError};
+use vane_core::types::{ErrorContext, FieldDef, Metric, ScalarKind, Schema, VaneError};
 
 use crate::error::{to_napi_error, NapiResult};
 
@@ -41,7 +41,7 @@ fn invalid_arg<T>(msg: &str) -> NapiResult<T> {
 }
 
 /// 构造 E_INVALID_ARG 的 napi::Error 值，供 `ok_or_else` + `?` 使用。
-fn err_invalid_arg(msg: impl Into<String>) -> Error {
+fn err_invalid_arg(msg: impl Into<ErrorContext>) -> Error {
     to_napi_error(VaneError::InvalidArg(msg.into()))
 }
 

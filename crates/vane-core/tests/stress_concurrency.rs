@@ -532,7 +532,7 @@ fn stress_concurrent_compact_contention() {
     for (t, result) in &results {
         match result {
             Ok(()) => ok_count += 1,
-            Err(VaneError::Busy) => busy_count += 1,
+            Err(VaneError::Busy(_)) => busy_count += 1,
             Err(e) => {
                 other_err += 1;
                 eprintln!("thread {} compact unexpected error: {}", t, e);
@@ -619,7 +619,7 @@ fn stress_concurrent_add_during_compact() {
                 for _ in 0..10 {
                     match col.compact() {
                         Ok(()) => compact_count.fetch_add(1, Ordering::Relaxed),
-                        Err(VaneError::Busy) => 0, // 预期：compacting 重入保护
+                        Err(VaneError::Busy(_)) => 0, // 预期：compacting 重入保护
                         Err(e) => {
                             errors.lock().unwrap().push(format!("compact err: {}", e));
                             0

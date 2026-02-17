@@ -149,15 +149,19 @@ fn m4_5c_manifest_parse_error_contains_context() {
         .unwrap();
     let store = ManifestStore::new(vfs, "mydb");
     match store.load() {
-        Err(VaneError::Corrupt(m)) => {
+        Err(VaneError::Corrupt(ctx)) => {
             assert!(
-                m.contains("manifest parse"),
+                ctx.message.contains("manifest parse"),
                 "original msg preserved: {}",
-                m
+                ctx.message
             );
-            assert!(m.contains("mydb"), "msg must contain db path: {}", m);
-            assert!(m.contains("op=load manifest"), "msg must contain op: {}", m);
-            assert!(m.contains("建议"), "msg must contain suggestion: {}", m);
+            assert!(
+                ctx.message.contains("mydb"),
+                "message must contain db path: {}",
+                ctx.message
+            );
+            assert_eq!(ctx.op, Some("load manifest"), "op field: {:?}", ctx.op);
+            assert!(ctx.hint.is_some(), "hint field must be set");
         }
         other => panic!("expected Corrupt, got {:?}", other.map_err(|e| e.name())),
     }

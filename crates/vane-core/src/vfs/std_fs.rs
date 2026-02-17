@@ -60,7 +60,9 @@ impl Vfs for StdFsVfs {
     fn create(&self, path: &str) -> Result<()> {
         let p = self.resolve(path);
         if p.exists() {
-            return Err(VaneError::Io(format!("file already exists: {}", path)));
+            return Err(VaneError::Io(
+                format!("file already exists: {}", path).into(),
+            ));
         }
         std::fs::File::create(&p).map_err(io_err)?;
         Ok(())
@@ -143,5 +145,5 @@ impl Vfs for StdFsVfs {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn io_err(e: std::io::Error) -> VaneError {
-    VaneError::Io(e.to_string())
+    VaneError::Io(e.to_string().into())
 }

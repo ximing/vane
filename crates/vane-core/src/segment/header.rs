@@ -28,7 +28,7 @@ pub fn encode_header(meta: &SegmentMeta) -> Result<Vec<u8>> {
     let mut tb = Vec::new();
     meta.tombstones
         .serialize_into(&mut tb)
-        .map_err(|e| VaneError::Corrupt(format!("tombstone serialize: {}", e)))?;
+        .map_err(|e| VaneError::Corrupt(format!("tombstone serialize: {}", e).into()))?;
     out.extend_from_slice(&(tb.len() as u32).to_le_bytes());
     out.extend_from_slice(&tb);
     Ok(out)
@@ -42,14 +42,19 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         return Err(VaneError::Corrupt("header too short".into()));
     }
     if &buf[0..4] != MAGIC {
-        return Err(VaneError::Corrupt(format!("bad magic: {:?}", &buf[0..4])));
+        return Err(VaneError::Corrupt(
+            format!("bad magic: {:?}", &buf[0..4]).into(),
+        ));
     }
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
     if version != HEADER_FORMAT_V1 {
-        return Err(VaneError::Version(format!(
-            "unsupported format_version: {} (expected {})",
-            version, HEADER_FORMAT_V1
-        )));
+        return Err(VaneError::Version(
+            format!(
+                "unsupported format_version: {} (expected {})",
+                version, HEADER_FORMAT_V1
+            )
+            .into(),
+        ));
     }
     let mut pos = 8;
     let ulid_len = buf[pos] as usize;
@@ -58,7 +63,7 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         return Err(VaneError::Corrupt("header truncated at ulid".into()));
     }
     let ulid = std::str::from_utf8(&buf[pos..pos + ulid_len])
-        .map_err(|e| VaneError::Corrupt(format!("ulid utf8: {}", e)))?
+        .map_err(|e| VaneError::Corrupt(format!("ulid utf8: {}", e).into()))?
         .to_string();
     pos += ulid_len;
     if pos + 4 + 8 + 32 + 4 > buf.len() {
@@ -79,7 +84,7 @@ pub fn decode_header(buf: &[u8]) -> Result<SegmentMeta> {
         return Err(VaneError::Corrupt("header truncated at tombstone".into()));
     }
     let tombstones = roaring::RoaringBitmap::deserialize_from(&buf[pos..pos + tb_len])
-        .map_err(|e| VaneError::Corrupt(format!("tombstone deserialize: {}", e)))?;
+        .map_err(|e| VaneError::Corrupt(format!("tombstone deserialize: {}", e).into()))?;
     Ok(SegmentMeta {
         ulid,
         doc_count,
@@ -104,7 +109,7 @@ mod tests {
         assert_eq!(buf.len(), 8);
         let result = decode_header(&buf);
         assert!(
-            matches!(result, Err(VaneError::Corrupt(ref msg)) if msg.contains("too short")),
+            matches!(result, Err(VaneError::Corrupt(ref ctx)) if ctx.message.contains("too short")),
             "8-byte header should return Corrupt(\"header too short\")"
         );
     }

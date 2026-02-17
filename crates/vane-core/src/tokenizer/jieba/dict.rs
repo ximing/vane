@@ -45,28 +45,32 @@ impl JiebaDict {
     /// 解析已解压的 dict.bin 字节（零分配解析头部，数组拷贝）。
     pub fn load(bytes: &[u8]) -> Result<Self> {
         parse(bytes).map_err(|e| {
-            crate::types::append_context(
-                e,
-                " (op=dict load; 建议: 词典数据损坏，重新构建或联系支持)",
-            )
+            e.with_op("dict load")
+                .with_hint("词典数据损坏，重新构建或联系支持")
         })
     }
 
     /// 解析 zstd 压缩的 dict.bin 字节（绑定层调用：Node/Go 加载 dict.bin 后调此）。
     pub fn load_zstd(compressed: &[u8]) -> Result<Self> {
         use std::io::Read;
-        let mut decoder = ruzstd::streaming_decoder::StreamingDecoder::new(compressed).map_err(|e| {
-            VaneError::Corrupt(format!(
-                "dict.bin zstd decompress failed: {} (op=dict load; 建议: 词典数据损坏，重新构建或联系支持)",
-                e
-            ))
-        })?;
+        let mut decoder =
+            ruzstd::streaming_decoder::StreamingDecoder::new(compressed).map_err(|e| {
+                VaneError::Corrupt(
+                    crate::types::ErrorContext::new(format!(
+                        "dict.bin zstd decompress failed: {}",
+                        e
+                    ))
+                    .op("dict load")
+                    .hint("词典数据损坏，重新构建或联系支持"),
+                )
+            })?;
         let mut buf = Vec::with_capacity(compressed.len() * 4);
         decoder.read_to_end(&mut buf).map_err(|e| {
-            VaneError::Corrupt(format!(
-                "dict.bin zstd read failed: {} (op=dict load; 建议: 词典数据损坏，重新构建或联系支持)",
-                e
-            ))
+            VaneError::Corrupt(
+                crate::types::ErrorContext::new(format!("dict.bin zstd read failed: {}", e))
+                    .op("dict load")
+                    .hint("词典数据损坏，重新构建或联系支持"),
+            )
         })?;
         Self::load(&buf)
     }
@@ -179,18 +183,24 @@ fn parse(bytes: &[u8]) -> Result<JiebaDict> {
     let magic = take(bytes, &mut cur, 4)
         .ok_or_else(|| VaneError::Corrupt("dict.bin too short for magic".into()))?;
     if magic != MAGIC {
-        return Err(VaneError::Corrupt(format!(
-            "dict.bin magic mismatch: expected {:?}, got {:?}",
-            MAGIC, magic
-        )));
+        return Err(VaneError::Corrupt(
+            format!(
+                "dict.bin magic mismatch: expected {:?}, got {:?}",
+                MAGIC, magic
+            )
+            .into(),
+        ));
     }
     let format_version = take_u32(bytes, &mut cur)
         .ok_or_else(|| VaneError::Corrupt("dict.bin too short for format_version".into()))?;
     if format_version != FORMAT_VERSION {
-        return Err(VaneError::Version(format!(
-            "dict.bin format_version {} unsupported (expected {})",
-            format_version, FORMAT_VERSION
-        )));
+        return Err(VaneError::Version(
+            format!(
+                "dict.bin format_version {} unsupported (expected {})",
+                format_version, FORMAT_VERSION
+            )
+            .into(),
+        ));
     }
     let sha256_prefix: [u8; 8] = take(bytes, &mut cur, 8)
         .ok_or_else(|| VaneError::Corrupt("dict.bin too short for sha256_prefix".into()))?
@@ -202,7 +212,7 @@ fn parse(bytes: &[u8]) -> Result<JiebaDict> {
     let dict_version_bytes = take(bytes, &mut cur, ver_len)
         .ok_or_else(|| VaneError::Corrupt("dict.bin too short for version".into()))?;
     let dict_version = std::str::from_utf8(dict_version_bytes)
-        .map_err(|e| VaneError::Corrupt(format!("dict_version not utf8: {}", e)))?
+        .map_err(|e| VaneError::Corrupt(format!("dict_version not utf8: {}", e).into()))?
         .to_string();
     let total_freq = take_u64(bytes, &mut cur)
         .ok_or_else(|| VaneError::Corrupt("dict.bin too short for total_freq".into()))?;

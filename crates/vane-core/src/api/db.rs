@@ -108,17 +108,25 @@ impl Db {
             let read = self.inner.collections.read().unwrap();
             if let Some(existing) = read.get(name) {
                 if existing.schema.fields != schema.fields {
-                    return Err(VaneError::Schema(format!(
-                        "collection '{}' exists with different schema (op=open collection; 建议: 使用相同 schema 或新 collection 名称)",
-                        name
-                    )));
+                    return Err(VaneError::Schema(
+                        crate::types::ErrorContext::new(format!(
+                            "collection '{}' exists with different schema",
+                            name
+                        ))
+                        .op("open collection")
+                        .hint("使用相同 schema 或新 collection 名称"),
+                    ));
                 }
                 let tok_id = compute_tokenizer_id(opts.tokenizer, &opts.user_dict);
                 if *existing.tokenizer_id.read().unwrap() != tok_id {
-                    return Err(VaneError::Schema(format!(
-                        "collection '{}' exists with different tokenizer (op=open collection; 建议: 使用相同 tokenizer 或新 collection 名称)",
-                        name
-                    )));
+                    return Err(VaneError::Schema(
+                        crate::types::ErrorContext::new(format!(
+                            "collection '{}' exists with different tokenizer",
+                            name
+                        ))
+                        .op("open collection")
+                        .hint("使用相同 tokenizer 或新 collection 名称"),
+                    ));
                 }
                 return Ok(Collection {
                     inner: existing.clone(),
