@@ -38,12 +38,15 @@ pub fn compile_filter(
 ) -> Result<RoaringBitmap> {
     // 段对齐校验。
     if segments.len() != scalars.len() || segments.len() != tombstones.len() {
-        return Err(VaneError::InvalidArg(format!(
-            "compile_filter: segments/scalars/tombstones length mismatch: {}/{}/{}",
-            segments.len(),
-            scalars.len(),
-            tombstones.len()
-        )));
+        return Err(VaneError::InvalidArg(
+            format!(
+                "compile_filter: segments/scalars/tombstones length mismatch: {}/{}/{}",
+                segments.len(),
+                scalars.len(),
+                tombstones.len()
+            )
+            .into(),
+        ));
     }
 
     // 2.1.3：schema 校验——每个 filter 字段必须存在于 schema 且为 Scalar。
@@ -52,16 +55,18 @@ pub fn compile_filter(
     for (field, _) in &filter.fields {
         match schema.fields.iter().find(|(name, _)| name == field) {
             None => {
-                return Err(VaneError::InvalidArg(format!(
-                    "compile_filter: field '{}' not in schema",
-                    field
-                )));
+                return Err(VaneError::InvalidArg(
+                    format!("compile_filter: field '{}' not in schema", field).into(),
+                ));
             }
             Some((_, def)) if !matches!(def, FieldDef::Scalar { .. }) => {
-                return Err(VaneError::InvalidArg(format!(
-                    "compile_filter: field '{}' is not a scalar field (got {:?})",
-                    field, def
-                )));
+                return Err(VaneError::InvalidArg(
+                    format!(
+                        "compile_filter: field '{}' is not a scalar field (got {:?})",
+                        field, def
+                    )
+                    .into(),
+                ));
             }
             _ => {}
         }
@@ -113,11 +118,14 @@ pub fn alive_bitmap(
     tombstones: &[Arc<RoaringBitmap>],
 ) -> Result<RoaringBitmap> {
     if segments.len() != tombstones.len() {
-        return Err(VaneError::InvalidArg(format!(
-            "alive_bitmap: segments/tombstones length mismatch: {}/{}",
-            segments.len(),
-            tombstones.len()
-        )));
+        return Err(VaneError::InvalidArg(
+            format!(
+                "alive_bitmap: segments/tombstones length mismatch: {}/{}",
+                segments.len(),
+                tombstones.len()
+            )
+            .into(),
+        ));
     }
     let mut bm = RoaringBitmap::new();
     for (i, reader) in segments.iter().enumerate() {

@@ -147,7 +147,7 @@ impl MetaSlot {
         for (path, ext) in &self.file_table {
             let pb = path.as_bytes();
             if pb.len() > u16::MAX as usize {
-                return Err(VaneError::Io(format!("path too long: {}", pb.len())));
+                return Err(VaneError::Io(format!("path too long: {}", pb.len()).into()));
             }
             payload.extend_from_slice(&(pb.len() as u16).to_le_bytes());
             payload.extend_from_slice(pb);
@@ -161,12 +161,15 @@ impl MetaSlot {
         }
 
         if payload.len() + META_HEADER_SIZE > META_SLOT_SIZE as usize {
-            return Err(VaneError::Io(format!(
-                "meta slot overflow: {} + {} > {}",
-                payload.len(),
-                META_HEADER_SIZE,
-                META_SLOT_SIZE
-            )));
+            return Err(VaneError::Io(
+                format!(
+                    "meta slot overflow: {} + {} > {}",
+                    payload.len(),
+                    META_HEADER_SIZE,
+                    META_SLOT_SIZE
+                )
+                .into(),
+            ));
         }
 
         let crc = crc32(&payload);
@@ -223,7 +226,7 @@ impl MetaSlot {
                 ));
             }
             let path = String::from_utf8(payload[cur..cur + pl].to_vec())
-                .map_err(|e| VaneError::Io(format!("invalid utf8 path: {e}")))?;
+                .map_err(|e| VaneError::Io(format!("invalid utf8 path: {e}").into()))?;
             cur += pl;
             let base = u64::from_le_bytes(payload[cur..cur + 8].try_into().unwrap());
             cur += 8;

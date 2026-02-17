@@ -110,7 +110,7 @@ fn set_user_dict_rejects_dict_too_large() {
         .map(|i| UserDictEntry::Word(format!("w{}", i)))
         .collect();
     let r = col.set_user_dict(&dict);
-    assert!(matches!(r, Err(VaneError::DictTooLarge)));
+    assert!(matches!(r, Err(VaneError::DictTooLarge(_))));
 }
 
 // ---- Task 2: reindex 签名变更 + ReindexHandle ----
@@ -157,18 +157,18 @@ fn rebuilding_writes_rejected_with_busy() {
         meta: None,
     }]);
     assert!(
-        matches!(r, Err(VaneError::Busy)),
+        matches!(r, Err(VaneError::Busy(_))),
         "add during Rebuilding must E_BUSY"
     );
     // flush 也被拒
     let r2 = col.flush();
-    assert!(matches!(r2, Err(VaneError::Busy)));
+    assert!(matches!(r2, Err(VaneError::Busy(_))));
     // delete 也被拒
     let r3 = col.delete(&["x".into()]);
-    assert!(matches!(r3, Err(VaneError::Busy)));
+    assert!(matches!(r3, Err(VaneError::Busy(_))));
     // compact 也被拒
     let r4 = col.compact();
-    assert!(matches!(r4, Err(VaneError::Busy)));
+    assert!(matches!(r4, Err(VaneError::Busy(_))));
     // 查询仍可用（旧段只读）
     col.set_state_for_test(DictState::Stable); // 恢复以便查询
     let hits = col.search(&SearchQuery {
@@ -190,7 +190,7 @@ fn set_user_dict_during_rebuilding_returns_busy() {
     let col = setup_col_with_docs(&db);
     col.set_state_for_test(DictState::Rebuilding);
     let r = col.set_user_dict(&[UserDictEntry::Word("x".into())]);
-    assert!(matches!(r, Err(VaneError::Busy)));
+    assert!(matches!(r, Err(VaneError::Busy(_))));
 }
 
 // ---- Task 6: I-4 单一分词身份 ----

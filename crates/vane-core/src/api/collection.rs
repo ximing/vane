@@ -260,7 +260,7 @@ impl Collection {
     pub fn add(&self, docs: &[Doc]) -> Result<AddReport> {
         // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
-            return Err(VaneError::Busy);
+            return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
         let mut state = self.inner.write_state.lock().unwrap();
         let schema_dim = self.inner.schema.vector_field().map(|(_, d, _)| d).ok();
@@ -268,13 +268,17 @@ impl Collection {
         for doc in docs {
             if let (Some(dim), Some(v)) = (schema_dim, &doc.vector) {
                 if v.len() as u32 != dim {
-                    return Err(VaneError::Schema(format!(
-                        "vector dim mismatch: got {} expected {} (op=add, collection={}, doc_id={}; 建议: 对齐 doc vector 维度与 schema 声明)",
-                        v.len(),
-                        dim,
-                        self.inner.name,
-                        doc.id
-                    )));
+                    return Err(VaneError::Schema(
+                        crate::types::ErrorContext::new(format!(
+                            "vector dim mismatch: got {} expected {} (collection={}, doc_id={})",
+                            v.len(),
+                            dim,
+                            self.inner.name,
+                            doc.id
+                        ))
+                        .op("add")
+                        .hint("对齐 doc vector 维度与 schema 声明"),
+                    ));
                 }
             }
             let docid = state.next_docid;
@@ -312,7 +316,7 @@ impl Collection {
     pub fn flush(&self) -> Result<()> {
         // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
-            return Err(VaneError::Busy);
+            return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
         let mut state = self.inner.write_state.lock().unwrap();
         if state.buffer.is_empty() {
@@ -669,10 +673,14 @@ impl Collection {
                 .collections
                 .get_mut(&self.inner.name)
                 .ok_or_else(|| {
-                    VaneError::NotFound(format!(
-                        "collection not in manifest: {} (op=merge, db={}; 建议: 确认 collection 已创建)",
-                        self.inner.name, self.inner.db_path
-                    ))
+                    VaneError::NotFound(
+                        crate::types::ErrorContext::new(format!(
+                            "collection not in manifest: {} (db={})",
+                            self.inner.name, self.inner.db_path
+                        ))
+                        .op("merge")
+                        .hint("确认 collection 已创建"),
+                    )
                 })?;
             col_meta.segment_ulids.retain(|u| !source_ulids.contains(u));
             col_meta.segment_ulids.push(new_meta.ulid.clone());
@@ -780,10 +788,14 @@ impl Collection {
     /// `allow_hnsw=false`：vector 路恒走 `brute_search`（基线口径，绕过 HNSW）。
     fn run_search(&self, query: &SearchQuery, allow_hnsw: bool) -> Result<Vec<Hit>> {
         if query.top_k > TOPK_MAX {
-            return Err(VaneError::InvalidArg(format!(
-                "topK {} exceeds max {} (op=search, collection={}; 建议: 减小 topK 至 {} 以内)",
-                query.top_k, TOPK_MAX, self.inner.name, TOPK_MAX
-            )));
+            return Err(VaneError::InvalidArg(
+                crate::types::ErrorContext::new(format!(
+                    "topK {} exceeds max {} (collection={})",
+                    query.top_k, TOPK_MAX, self.inner.name
+                ))
+                .op("search")
+                .hint(format!("减小 topK 至 {} 以内", TOPK_MAX)),
+            ));
         }
         // 03-pre-filter：编译用户 filter 为 roaring 位图（SPEC §8.3）。
         // 无 filter 时若有 tombstone，构造 alive 位图统一排除（Task 5）。
@@ -800,7 +812,9 @@ impl Collection {
                 (None, Some(_)) => SearchMode::Vector,
                 (None, None) => {
                     return Err(VaneError::InvalidArg(
-                        "search requires text or vector (op=search; 建议: 提供 text 或 vector 查询参数)".into(),
+                        crate::types::ErrorContext::new("search requires text or vector")
+                            .op("search")
+                            .hint("提供 text 或 vector 查询参数"),
                     ))
                 }
             },
@@ -821,12 +835,16 @@ impl Collection {
         let vf = if let Some(v) = &query.vector {
             let (_, dim, metric) = self.inner.schema.vector_field()?;
             if v.len() as u32 != dim {
-                return Err(VaneError::Schema(format!(
-                    "query vector dim {} != schema dim {} (op=search, collection={}; 建议: 对齐 query vector 维度与 schema 声明)",
-                    v.len(),
-                    dim,
-                    self.inner.name
-                )));
+                return Err(VaneError::Schema(
+                    crate::types::ErrorContext::new(format!(
+                        "query vector dim {} != schema dim {} (collection={})",
+                        v.len(),
+                        dim,
+                        self.inner.name
+                    ))
+                    .op("search")
+                    .hint("对齐 query vector 维度与 schema 声明"),
+                ));
             }
             Some(metric)
         } else {
@@ -1163,7 +1181,7 @@ impl Collection {
     pub fn delete(&self, ids: &[String]) -> Result<u64> {
         // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
-            return Err(VaneError::Busy);
+            return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
         let snap = self.inner.snapshot.read().unwrap();
         let offsets = self.inner.seg_offsets.read().unwrap();
@@ -1220,13 +1238,13 @@ impl Collection {
     pub fn compact(&self) -> Result<()> {
         // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
-            return Err(VaneError::Busy);
+            return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
         // 重入保护。M-minor-1：CompactingGuard 保证 panic 时复位标志。
         {
             let mut guard = self.inner.compacting.lock().unwrap();
             if *guard {
-                return Err(VaneError::Busy);
+                return Err(VaneError::Busy("reindex/compact in progress".into()));
             }
             *guard = true;
         }
@@ -1272,11 +1290,13 @@ impl Collection {
     /// - 多次调用覆盖暂存词表（放弃旧暂存，SPEC §7.4 状态机「放弃」路径）。
     pub fn set_user_dict(&self, dict: &[UserDictEntry]) -> Result<()> {
         if dict.len() > crate::tokenizer::MAX_USER_DICT_ENTRIES {
-            return Err(VaneError::DictTooLarge);
+            return Err(VaneError::DictTooLarge(
+                "user dict exceeds 100000 entries".into(),
+            ));
         }
         let mut state = self.inner.dict_state.write().unwrap();
         if *state == DictState::Rebuilding {
-            return Err(VaneError::Busy);
+            return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
         // M4 §3.5 tracing：词典状态迁移 Stable→PendingReindex（state transition）。
         #[cfg(feature = "tracing")]
@@ -1317,7 +1337,7 @@ impl Collection {
         {
             let mut guard = self.inner.compacting.lock().unwrap();
             if *guard {
-                return Err(VaneError::Busy);
+                return Err(VaneError::Busy("reindex/compact in progress".into()));
             }
             *guard = true;
         }

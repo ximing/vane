@@ -509,7 +509,7 @@ mod tests {
         // 错误路径：均为 Io，非 Unsupported
         let err = vfs.read_at("nope", &mut [0u8; 1], 0).unwrap_err();
         assert!(matches!(err, VaneError::Io(_)));
-        assert!(!matches!(err, VaneError::Unsupported));
+        assert!(!matches!(err, VaneError::Unsupported(_)));
         let err = vfs.delete("nope").unwrap_err();
         assert!(matches!(err, VaneError::Io(_)));
         let err = vfs.rename("nope", "dst").unwrap_err();

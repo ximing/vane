@@ -470,10 +470,9 @@ pub fn write_hnsw(vfs: &dyn Vfs, segment_dir: &str, graph: &HnswGraph) -> Result
         buf.extend_from_slice(&n.local_docid.to_le_bytes());
         // level 以 u8 存储（HNSW 层数实际远小于 255）
         if n.level > 255 {
-            return Err(VaneError::Corrupt(format!(
-                "hnsw node level {} exceeds u8",
-                n.level
-            )));
+            return Err(VaneError::Corrupt(
+                format!("hnsw node level {} exceeds u8", n.level).into(),
+            ));
         }
         buf.push(n.level as u8);
         for lc in 0..=n.level as usize {
@@ -502,7 +501,9 @@ fn metric_from_u8(b: u8) -> Result<Metric> {
         0 => Ok(Metric::Cosine),
         1 => Ok(Metric::L2),
         2 => Ok(Metric::Dot),
-        _ => Err(VaneError::Corrupt(format!("unknown metric byte: {}", b))),
+        _ => Err(VaneError::Corrupt(
+            format!("unknown metric byte: {}", b).into(),
+        )),
     }
 }
 
@@ -532,10 +533,13 @@ impl HnswReader {
         }
         let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         if version != HNSW_FORMAT_V1 {
-            return Err(VaneError::Version(format!(
-                "hnsw.bin unsupported format_version: {} (expected {})",
-                version, HNSW_FORMAT_V1
-            )));
+            return Err(VaneError::Version(
+                format!(
+                    "hnsw.bin unsupported format_version: {} (expected {})",
+                    version, HNSW_FORMAT_V1
+                )
+                .into(),
+            ));
         }
         let dim = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         let metric = metric_from_u8(buf[12])?;

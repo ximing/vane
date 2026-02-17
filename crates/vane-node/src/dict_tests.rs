@@ -41,7 +41,7 @@ fn bundled_dict_sha256_consistent() {
 fn jieba_dict_missing_returns_dict_unavailable() {
     let r = build_tokenizer(BuiltinTokenizer::Jieba, &[]);
     assert!(
-        matches!(r, Err(VaneError::DictUnavailable)),
+        matches!(r, Err(VaneError::DictUnavailable(_))),
         "无词典时 build_tokenizer(Jieba) 必须返回 DictUnavailable"
     );
 }

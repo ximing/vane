@@ -255,7 +255,9 @@ pub fn finalize_merge(
 ) -> crate::types::Result<SegmentMeta> {
     let writer = task.writer.take().ok_or_else(|| {
         crate::types::VaneError::InvalidArg(
-            "finalize_merge with no steps (op=merge; 建议: 检查 merge 调用序列)".into(),
+            crate::types::ErrorContext::new("finalize_merge with no steps")
+                .op("merge")
+                .hint("检查 merge 调用序列"),
         )
     })?;
     let meta = writer.finalize()?;

@@ -98,10 +98,14 @@ impl ManifestStore {
             return Ok(None);
         }
         let m: Manifest = serde_json::from_slice(&buf).map_err(|e| {
-            VaneError::Corrupt(format!(
-                "manifest parse: {} (db={}, op=load manifest; 建议: 检查 manifest.json 完整性或从备份恢复)",
-                e, self.db_path
-            ))
+            VaneError::Corrupt(
+                crate::types::ErrorContext::new(format!(
+                    "manifest parse: {} (db={})",
+                    e, self.db_path
+                ))
+                .op("load manifest")
+                .hint("检查 manifest.json 完整性或从备份恢复"),
+            )
         })?;
         Ok(Some(m))
     }
@@ -124,10 +128,13 @@ impl ManifestStore {
     /// 事务中复用落盘逻辑而不重入 save_lock（std::sync::Mutex 不可重入，重入死锁）。
     fn save_atomic_locked(&self, manifest: &Manifest) -> Result<()> {
         let json = serde_json::to_vec(manifest).map_err(|e| {
-            VaneError::Corrupt(format!(
-                "manifest serialize: {} (db={}, op=save manifest; 建议: 重试或检查磁盘空间)",
-                e, self.db_path
-            ))
+            VaneError::Corrupt(
+                format!(
+                    "manifest serialize: {} (db={}, op=save manifest; 建议: 重试或检查磁盘空间)",
+                    e, self.db_path
+                )
+                .into(),
+            )
         })?;
         let tmp = self.tmp_path();
         let target = self.manifest_path();
@@ -152,7 +159,7 @@ impl ManifestStore {
             VaneError::NotFound(format!(
                 "collection not found: {} (db={}, seg={}, op=add_segment; 建议: 确认 collection 名称正确)",
                 collection, self.db_path, ulid
-            ))
+            ).into())
         })?;
         if !col.segment_ulids.contains(&ulid.to_string()) {
             col.segment_ulids.push(ulid.to_string());

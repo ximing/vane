@@ -645,7 +645,7 @@ fn m2_07_open_rejects_vectors_bin_bad_magic() {
     vfs.write_at(&vpath, &hdr, 0).unwrap();
     let r = SegmentReader::open(&vfs, &seg_dir);
     assert!(
-        matches!(r, Err(VaneError::Corrupt(ref m)) if m.contains("vectors.bin bad magic")),
+        matches!(r, Err(VaneError::Corrupt(ref ctx)) if ctx.message.contains("vectors.bin bad magic")),
         "open should loudly reject vectors.bin bad magic, got err variant"
     );
 }
@@ -662,7 +662,7 @@ fn m2_07_open_rejects_stored_bin_bad_magic() {
     vfs.write_at(&spath, &hdr, 0).unwrap();
     let r = SegmentReader::open(&vfs, &seg_dir);
     assert!(
-        matches!(r, Err(VaneError::Corrupt(ref m)) if m.contains("stored.bin bad magic")),
+        matches!(r, Err(VaneError::Corrupt(ref ctx)) if ctx.message.contains("stored.bin bad magic")),
         "open should loudly reject stored.bin bad magic, got err variant"
     );
 }
@@ -726,14 +726,13 @@ fn m2_07_open_rejects_truncated_v2_header() {
 
     let r = SegmentReader::open(&vfs, &seg_dir);
     assert!(
-        matches!(r, Err(VaneError::Corrupt(ref m)) if m.contains("v2 header truncated")),
+        matches!(r, Err(VaneError::Corrupt(ref ctx)) if ctx.message.contains("v2 header truncated")),
         "open should reject truncated v2 header, got err variant"
     );
 }
 
-/// M4 阶段五 c：VaneError 诊断上下文——SegmentReader::open 的错误 String
-/// 含段 ULID + 操作 + 建议操作（§10 推荐"先丰富 String"）。
-/// 断言非 vacuous：检 String 含 seg=ULID、op=open、建议关键词。
+/// M4 诊断重构：SegmentReader::open 的 VaneError::Corrupt 含结构化 ErrorContext
+/// （seg=ULID + op=open + hint）。断言结构化字段而非 String contains。
 #[test]
 fn m4_5c_open_error_contains_segment_context() {
     use crate::types::VaneError;
@@ -742,7 +741,7 @@ fn m4_5c_open_error_contains_segment_context() {
     let ulid = seg_dir.rsplit('/').next().unwrap();
     let ulid = ulid.strip_prefix("seg_").unwrap_or(ulid);
 
-    // corrupt vectors.bin magic → Corrupt error 含 seg=<ulid> + op=open
+    // corrupt vectors.bin magic → Corrupt error 含 seg=ULID + op=open
     let vpath = format!("{}/vectors.bin", seg_dir);
     let mut hdr = [0u8; 8];
     let _ = vfs.read_at(&vpath, &mut hdr, 0).unwrap();
@@ -750,20 +749,25 @@ fn m4_5c_open_error_contains_segment_context() {
     vfs.write_at(&vpath, &hdr, 0).unwrap();
     let r = SegmentReader::open(&vfs, &seg_dir);
     match r {
-        Err(VaneError::Corrupt(m)) => {
+        Err(VaneError::Corrupt(ctx)) => {
             assert!(
-                m.contains("vectors.bin bad magic"),
+                ctx.message.contains("vectors.bin bad magic"),
                 "original message preserved: {}",
-                m
+                ctx.message
             );
-            assert!(
-                m.contains(ulid),
-                "msg must contain segment ULID {}: {}",
-                ulid,
-                m
+            assert_eq!(
+                ctx.seg.as_deref(),
+                Some(ulid),
+                "seg field must be ULID: {:?}",
+                ctx.seg
             );
-            assert!(m.contains("op=open"), "msg must contain operation: {}", m);
-            assert!(m.contains("建议"), "msg must contain suggestion: {}", m);
+            assert_eq!(
+                ctx.op,
+                Some("open vectors.bin"),
+                "op field must be set: {:?}",
+                ctx.op
+            );
+            assert!(ctx.hint.is_some(), "hint field must be set");
         }
         other => panic!("expected Corrupt, got {:?}", other.err().map(|e| e.name())),
     }

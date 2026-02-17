@@ -129,12 +129,12 @@ fn js_to_json(v: &JsValue) -> Result<serde_json::Value, VaneError> {
             return Ok(serde_json::Value::Null);
         }
         return serde_json::from_str(&s)
-            .map_err(|e| VaneError::InvalidArg(format!("JSON parse: {e}")));
+            .map_err(|e| VaneError::InvalidArg(format!("JSON parse: {e}").into()));
     }
     let s = js_sys::JSON::stringify(v)
-        .map_err(|e| VaneError::InvalidArg(format!("JSON stringify: {:?}", e)))?;
+        .map_err(|e| VaneError::InvalidArg(format!("JSON stringify: {:?}", e).into()))?;
     serde_json::from_str(s.as_string().unwrap_or_default().as_str())
-        .map_err(|e| VaneError::InvalidArg(format!("JSON parse: {e}")))
+        .map_err(|e| VaneError::InvalidArg(format!("JSON parse: {e}").into()))
 }
 
 // ── JSON 解析（与 lib.rs 同构，I-8 薄壳）────────────────────────────────────
@@ -240,7 +240,11 @@ fn parse_schema(v: &serde_json::Value) -> Result<Schema, VaneError> {
                     _ => ScalarKind::Keyword,
                 },
             },
-            other => return Err(VaneError::InvalidArg(format!("unknown field type {other}"))),
+            other => {
+                return Err(VaneError::InvalidArg(
+                    format!("unknown field type {other}").into(),
+                ))
+            }
         };
         fields.push((name, fd));
     }
@@ -464,21 +468,21 @@ async fn init_opfs_vfs(db_path: &str) -> Result<Arc<dyn Vfs>, VaneError> {
 
     let global = js_sys::global();
     let navigator = js_sys::Reflect::get(&global, &"navigator".into())
-        .map_err(|e| VaneError::Io(format!("navigator: {:?}", e)))?;
+        .map_err(|e| VaneError::Io(format!("navigator: {:?}", e).into()))?;
     let storage = js_sys::Reflect::get(&navigator, &"storage".into())
-        .map_err(|e| VaneError::Io(format!("storage: {:?}", e)))?;
+        .map_err(|e| VaneError::Io(format!("storage: {:?}", e).into()))?;
     let get_directory = js_sys::Reflect::get(&storage, &"getDirectory".into())
-        .map_err(|e| VaneError::Io(format!("getDirectory: {:?}", e)))?;
+        .map_err(|e| VaneError::Io(format!("getDirectory: {:?}", e).into()))?;
     let get_directory: js_sys::Function = get_directory
         .dyn_into()
-        .map_err(|e| VaneError::Io(format!("getDirectory not function: {:?}", e)))?;
+        .map_err(|e| VaneError::Io(format!("getDirectory not function: {:?}", e).into()))?;
     let root_promise = get_directory
         .call0(&storage)
-        .map_err(|e| VaneError::Io(format!("getDirectory(): {:?}", e)))?;
+        .map_err(|e| VaneError::Io(format!("getDirectory(): {:?}", e).into()))?;
     let root: web_sys::FileSystemDirectoryHandle =
         JsFuture::from(root_promise.unchecked_into::<js_sys::Promise>())
             .await
-            .map_err(|e| VaneError::Io(format!("getDirectory await: {:?}", e)))?
+            .map_err(|e| VaneError::Io(format!("getDirectory await: {:?}", e).into()))?
             .unchecked_into();
 
     let opts = web_sys::FileSystemGetFileOptions::new();
@@ -487,14 +491,14 @@ async fn init_opfs_vfs(db_path: &str) -> Result<Arc<dyn Vfs>, VaneError> {
     let fh: web_sys::FileSystemFileHandle =
         JsFuture::from(fh_promise.unchecked_into::<js_sys::Promise>())
             .await
-            .map_err(|e| VaneError::Io(format!("getFileHandle await: {:?}", e)))?
+            .map_err(|e| VaneError::Io(format!("getFileHandle await: {:?}", e).into()))?
             .unchecked_into();
 
     let sah_promise = fh.create_sync_access_handle();
     let sah: web_sys::FileSystemSyncAccessHandle =
         JsFuture::from(sah_promise.unchecked_into::<js_sys::Promise>())
             .await
-            .map_err(|e| VaneError::Io(format!("createSyncAccessHandle await: {:?}", e)))?
+            .map_err(|e| VaneError::Io(format!("createSyncAccessHandle await: {:?}", e).into()))?
             .unchecked_into();
 
     let opfs = crate::vfs::opfs::OpfsVfs::from_handle(sah)?;
@@ -744,7 +748,7 @@ impl VaneWorker {
         let col = inner
             .collections
             .get(&col)
-            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found")))?;
+            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found").into()))?;
         let report = col.add(&docs)?;
         Ok(report.accepted)
     }
@@ -755,7 +759,7 @@ impl VaneWorker {
         let col = inner
             .collections
             .get(&col)
-            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found")))?;
+            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found").into()))?;
         col.flush()
     }
 
@@ -765,7 +769,7 @@ impl VaneWorker {
         let col = inner
             .collections
             .get(&col)
-            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found")))?;
+            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found").into()))?;
         col.search(&query)
     }
 
@@ -775,7 +779,7 @@ impl VaneWorker {
         let col = inner
             .collections
             .get(&col)
-            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found")))?;
+            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found").into()))?;
         col.delete(&ids)
     }
 
@@ -785,7 +789,7 @@ impl VaneWorker {
         let col = inner
             .collections
             .get(&col)
-            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found")))?;
+            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found").into()))?;
         col.compact()
     }
 
@@ -795,7 +799,7 @@ impl VaneWorker {
         let col = inner
             .collections
             .get(&col)
-            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found")))?;
+            .ok_or_else(|| VaneError::NotFound(format!("collection {col} not found").into()))?;
         let rh = col.reindex()?;
         Ok(rh.progress())
     }
@@ -933,7 +937,7 @@ impl VaneWorker {
             let q = parse_search_query(&v)?;
             let hits = self.search_sync(col, q)?;
             serde_json::to_string(&hits_to_json(&hits))
-                .map_err(|e| VaneError::InvalidArg(format!("hits serialize: {e}")))
+                .map_err(|e| VaneError::InvalidArg(format!("hits serialize: {e}").into()))
         })() {
             Ok(s) => ok_promise(JsValue::from(s)),
             Err(e) => err_promise(e),

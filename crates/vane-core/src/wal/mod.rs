@@ -67,10 +67,11 @@ impl Wal {
         #[cfg(feature = "tracing")]
         tracing::debug!(?record, "wal append");
         let mut line = serde_json::to_vec(record).map_err(|e| {
-            VaneError::Corrupt(format!(
-                "wal serialize: {} (path={}, op=wal append; 建议: 检查 wal.log 完整性或重新操作)",
-                e, self.path
-            ))
+            VaneError::Corrupt(
+                crate::types::ErrorContext::new(format!("wal serialize: {}", e))
+                    .op("wal append")
+                    .hint("检查 wal.log 完整性或重新操作"),
+            )
         })?;
         line.push(b'\n');
         self.vfs.append(&self.path, &line)?;
@@ -101,10 +102,14 @@ impl Wal {
                 continue;
             }
             let r: WalRecord = serde_json::from_slice(line).map_err(|e| {
-                VaneError::Corrupt(format!(
-                    "wal parse: {} (path={}, op=wal recover; 建议: wal.log 损坏，检查崩溃恢复或清除 wal.log 重试)",
-                    e, self.path
-                ))
+                VaneError::Corrupt(
+                    crate::types::ErrorContext::new(format!(
+                        "wal parse: {} (path={})",
+                        e, self.path
+                    ))
+                    .op("wal recover")
+                    .hint("wal.log 损坏，检查崩溃恢复或清除 wal.log 重试"),
+                )
             })?;
             records.push(r);
         }

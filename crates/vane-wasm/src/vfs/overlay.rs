@@ -305,10 +305,13 @@ impl MemOverlay {
                 let mut buf = vec![0u8; ext.size as usize];
                 let n = self.backend.read(ext.base, &mut buf)?;
                 if n != ext.size as usize {
-                    return Err(VaneError::Io(format!(
-                        "compaction read short: path={}, expected={}, got={}",
-                        path, ext.size, n
-                    )));
+                    return Err(VaneError::Io(
+                        format!(
+                            "compaction read short: path={}, expected={}, got={}",
+                            path, ext.size, n
+                        )
+                        .into(),
+                    ));
                 }
                 live.push((path.clone(), buf));
             } else {
@@ -385,7 +388,9 @@ impl Vfs for MemOverlay {
     fn create(&self, path: &str) -> Result<()> {
         let mut state = self.state.write().map_err(poison_err)?;
         if state.file_table.contains_key(path) {
-            return Err(VaneError::Io(format!("file already exists: {}", path)));
+            return Err(VaneError::Io(
+                format!("file already exists: {}", path).into(),
+            ));
         }
         state
             .file_table
@@ -401,7 +406,7 @@ impl Vfs for MemOverlay {
                 .file_table
                 .get(path)
                 .copied()
-                .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?
+                .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?
         };
         if offset >= ext.size {
             return Ok(0);
@@ -417,7 +422,7 @@ impl Vfs for MemOverlay {
             .file_table
             .get(path)
             .copied()
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
 
         let new_end = offset + buf.len() as u64;
 
@@ -491,7 +496,7 @@ impl Vfs for MemOverlay {
             .file_table
             .get(path)
             .copied()
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
 
         let old_size = ext.size;
         let buf_len = buf.len() as u64;
@@ -556,7 +561,7 @@ impl Vfs for MemOverlay {
         let from_ext = state
             .file_table
             .remove(from)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", from)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", from).into()))?;
         // 释放目标的旧区间（若存在）
         if let Some(to_ext) = state.file_table.remove(to) {
             if to_ext.size > 0 {
@@ -573,7 +578,7 @@ impl Vfs for MemOverlay {
         let ext = state
             .file_table
             .remove(path)
-            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path)))?;
+            .ok_or_else(|| VaneError::Io(format!("file not found: {}", path).into()))?;
         if ext.size > 0 {
             state.free_list.push(ext);
         }

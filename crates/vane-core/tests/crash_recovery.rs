@@ -558,7 +558,7 @@ fn crash_5_partial_write() {
         // 覆盖 decode_header 拒绝路径：损坏段被校验拒绝，recover 不尝试 open 孤儿段，直接清理。
         let decode_result = decode_header(&buf[..n]);
         assert!(
-            matches!(decode_result, Err(VaneError::Corrupt(ref msg)) if msg.contains("too short")),
+            matches!(decode_result, Err(VaneError::Corrupt(ref ctx)) if ctx.message.contains("too short")),
             "decode_header on 8-byte corrupt header should return Corrupt(\"header too short\")"
         );
 

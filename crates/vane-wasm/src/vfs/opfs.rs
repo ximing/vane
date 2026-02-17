@@ -39,7 +39,7 @@ impl OpfsBackend {
 }
 
 fn js_err(e: JsValue) -> VaneError {
-    VaneError::Io(format!("OPFS error: {:?}", e))
+    VaneError::Io(format!("OPFS error: {:?}", e).into())
 }
 
 impl OverlayBackend for OpfsBackend {

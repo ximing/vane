@@ -365,7 +365,11 @@ fn parse_field(v: &serde_json::Value) -> Result<FieldDef, VaneError> {
                 _ => ScalarKind::Keyword,
             },
         },
-        other => return Err(VaneError::InvalidArg(format!("unknown field type {other}"))),
+        other => {
+            return Err(VaneError::InvalidArg(
+                format!("unknown field type {other}").into(),
+            ))
+        }
     })
 }
 
@@ -607,7 +611,11 @@ pub extern "C" fn vane_open(
         } else {
             let v: serde_json::Value = match serde_json::from_slice(opts_bytes) {
                 Ok(v) => v,
-                Err(e) => return fail(VaneError::InvalidArg(format!("opts_json parse: {e}"))),
+                Err(e) => {
+                    return fail(VaneError::InvalidArg(
+                        format!("opts_json parse: {e}").into(),
+                    ))
+                }
             };
             match parse_open_opts(&v) {
                 Ok(o) => o,
@@ -646,7 +654,11 @@ pub extern "C" fn vane_collection(
         }
         let db = match lookup_db(db_h) {
             Ok(Some(d)) => d,
-            Ok(None) => return fail(VaneError::NotFound(format!("db handle {db_h} not found"))),
+            Ok(None) => {
+                return fail(VaneError::NotFound(
+                    format!("db handle {db_h} not found").into(),
+                ))
+            }
             Err(code) => return code,
         };
         let name_bytes = unsafe { slice_from_raw(name_ptr, name_len) };
@@ -657,7 +669,11 @@ pub extern "C" fn vane_collection(
         let schema_bytes = unsafe { slice_from_raw(schema_json, schema_len) };
         let schema_v: serde_json::Value = match serde_json::from_slice(schema_bytes) {
             Ok(v) => v,
-            Err(e) => return fail(VaneError::InvalidArg(format!("schema_json parse: {e}"))),
+            Err(e) => {
+                return fail(VaneError::InvalidArg(
+                    format!("schema_json parse: {e}").into(),
+                ))
+            }
         };
         let schema = match parse_schema(&schema_v) {
             Ok(s) => s,
@@ -669,7 +685,11 @@ pub extern "C" fn vane_collection(
         } else {
             let v: serde_json::Value = match serde_json::from_slice(opts_bytes) {
                 Ok(v) => v,
-                Err(e) => return fail(VaneError::InvalidArg(format!("opts_json parse: {e}"))),
+                Err(e) => {
+                    return fail(VaneError::InvalidArg(
+                        format!("opts_json parse: {e}").into(),
+                    ))
+                }
             };
             match parse_collection_opts(&v) {
                 Ok(o) => o,
@@ -696,16 +716,20 @@ pub extern "C" fn vane_add(col_h: u64, docs_json: *const u8, docs_len: usize) ->
         let col = match lookup_col(col_h) {
             Ok(Some(c)) => c,
             Ok(None) => {
-                return fail(VaneError::NotFound(format!(
-                    "collection handle {col_h} not found"
-                )))
+                return fail(VaneError::NotFound(
+                    format!("collection handle {col_h} not found").into(),
+                ))
             }
             Err(code) => return code,
         };
         let bytes = unsafe { slice_from_raw(docs_json, docs_len) };
         let v: serde_json::Value = match serde_json::from_slice(bytes) {
             Ok(v) => v,
-            Err(e) => return fail(VaneError::InvalidArg(format!("docs_json parse: {e}"))),
+            Err(e) => {
+                return fail(VaneError::InvalidArg(
+                    format!("docs_json parse: {e}").into(),
+                ))
+            }
         };
         let docs = match parse_docs(&v) {
             Ok(d) => d,
@@ -725,9 +749,9 @@ pub extern "C" fn vane_flush(col_h: u64) -> i32 {
         let col = match lookup_col(col_h) {
             Ok(Some(c)) => c,
             Ok(None) => {
-                return fail(VaneError::NotFound(format!(
-                    "collection handle {col_h} not found"
-                )))
+                return fail(VaneError::NotFound(
+                    format!("collection handle {col_h} not found").into(),
+                ))
             }
             Err(code) => return code,
         };
@@ -755,16 +779,20 @@ pub extern "C" fn vane_search(
         let col = match lookup_col(col_h) {
             Ok(Some(c)) => c,
             Ok(None) => {
-                return fail(VaneError::NotFound(format!(
-                    "collection handle {col_h} not found"
-                )))
+                return fail(VaneError::NotFound(
+                    format!("collection handle {col_h} not found").into(),
+                ))
             }
             Err(code) => return code,
         };
         let bytes = unsafe { slice_from_raw(query_json, query_len) };
         let v: serde_json::Value = match serde_json::from_slice(bytes) {
             Ok(v) => v,
-            Err(e) => return fail(VaneError::InvalidArg(format!("query_json parse: {e}"))),
+            Err(e) => {
+                return fail(VaneError::InvalidArg(
+                    format!("query_json parse: {e}").into(),
+                ))
+            }
         };
         let query = match parse_search_query(&v) {
             Ok(q) => q,
@@ -805,16 +833,16 @@ pub extern "C" fn vane_delete(
         let col = match lookup_col(col_h) {
             Ok(Some(c)) => c,
             Ok(None) => {
-                return fail(VaneError::NotFound(format!(
-                    "collection handle {col_h} not found"
-                )))
+                return fail(VaneError::NotFound(
+                    format!("collection handle {col_h} not found").into(),
+                ))
             }
             Err(code) => return code,
         };
         let bytes = unsafe { slice_from_raw(ids_json, ids_len) };
         let v: serde_json::Value = match serde_json::from_slice(bytes) {
             Ok(v) => v,
-            Err(e) => return fail(VaneError::InvalidArg(format!("ids_json parse: {e}"))),
+            Err(e) => return fail(VaneError::InvalidArg(format!("ids_json parse: {e}").into())),
         };
         let arr = match v.as_array() {
             Some(a) => a,
@@ -841,9 +869,9 @@ pub extern "C" fn vane_compact(col_h: u64) -> i32 {
         let col = match lookup_col(col_h) {
             Ok(Some(c)) => c,
             Ok(None) => {
-                return fail(VaneError::NotFound(format!(
-                    "collection handle {col_h} not found"
-                )))
+                return fail(VaneError::NotFound(
+                    format!("collection handle {col_h} not found").into(),
+                ))
             }
             Err(code) => return code,
         };
@@ -864,9 +892,9 @@ pub extern "C" fn vane_reindex(col_h: u64, out_handle: *mut u64) -> i32 {
         let col = match lookup_col(col_h) {
             Ok(Some(c)) => c,
             Ok(None) => {
-                return fail(VaneError::NotFound(format!(
-                    "collection handle {col_h} not found"
-                )))
+                return fail(VaneError::NotFound(
+                    format!("collection handle {col_h} not found").into(),
+                ))
             }
             Err(code) => return code,
         };
@@ -896,7 +924,9 @@ pub extern "C" fn vane_reindex_progress(h: u64, out_progress: *mut f32) -> i32 {
                 unsafe { *out_progress = p };
                 0
             }
-            Ok(None) => fail(VaneError::NotFound(format!("reindex handle {h} not found"))),
+            Ok(None) => fail(VaneError::NotFound(
+                format!("reindex handle {h} not found").into(),
+            )),
             Err(code) => code,
         }
     })
@@ -910,7 +940,9 @@ pub extern "C" fn vane_reindex_wait(h: u64) -> i32 {
         match with_reindex_handle_clone(h, |rh| rh.wait()) {
             Ok(Some(Ok(()))) => 0,
             Ok(Some(Err(e))) => fail(e),
-            Ok(None) => fail(VaneError::NotFound(format!("reindex handle {h} not found"))),
+            Ok(None) => fail(VaneError::NotFound(
+                format!("reindex handle {h} not found").into(),
+            )),
             Err(code) => code,
         }
     })
@@ -922,7 +954,11 @@ pub extern "C" fn vane_load_dict(h: u64, dict_ptr: *const u8, dict_len: usize) -
     catch_unwind_code(|| {
         let db = match lookup_db(h) {
             Ok(Some(d)) => d,
-            Ok(None) => return fail(VaneError::NotFound(format!("db handle {h} not found"))),
+            Ok(None) => {
+                return fail(VaneError::NotFound(
+                    format!("db handle {h} not found").into(),
+                ))
+            }
             Err(code) => return code,
         };
         let bytes = unsafe { slice_from_raw(dict_ptr, dict_len) };
@@ -975,7 +1011,7 @@ pub extern "C" fn vane_dict_version(out_ptr: *mut *mut u8, out_len: *mut usize) 
                 }
                 0
             }
-            None => fail(VaneError::DictUnavailable),
+            None => fail(VaneError::DictUnavailable("jieba dict not loaded".into())),
         }
     })
 }
@@ -986,7 +1022,11 @@ pub extern "C" fn vane_export(db_h: u64, dest_ptr: *const u8, dest_len: usize) -
     catch_unwind_code(|| {
         let db = match lookup_db(db_h) {
             Ok(Some(d)) => d,
-            Ok(None) => return fail(VaneError::NotFound(format!("db handle {db_h} not found"))),
+            Ok(None) => {
+                return fail(VaneError::NotFound(
+                    format!("db handle {db_h} not found").into(),
+                ))
+            }
             Err(code) => return code,
         };
         let dest_bytes = unsafe { slice_from_raw(dest_ptr, dest_len) };
@@ -1010,7 +1050,11 @@ pub extern "C" fn vane_db_stats(db_h: u64, out_arena: *mut *mut u8, out_len: *mu
         }
         let db = match lookup_db(db_h) {
             Ok(Some(d)) => d,
-            Ok(None) => return fail(VaneError::NotFound(format!("db handle {db_h} not found"))),
+            Ok(None) => {
+                return fail(VaneError::NotFound(
+                    format!("db handle {db_h} not found").into(),
+                ))
+            }
             Err(code) => return code,
         };
         let stats = db.stats();
@@ -1042,7 +1086,11 @@ pub extern "C" fn vane_db_segment_info(
         }
         let db = match lookup_db(db_h) {
             Ok(Some(d)) => d,
-            Ok(None) => return fail(VaneError::NotFound(format!("db handle {db_h} not found"))),
+            Ok(None) => {
+                return fail(VaneError::NotFound(
+                    format!("db handle {db_h} not found").into(),
+                ))
+            }
             Err(code) => return code,
         };
         let infos = db.segment_info();
@@ -1066,7 +1114,7 @@ pub extern "C" fn vane_db_segment_info(
 pub extern "C" fn vane_close(handle: u64) -> i32 {
     catch_unwind_code(|| match remove_handle(handle) {
         Ok(true) => 0,
-        Ok(false) => VaneError::NotFound(format!("handle {handle} not found")).code(),
+        Ok(false) => VaneError::NotFound(format!("handle {handle} not found").into()).code(),
         Err(code) => code,
     })
 }

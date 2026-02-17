@@ -232,7 +232,11 @@ fn parse_field(v: &serde_json::Value) -> Result<FieldDef, VaneError> {
                 _ => ScalarKind::Keyword,
             },
         },
-        other => return Err(VaneError::InvalidArg(format!("unknown field type {other}"))),
+        other => {
+            return Err(VaneError::InvalidArg(
+                format!("unknown field type {other}").into(),
+            ))
+        }
     })
 }
 
@@ -460,8 +464,11 @@ pub fn vane_open(path: &str, opts_json: &str) -> JsResult<u64> {
     let opts: OpenOptions = if opts_json.is_empty() {
         OpenOptions::default()
     } else {
-        let v: serde_json::Value = serde_json::from_str(opts_json)
-            .map_err(|e| err_to_js(VaneError::InvalidArg(format!("opts_json parse: {e}"))))?;
+        let v: serde_json::Value = serde_json::from_str(opts_json).map_err(|e| {
+            err_to_js(VaneError::InvalidArg(
+                format!("opts_json parse: {e}").into(),
+            ))
+        })?;
         parse_open_opts(&v).map_err(err_to_js)?
     };
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
@@ -476,16 +483,22 @@ pub fn vane_open(path: &str, opts_json: &str) -> JsResult<u64> {
 pub fn vane_collection(db_h: u64, name: &str, schema_json: &str, opts_json: &str) -> JsResult<u64> {
     let db = lookup_db(db_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found").into()))
         .map_err(err_to_js)?;
-    let schema_v: serde_json::Value = serde_json::from_str(schema_json)
-        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("schema_json parse: {e}"))))?;
+    let schema_v: serde_json::Value = serde_json::from_str(schema_json).map_err(|e| {
+        err_to_js(VaneError::InvalidArg(
+            format!("schema_json parse: {e}").into(),
+        ))
+    })?;
     let schema = parse_schema(&schema_v).map_err(err_to_js)?;
     let opts: CollectionOptions = if opts_json.is_empty() {
         CollectionOptions::default()
     } else {
-        let v: serde_json::Value = serde_json::from_str(opts_json)
-            .map_err(|e| err_to_js(VaneError::InvalidArg(format!("opts_json parse: {e}"))))?;
+        let v: serde_json::Value = serde_json::from_str(opts_json).map_err(|e| {
+            err_to_js(VaneError::InvalidArg(
+                format!("opts_json parse: {e}").into(),
+            ))
+        })?;
         parse_collection_opts(&v).map_err(err_to_js)?
     };
     let col = db.collection(name, schema, opts).map_err(err_to_js)?;
@@ -498,10 +511,13 @@ pub fn vane_collection(db_h: u64, name: &str, schema_json: &str, opts_json: &str
 pub fn vane_add(col_h: u64, docs_json: &str) -> JsResult<u64> {
     let col = lookup_col(col_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found").into()))
         .map_err(err_to_js)?;
-    let v: serde_json::Value = serde_json::from_str(docs_json)
-        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("docs_json parse: {e}"))))?;
+    let v: serde_json::Value = serde_json::from_str(docs_json).map_err(|e| {
+        err_to_js(VaneError::InvalidArg(
+            format!("docs_json parse: {e}").into(),
+        ))
+    })?;
     let docs = parse_docs(&v).map_err(err_to_js)?;
     let report = col.add(&docs).map_err(err_to_js)?;
     Ok(report.accepted)
@@ -512,7 +528,7 @@ pub fn vane_add(col_h: u64, docs_json: &str) -> JsResult<u64> {
 pub fn vane_flush(col_h: u64) -> JsResult<()> {
     let col = lookup_col(col_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found").into()))
         .map_err(err_to_js)?;
     col.flush().map_err(err_to_js)?;
     Ok(())
@@ -523,14 +539,17 @@ pub fn vane_flush(col_h: u64) -> JsResult<()> {
 pub fn vane_search(col_h: u64, query_json: &str) -> JsResult<String> {
     let col = lookup_col(col_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found").into()))
         .map_err(err_to_js)?;
-    let v: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("query_json parse: {e}"))))?;
+    let v: serde_json::Value = serde_json::from_str(query_json).map_err(|e| {
+        err_to_js(VaneError::InvalidArg(
+            format!("query_json parse: {e}").into(),
+        ))
+    })?;
     let query = parse_search_query(&v).map_err(err_to_js)?;
     let hits = col.search(&query).map_err(err_to_js)?;
     let json = serde_json::to_string(&hits_to_json(&hits))
-        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("hits serialize: {e}"))))?;
+        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("hits serialize: {e}").into())))?;
     Ok(json)
 }
 
@@ -539,10 +558,10 @@ pub fn vane_search(col_h: u64, query_json: &str) -> JsResult<String> {
 pub fn vane_delete(col_h: u64, ids_json: &str) -> JsResult<u64> {
     let col = lookup_col(col_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found").into()))
         .map_err(err_to_js)?;
     let v: serde_json::Value = serde_json::from_str(ids_json)
-        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("ids_json parse: {e}"))))?;
+        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("ids_json parse: {e}").into())))?;
     let arr = v
         .as_array()
         .ok_or_else(|| VaneError::InvalidArg("ids must be array".into()))
@@ -560,7 +579,7 @@ pub fn vane_delete(col_h: u64, ids_json: &str) -> JsResult<u64> {
 pub fn vane_compact(col_h: u64) -> JsResult<()> {
     let col = lookup_col(col_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found").into()))
         .map_err(err_to_js)?;
     col.compact().map_err(err_to_js)?;
     Ok(())
@@ -571,7 +590,7 @@ pub fn vane_compact(col_h: u64) -> JsResult<()> {
 pub fn vane_reindex(col_h: u64) -> JsResult<f32> {
     let col = lookup_col(col_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("collection handle {col_h} not found").into()))
         .map_err(err_to_js)?;
     let rh = col.reindex().map_err(err_to_js)?;
     let progress = rh.progress();
@@ -584,7 +603,7 @@ pub fn vane_reindex(col_h: u64) -> JsResult<f32> {
 pub fn vane_export(db_h: u64, dest: &str) -> JsResult<()> {
     let db = lookup_db(db_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found").into()))
         .map_err(err_to_js)?;
     db.export(dest).map_err(err_to_js)?;
     Ok(())
@@ -595,12 +614,15 @@ pub fn vane_export(db_h: u64, dest: &str) -> JsResult<()> {
 pub fn vane_db_stats(db_h: u64) -> JsResult<String> {
     let db = lookup_db(db_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found").into()))
         .map_err(err_to_js)?;
     let stats = db.stats();
     let json = db_stats_to_json(&stats);
-    let s = serde_json::to_string(&json)
-        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("stats serialize: {e}"))))?;
+    let s = serde_json::to_string(&json).map_err(|e| {
+        err_to_js(VaneError::InvalidArg(
+            format!("stats serialize: {e}").into(),
+        ))
+    })?;
     Ok(s)
 }
 
@@ -609,14 +631,14 @@ pub fn vane_db_stats(db_h: u64) -> JsResult<String> {
 pub fn vane_db_segment_info(db_h: u64) -> JsResult<String> {
     let db = lookup_db(db_h)
         .map_err(err_to_js)?
-        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found")))
+        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found").into()))
         .map_err(err_to_js)?;
     let infos = db.segment_info();
     let json = segment_info_to_json(&infos);
     let s = serde_json::to_string(&json).map_err(|e| {
-        err_to_js(VaneError::InvalidArg(format!(
-            "segment_info serialize: {e}"
-        )))
+        err_to_js(VaneError::InvalidArg(
+            format!("segment_info serialize: {e}").into(),
+        ))
     })?;
     Ok(s)
 }
@@ -626,9 +648,9 @@ pub fn vane_db_segment_info(db_h: u64) -> JsResult<String> {
 pub fn vane_close(handle: u64) -> JsResult<()> {
     let removed = remove_handle(handle).map_err(err_to_js)?;
     if !removed {
-        return Err(err_to_js(VaneError::NotFound(format!(
-            "handle {handle} not found"
-        ))));
+        return Err(err_to_js(VaneError::NotFound(
+            format!("handle {handle} not found").into(),
+        )));
     }
     Ok(())
 }

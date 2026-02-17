@@ -40,7 +40,9 @@ impl JiebaTokenizer {
     /// 同词的低 freq 切分路径，SPEC §5.3：缺省 freq = 内置词典最高频值）。
     pub fn new(dict: Arc<JiebaDict>, user_dict: &[UserDictEntry]) -> VaneResult<Self> {
         if user_dict.len() > MAX_USER_DICT_ENTRIES {
-            return Err(VaneError::DictTooLarge);
+            return Err(VaneError::DictTooLarge(
+                "user dict exceeds 100000 entries".into(),
+            ));
         }
         // max_freq = 词典最高频值；UserDictEntry::Word 缺省 freq 用此值（SPEC §5.3）。
         let max_freq = dict.max_freq();

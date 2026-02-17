@@ -342,25 +342,28 @@ impl InvertedIndexReader {
         let mut header = [0u8; 8];
         let n = vfs.read_at(&path, &mut header, 0)?;
         if n < 8 {
-            return Err(VaneError::Corrupt(format!(
-                "inverted.bin truncated header: {}{}",
-                n,
-                crate::segment::seg_ctx(segment_dir, "open inverted.bin")
+            return Err(VaneError::Corrupt(crate::segment::seg_err(
+                format!("inverted.bin truncated header: {}", n),
+                segment_dir,
+                "open inverted.bin",
             )));
         }
         if &header[0..4] != MAGIC {
-            return Err(VaneError::Corrupt(format!(
-                "inverted.bin bad magic{}",
-                crate::segment::seg_ctx(segment_dir, "open inverted.bin")
+            return Err(VaneError::Corrupt(crate::segment::seg_err(
+                "inverted.bin bad magic",
+                segment_dir,
+                "open inverted.bin",
             )));
         }
         let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
         if version != FORMAT_VERSION {
-            return Err(VaneError::Version(format!(
-                "inverted.bin version {} != supported {}{}",
-                version,
-                FORMAT_VERSION,
-                crate::segment::seg_ctx(segment_dir, "open inverted.bin")
+            return Err(VaneError::Version(crate::segment::seg_err(
+                format!(
+                    "inverted.bin version {} != supported {}",
+                    version, FORMAT_VERSION
+                ),
+                segment_dir,
+                "open inverted.bin",
             )));
         }
 
@@ -407,7 +410,7 @@ impl InvertedIndexReader {
                 ));
             }
             let term = String::from_utf8(blob[cur..cur + term_len].to_vec())
-                .map_err(|e| VaneError::Corrupt(format!("inverted.bin term utf8: {}", e)))?;
+                .map_err(|e| VaneError::Corrupt(format!("inverted.bin term utf8: {}", e).into()))?;
             cur += term_len;
 
             let doc_freq = read_u32_le(&blob, &mut cur)?;
@@ -439,9 +442,10 @@ impl InvertedIndexReader {
                     let (tf, tn) = vbyte_decode(&blob[cur..])
                         .ok_or_else(|| VaneError::Corrupt("inverted.bin vbyte tf".into()))?;
                     cur += tn;
-                    prev_docid = prev_docid
-                        .checked_add(delta as u64)
-                        .ok_or_else(|| VaneError::Corrupt("inverted.bin docid overflow".into()))?;
+                    prev_docid = prev_docid.checked_add(delta as u64).ok_or_else(|| {
+                        VaneError::Corrupt("inverted.bin docid overflow".into())
+                            .with_docid(prev_docid)
+                    })?;
                     postings.push(Posting {
                         docid: prev_docid,
                         tf,
