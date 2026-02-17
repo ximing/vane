@@ -16,8 +16,9 @@ use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
 
 use vane_core::api::{
-    Collection, CollectionOptions, Db, Doc, FusionSpec, Hit, OpenOptions, PersistenceMode,
-    ReindexHandle, ScalarValue, SearchMode, SearchQuery,
+    Collection, CollectionOptions, Db, DbStats, DictState, Doc, ExecutorKind, FormatVersions,
+    FusionSpec, Health, Hit, OpenOptions, PersistenceMode, ReindexHandle, ScalarValue, SearchMode,
+    SearchQuery, SegmentFileSizes, SegmentInfo,
 };
 use vane_core::persistence::AutoCommitConfig;
 use vane_core::tokenizer::{BuiltinTokenizer, UserDictEntry};
@@ -346,6 +347,100 @@ fn hits_to_json(hits: &[Hit]) -> serde_json::Value {
     )
 }
 
+// ---- M4 §9 inspect API JSON 序列化（core 结构未 derive Serialize，手写薄壳） ----
+
+fn health_to_str(h: Health) -> &'static str {
+    match h {
+        Health::Healthy => "healthy",
+        Health::Degraded => "degraded",
+        Health::Corrupt => "corrupt",
+    }
+}
+
+fn executor_kind_to_str(e: ExecutorKind) -> &'static str {
+    match e {
+        ExecutorKind::Serial => "serial",
+        ExecutorKind::Rayon => "rayon",
+    }
+}
+
+fn dict_state_to_str(d: DictState) -> &'static str {
+    match d {
+        DictState::Stable => "stable",
+        DictState::PendingReindex => "pendingReindex",
+        DictState::Rebuilding => "rebuilding",
+    }
+}
+
+fn format_versions_to_json(f: &FormatVersions) -> serde_json::Value {
+    serde_json::json!({
+        "header": f.header,
+        "vectors": f.vectors,
+        "stored": f.stored,
+        "idmap": f.idmap,
+        "scalars": f.scalars,
+        "inverted": f.inverted,
+        "hnsw": f.hnsw
+    })
+}
+
+fn segment_file_sizes_to_json(s: &SegmentFileSizes) -> serde_json::Value {
+    serde_json::json!({
+        "header": s.header,
+        "vectors": s.vectors,
+        "stored": s.stored,
+        "idmap": s.idmap,
+        "scalars": s.scalars,
+        "inverted": s.inverted,
+        "hnsw": s.hnsw
+    })
+}
+
+fn segment_info_to_json(infos: &[SegmentInfo]) -> serde_json::Value {
+    serde_json::Value::Array(
+        infos
+            .iter()
+            .map(|info| {
+                serde_json::json!({
+                    "ulid": info.ulid,
+                    "docCount": info.doc_count,
+                    "docidBase": info.docid_base,
+                    "tombstonedCount": info.tombstoned_count,
+                    "formatVersions": format_versions_to_json(&info.format_versions),
+                    "fileSizes": segment_file_sizes_to_json(&info.file_sizes),
+                    "health": health_to_str(info.health)
+                })
+            })
+            .collect(),
+    )
+}
+
+fn db_stats_to_json(stats: &DbStats) -> serde_json::Value {
+    let collections: Vec<serde_json::Value> = stats
+        .collections
+        .iter()
+        .map(|cs| {
+            serde_json::json!({
+                "name": cs.name,
+                "segmentCount": cs.segment_count,
+                "totalDocs": cs.total_docs,
+                "liveDocs": cs.live_docs,
+                "tombstonedDocs": cs.tombstoned_docs,
+                "indexBytes": cs.index_bytes,
+                "dictState": dict_state_to_str(cs.dict_state),
+                "tokenizerId": cs.tokenizer_id.to_hex(),
+                "health": health_to_str(cs.health)
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "dbPath": stats.db_path,
+        "collections": collections,
+        "dictAvailable": stats.dict_available,
+        "executorKind": executor_kind_to_str(stats.executor_kind)
+    })
+}
+
 // =========================================================================
 // wasm-bindgen 导出（SPEC §9 / M1 README §09 契约对齐，I-8 薄壳）
 // =========================================================================
@@ -493,6 +588,37 @@ pub fn vane_export(db_h: u64, dest: &str) -> JsResult<()> {
         .map_err(err_to_js)?;
     db.export(dest).map_err(err_to_js)?;
     Ok(())
+}
+
+/// M4 §9 inspect API：DB 级统计。返回 DbStats JSON 字符串。
+#[wasm_bindgen]
+pub fn vane_db_stats(db_h: u64) -> JsResult<String> {
+    let db = lookup_db(db_h)
+        .map_err(err_to_js)?
+        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found")))
+        .map_err(err_to_js)?;
+    let stats = db.stats();
+    let json = db_stats_to_json(&stats);
+    let s = serde_json::to_string(&json)
+        .map_err(|e| err_to_js(VaneError::InvalidArg(format!("stats serialize: {e}"))))?;
+    Ok(s)
+}
+
+/// M4 §9 inspect API：各段详细信息。返回 SegmentInfo[] JSON 字符串。
+#[wasm_bindgen]
+pub fn vane_db_segment_info(db_h: u64) -> JsResult<String> {
+    let db = lookup_db(db_h)
+        .map_err(err_to_js)?
+        .ok_or_else(|| VaneError::NotFound(format!("db handle {db_h} not found")))
+        .map_err(err_to_js)?;
+    let infos = db.segment_info();
+    let json = segment_info_to_json(&infos);
+    let s = serde_json::to_string(&json).map_err(|e| {
+        err_to_js(VaneError::InvalidArg(format!(
+            "segment_info serialize: {e}"
+        )))
+    })?;
+    Ok(s)
 }
 
 /// 关闭句柄（Db / Collection / Reindex 均可）。注销后该句柄不可再用。

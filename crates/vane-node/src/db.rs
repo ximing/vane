@@ -10,7 +10,10 @@ use vane_core::api::Db;
 use vane_core::vfs::std_fs::StdFsVfs;
 
 use crate::collection::VaneCollection;
-use crate::convert::{parse_collection_opts, parse_open_opts, parse_schema};
+use crate::convert::{
+    db_stats_to_json, parse_collection_opts, parse_open_opts, parse_schema, segment_info_to_json,
+    Json,
+};
 use crate::error::{to_napi_error, NapiResult};
 
 #[napi]
@@ -114,6 +117,40 @@ impl Task for ExportTask {
     }
 }
 
+// ---- M4 §9 inspect API：stats / segmentInfo ----
+
+pub struct StatsTask {
+    db: Db,
+}
+
+#[napi]
+impl Task for StatsTask {
+    type Output = vane_core::api::DbStats;
+    type JsValue = Json;
+    fn compute(&mut self) -> NapiResult<Self::Output> {
+        Ok(self.db.stats())
+    }
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
+        Ok(Json(db_stats_to_json(&output)))
+    }
+}
+
+pub struct SegmentInfoTask {
+    db: Db,
+}
+
+#[napi]
+impl Task for SegmentInfoTask {
+    type Output = Vec<vane_core::api::SegmentInfo>;
+    type JsValue = Json;
+    fn compute(&mut self) -> NapiResult<Self::Output> {
+        Ok(self.db.segment_info())
+    }
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> NapiResult<Self::JsValue> {
+        Ok(Json(segment_info_to_json(&output)))
+    }
+}
+
 #[napi]
 impl VaneDb {
     #[napi]
@@ -153,6 +190,22 @@ impl VaneDb {
         AsyncTask::new(ExportTask {
             db: self.inner.clone(),
             dest,
+        })
+    }
+
+    /// M4 §9 inspect API：DB 级统计（collections / 文档数 / 健康状态）。
+    #[napi]
+    pub fn stats(&self) -> AsyncTask<StatsTask> {
+        AsyncTask::new(StatsTask {
+            db: self.inner.clone(),
+        })
+    }
+
+    /// M4 §9 inspect API：各段详细信息（ULID / doc_count / format_versions / file_sizes / health）。
+    #[napi]
+    pub fn segment_info(&self) -> AsyncTask<SegmentInfoTask> {
+        AsyncTask::new(SegmentInfoTask {
+            db: self.inner.clone(),
         })
     }
 }

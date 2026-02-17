@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use vane_core::api::{
-    Collection, CollectionOptions, Db, Doc, FusionSpec, Hit, OpenOptions, PersistenceMode,
-    ReindexHandle, ScalarValue, SearchMode, SearchQuery,
+    Collection, CollectionOptions, Db, DbStats, DictState, Doc, ExecutorKind, FormatVersions,
+    FusionSpec, Health, Hit, OpenOptions, PersistenceMode, ReindexHandle, ScalarValue, SearchMode,
+    SearchQuery, SegmentFileSizes, SegmentInfo,
 };
 use vane_core::persistence::AutoCommitConfig;
 use vane_core::tokenizer::{BuiltinTokenizer, UserDictEntry};
@@ -478,6 +479,100 @@ fn hits_to_json(hits: &[Hit]) -> serde_json::Value {
     )
 }
 
+// ---- inspect JSON 序列化（M4 §9 inspect API；手写，core 结构未 derive Serialize） ----
+
+fn health_to_str(h: Health) -> &'static str {
+    match h {
+        Health::Healthy => "healthy",
+        Health::Degraded => "degraded",
+        Health::Corrupt => "corrupt",
+    }
+}
+
+fn executor_kind_to_str(e: ExecutorKind) -> &'static str {
+    match e {
+        ExecutorKind::Serial => "serial",
+        ExecutorKind::Rayon => "rayon",
+    }
+}
+
+fn dict_state_to_str(d: DictState) -> &'static str {
+    match d {
+        DictState::Stable => "stable",
+        DictState::PendingReindex => "pendingReindex",
+        DictState::Rebuilding => "rebuilding",
+    }
+}
+
+fn format_versions_to_json(f: &FormatVersions) -> serde_json::Value {
+    serde_json::json!({
+        "header": f.header,
+        "vectors": f.vectors,
+        "stored": f.stored,
+        "idmap": f.idmap,
+        "scalars": f.scalars,
+        "inverted": f.inverted,
+        "hnsw": f.hnsw
+    })
+}
+
+fn segment_file_sizes_to_json(s: &SegmentFileSizes) -> serde_json::Value {
+    serde_json::json!({
+        "header": s.header,
+        "vectors": s.vectors,
+        "stored": s.stored,
+        "idmap": s.idmap,
+        "scalars": s.scalars,
+        "inverted": s.inverted,
+        "hnsw": s.hnsw
+    })
+}
+
+fn segment_info_to_json(infos: &[SegmentInfo]) -> serde_json::Value {
+    serde_json::Value::Array(
+        infos
+            .iter()
+            .map(|info| {
+                serde_json::json!({
+                    "ulid": info.ulid,
+                    "docCount": info.doc_count,
+                    "docidBase": info.docid_base,
+                    "tombstonedCount": info.tombstoned_count,
+                    "formatVersions": format_versions_to_json(&info.format_versions),
+                    "fileSizes": segment_file_sizes_to_json(&info.file_sizes),
+                    "health": health_to_str(info.health)
+                })
+            })
+            .collect(),
+    )
+}
+
+fn db_stats_to_json(stats: &DbStats) -> serde_json::Value {
+    let collections: Vec<serde_json::Value> = stats
+        .collections
+        .iter()
+        .map(|cs| {
+            serde_json::json!({
+                "name": cs.name,
+                "segmentCount": cs.segment_count,
+                "totalDocs": cs.total_docs,
+                "liveDocs": cs.live_docs,
+                "tombstonedDocs": cs.tombstoned_docs,
+                "indexBytes": cs.index_bytes,
+                "dictState": dict_state_to_str(cs.dict_state),
+                "tokenizerId": cs.tokenizer_id.to_hex(),
+                "health": health_to_str(cs.health)
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "dbPath": stats.db_path,
+        "collections": collections,
+        "dictAvailable": stats.dict_available,
+        "executorKind": executor_kind_to_str(stats.executor_kind)
+    })
+}
+
 // ---- 全局词典版本（vane_load_dict 后设置，vane_dict_version 读取） ----
 
 static DICT_VERSION_INFO: RwLock<Option<(String, [u8; 8])>> = RwLock::new(None);
@@ -906,6 +1001,66 @@ pub extern "C" fn vane_export(db_h: u64, dest_ptr: *const u8, dest_len: usize) -
     })
 }
 
+/// SPEC §9 inspect API：DB 级统计。out_arena 返回 DbStats JSON（须 vane_string_free 释放）。
+#[no_mangle]
+pub extern "C" fn vane_db_stats(db_h: u64, out_arena: *mut *mut u8, out_len: *mut usize) -> i32 {
+    catch_unwind_code(|| {
+        if out_arena.is_null() || out_len.is_null() {
+            return VaneError::InvalidArg("out_arena/out_len is null".into()).code();
+        }
+        let db = match lookup_db(db_h) {
+            Ok(Some(d)) => d,
+            Ok(None) => return fail(VaneError::NotFound(format!("db handle {db_h} not found"))),
+            Err(code) => return code,
+        };
+        let stats = db.stats();
+        let json = db_stats_to_json(&stats);
+        let bytes = serde_json::to_vec(&json).unwrap_or_else(|_| b"{}".to_vec());
+        let len = bytes.len();
+        let ptr = arena_alloc_tracked(&bytes);
+        if ptr.is_null() {
+            return fail(VaneError::InvalidArg("arena alloc failed".into()));
+        }
+        unsafe {
+            *out_arena = ptr;
+            *out_len = len;
+        }
+        0
+    })
+}
+
+/// SPEC §9 inspect API：各段详细信息。out_arena 返回 SegmentInfo[] JSON（须 vane_string_free 释放）。
+#[no_mangle]
+pub extern "C" fn vane_db_segment_info(
+    db_h: u64,
+    out_arena: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    catch_unwind_code(|| {
+        if out_arena.is_null() || out_len.is_null() {
+            return VaneError::InvalidArg("out_arena/out_len is null".into()).code();
+        }
+        let db = match lookup_db(db_h) {
+            Ok(Some(d)) => d,
+            Ok(None) => return fail(VaneError::NotFound(format!("db handle {db_h} not found"))),
+            Err(code) => return code,
+        };
+        let infos = db.segment_info();
+        let json = segment_info_to_json(&infos);
+        let bytes = serde_json::to_vec(&json).unwrap_or_else(|_| b"[]".to_vec());
+        let len = bytes.len();
+        let ptr = arena_alloc_tracked(&bytes);
+        if ptr.is_null() {
+            return fail(VaneError::InvalidArg("arena alloc failed".into()));
+        }
+        unsafe {
+            *out_arena = ptr;
+            *out_len = len;
+        }
+        0
+    })
+}
+
 /// 关闭句柄（Db / Collection / Reindex 均可）。注销后该句柄不可再用。
 #[no_mangle]
 pub extern "C" fn vane_close(handle: u64) -> i32 {
@@ -946,7 +1101,7 @@ pub extern "C" fn vane_last_error_message(_handle: u64) -> *const u8 {
     }
 }
 
-/// 释放 vane_search / vane_dict_version 返回的 arena 内存。
+/// 释放 vane_search / vane_dict_version / vane_db_stats / vane_db_segment_info 返回的 arena 内存。
 /// 传入 null 安全（no-op）。
 #[no_mangle]
 pub extern "C" fn vane_string_free(ptr: *mut u8) {
@@ -1211,6 +1366,147 @@ mod tests {
         vane_close(col_h);
         vane_close(db_h);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- M4 §9 inspect API 测试 ----
+
+    #[test]
+    fn db_stats_returns_valid_json() {
+        let dir = tmp_dir();
+        let path = dir.to_str().unwrap();
+        let mut db_h: u64 = 0;
+        let (p, pl) = json_ptr(path);
+        assert_eq!(vane_open(p, pl, std::ptr::null(), 0, &mut db_h), 0);
+
+        // collection + add + flush（确保有段文件）
+        let mut col_h: u64 = 0;
+        let schema = r#"{"fields":[{"name":"vec","type":"vector","dim":2,"metric":"cosine"},{"name":"body","type":"text"}]}"#;
+        let (sp, sl) = json_ptr(schema);
+        let (np, nl) = json_ptr("docs");
+        assert_eq!(
+            vane_collection(db_h, np, nl, sp, sl, std::ptr::null(), 0, &mut col_h),
+            0
+        );
+        let docs = r#"[{"id":"a","text":"hello world","vector":[1.0,0.0]},{"id":"b","text":"foo bar","vector":[0.0,1.0]}]"#;
+        let (dp, dl) = json_ptr(docs);
+        assert_eq!(vane_add(col_h, dp, dl), 0);
+        assert_eq!(vane_flush(col_h), 0);
+
+        // vane_db_stats
+        let mut arena: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        assert_eq!(vane_db_stats(db_h, &mut arena, &mut len), 0);
+        assert!(!arena.is_null());
+        assert!(len > 0);
+        let json_bytes = unsafe { std::slice::from_raw_parts(arena, len) };
+        let v: serde_json::Value = serde_json::from_slice(json_bytes).unwrap();
+        assert!(v.is_object());
+        let obj = v.as_object().unwrap();
+        // dbPath 匹配 open 路径
+        assert_eq!(obj.get("dbPath").and_then(|v| v.as_str()), Some(path));
+        // collections 数组含 1 个
+        let cols = obj.get("collections").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(cols.len(), 1);
+        let col0 = cols[0].as_object().unwrap();
+        assert_eq!(col0.get("name").and_then(|v| v.as_str()), Some("docs"));
+        assert_eq!(col0.get("segmentCount").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(col0.get("totalDocs").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(col0.get("liveDocs").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(col0.get("tombstonedDocs").and_then(|v| v.as_u64()), Some(0));
+        assert!(col0.get("indexBytes").and_then(|v| v.as_u64()).unwrap() > 0);
+        assert_eq!(
+            col0.get("dictState").and_then(|v| v.as_str()),
+            Some("stable")
+        );
+        // tokenizerId 为 64 字符 hex
+        let tid = col0.get("tokenizerId").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(tid.len(), 64);
+        assert!(tid.chars().all(|c| c.is_ascii_hexdigit()));
+        // health 为 healthy
+        assert_eq!(col0.get("health").and_then(|v| v.as_str()), Some("healthy"));
+        // executorKind 为 serial 或 rayon
+        let exec = obj.get("executorKind").and_then(|v| v.as_str()).unwrap();
+        assert!(exec == "serial" || exec == "rayon");
+        // dictAvailable 为 bool
+        assert!(obj.get("dictAvailable").and_then(|v| v.as_bool()).is_some());
+
+        vane_string_free(arena);
+        vane_close(col_h);
+        vane_close(db_h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn db_segment_info_returns_valid_json() {
+        let dir = tmp_dir();
+        let path = dir.to_str().unwrap();
+        let mut db_h: u64 = 0;
+        let (p, pl) = json_ptr(path);
+        assert_eq!(vane_open(p, pl, std::ptr::null(), 0, &mut db_h), 0);
+
+        let mut col_h: u64 = 0;
+        let schema = r#"{"fields":[{"name":"vec","type":"vector","dim":2,"metric":"cosine"},{"name":"body","type":"text"}]}"#;
+        let (sp, sl) = json_ptr(schema);
+        let (np, nl) = json_ptr("docs");
+        assert_eq!(
+            vane_collection(db_h, np, nl, sp, sl, std::ptr::null(), 0, &mut col_h),
+            0
+        );
+        let docs = r#"[{"id":"a","text":"hello world","vector":[1.0,0.0]},{"id":"b","text":"foo bar","vector":[0.0,1.0]}]"#;
+        let (dp, dl) = json_ptr(docs);
+        assert_eq!(vane_add(col_h, dp, dl), 0);
+        assert_eq!(vane_flush(col_h), 0);
+
+        // vane_db_segment_info
+        let mut arena: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        assert_eq!(vane_db_segment_info(db_h, &mut arena, &mut len), 0);
+        assert!(!arena.is_null());
+        assert!(len > 0);
+        let json_bytes = unsafe { std::slice::from_raw_parts(arena, len) };
+        let v: serde_json::Value = serde_json::from_slice(json_bytes).unwrap();
+        assert!(v.is_array());
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "1 segment after 1 flush");
+        let seg = arr[0].as_object().unwrap();
+        // ulid 非空
+        assert!(!seg.get("ulid").and_then(|v| v.as_str()).unwrap().is_empty());
+        assert_eq!(seg.get("docCount").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(seg.get("docidBase").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(seg.get("tombstonedCount").and_then(|v| v.as_u64()), Some(0));
+        // formatVersions 对象
+        let fv = seg
+            .get("formatVersions")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(fv.get("header").and_then(|v| v.as_u64()).unwrap() > 0);
+        assert!(fv.get("vectors").and_then(|v| v.as_u64()).unwrap() > 0);
+        // fileSizes 对象
+        let fs = seg.get("fileSizes").and_then(|v| v.as_object()).unwrap();
+        assert!(fs.get("header").and_then(|v| v.as_u64()).unwrap() > 0);
+        assert!(fs.get("vectors").and_then(|v| v.as_u64()).unwrap() > 0);
+        // health
+        assert_eq!(seg.get("health").and_then(|v| v.as_str()), Some("healthy"));
+
+        vane_string_free(arena);
+        vane_close(col_h);
+        vane_close(db_h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn db_stats_invalid_handle_returns_not_found() {
+        let mut arena: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        let rc = vane_db_stats(999999, &mut arena, &mut len);
+        assert_eq!(rc, -3, "invalid db handle should return E_NOT_FOUND");
+        assert!(arena.is_null());
+    }
+
+    #[test]
+    fn db_segment_info_null_out_returns_invalid_arg() {
+        let rc = vane_db_segment_info(1, std::ptr::null_mut(), std::ptr::null_mut());
+        assert_eq!(rc, -11, "null out_arena should return E_INVALID_ARG");
     }
 
     // M-1 fix：reindex + load_dict 成功路径测试

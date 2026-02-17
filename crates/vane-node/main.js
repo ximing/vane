@@ -39,7 +39,7 @@ function wrapMethods(cls, methods) {
 
 const { VaneDb, VaneCollection } = native;
 
-if (VaneDb) wrapMethods(VaneDb, ['collection', 'close', 'export']);
+if (VaneDb) wrapMethods(VaneDb, ['collection', 'close', 'export', 'stats', 'segmentInfo']);
 if (VaneCollection) {
   wrapMethods(VaneCollection, ['add', 'flush', 'search', 'delete', 'reindex']);
 }
