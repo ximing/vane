@@ -138,8 +138,7 @@ fn manifest_store_corrupt_returns_error() {
     assert!(store.load().is_err());
 }
 
-/// M4 阶段五 c：VaneError 诊断上下文——manifest parse 错误 String 含
-/// db 路径 + 操作 + 建议操作（§10 推荐"先丰富 String"）。
+/// M4 诊断重构：manifest parse 错误的结构化 ErrorContext（op + hint 独立字段）。
 #[test]
 fn m4_5c_manifest_parse_error_contains_context() {
     use crate::types::VaneError;

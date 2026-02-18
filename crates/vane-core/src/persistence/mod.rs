@@ -129,11 +129,12 @@ impl ManifestStore {
     fn save_atomic_locked(&self, manifest: &Manifest) -> Result<()> {
         let json = serde_json::to_vec(manifest).map_err(|e| {
             VaneError::Corrupt(
-                format!(
-                    "manifest serialize: {} (db={}, op=save manifest; 建议: 重试或检查磁盘空间)",
+                crate::types::ErrorContext::new(format!(
+                    "manifest serialize: {} (db={})",
                     e, self.db_path
-                )
-                .into(),
+                ))
+                .op("save manifest")
+                .hint("重试或检查磁盘空间"),
             )
         })?;
         let tmp = self.tmp_path();
@@ -156,10 +157,15 @@ impl ManifestStore {
         let _save_guard = self.save_lock.lock().unwrap();
         let mut m = self.load()?.unwrap_or_else(Manifest::empty);
         let col = m.collections.get_mut(collection).ok_or_else(|| {
-            VaneError::NotFound(format!(
-                "collection not found: {} (db={}, seg={}, op=add_segment; 建议: 确认 collection 名称正确)",
-                collection, self.db_path, ulid
-            ).into())
+            VaneError::NotFound(
+                crate::types::ErrorContext::new(format!(
+                    "collection not found: {} (db={})",
+                    collection, self.db_path
+                ))
+                .seg(ulid)
+                .op("add_segment")
+                .hint("确认 collection 名称正确"),
+            )
         })?;
         if !col.segment_ulids.contains(&ulid.to_string()) {
             col.segment_ulids.push(ulid.to_string());
