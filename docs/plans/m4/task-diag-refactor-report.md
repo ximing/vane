@@ -171,4 +171,5 @@ pub(crate) fn seg_err(message: impl Into<String>, segment_dir: &str, op: &'stati
 
 ## Commit
 
-`f753d7c`
+- 主重构：`c34e473`
+- fix（persistence 2 处真结构化 + report hash + 注释）：`7c5dd6d`
