@@ -163,7 +163,7 @@ SPEC.md §13.2（418-424 行）列 5 项质量门禁：① hybrid recall@10 ≥ 
     ×3 multi-run 捕捉低概率竞态）。CI job `stress`（commit `b4aa743`）。
 11. proptest 不变量 [M4]：检索稳定 / round-trip / merge 不丢 256 cases
     全通过（`tests/proptest_invariants.rs`，`proptest-regressions/` 提交
-    确保 CI 复现）。CI test job 覆盖（commit `f793e93` 报告）。
+    确保 CI 复现）。CI test job 覆盖（commit `f849c7b` + `34a9b11`）。
 ```
 
 ### §13.3 工程纪律门禁 — 补注
