@@ -1,6 +1,6 @@
-# SPEC v1.6 修订草案（v1.5 → v1.6，待用户批准）
+# SPEC v1.6 修订草案（v1.5 → v1.6，用户已批准）
 
-本草案是 M4（生产门槛：数据安全测试 + 可观测性）产出的 SPEC 回写提案。**本草案未应用到 `docs/SPEC.md`**——待用户批准后由后续 6b-apply 步骤应用。
+本草案是 M4（生产门槛：数据安全测试 + 可观测性）产出的 SPEC 回写提案。用户已批准（2026-08-12），§9/§10 节已根据最终实现更新（FFI 已实现 + ErrorContext 结构化），由 6b-apply 步骤应用到 `docs/SPEC.md`。
 
 ## 版本号校正说明
 
@@ -12,8 +12,8 @@
 
 | 节 | 修订类型 | 要点 |
 |---|---|---|
-| §9 FFI 规范 | 补列 inspect API 函数 | core 层已实现 [M4]，FFI/Node/Wasm 绑定层顺延 |
-| §10 错误码 | 表后补注释 | String payload ADDITIVE，错误码 -1..-11 不变 |
+| §9 FFI 规范 | 补列 inspect API 函数 | core + FFI/Node/Wasm 全实现 [M4] |
+| §10 错误码 | 表后补注释 | ErrorContext 结构化字段替代 String 拼接，错误码 -1..-11 不变 |
 | §13.2 质量门禁 | 新增第 6-11 项 | fuzz/崩溃恢复/兼容/压测/proptest |
 | §14 不变量 I-5 | 扩展注释 | tracing feature 能力开关释义 |
 
@@ -30,12 +30,12 @@ SPEC.md §9.2 函数面（305-325 行）列有 M0-M3 冻结的 FFI 函数签名�
 在 §9.2 函数面 v1.1 补列块之后、325 行参数/返回注释之前，加 **v1.6 补列**块：
 
 ```
-**v1.6 补列**（M4 inspect API，core 层已实现，FFI/Node/Wasm 绑定顺延）：
+**v1.6 补列**（M4 inspect API，core + FFI/Node/Wasm 全实现）：
 vane_db_stats(db_h, out_arena*) -> i32              // DbStats JSON
 vane_db_segment_info(db_h, out_arena*) -> i32       // Vec<SegmentInfo> JSON
 ```
 
-> **实现状态**：core 层 `Db::stats()` / `Db::segment_info()` / `Db::collection_segment_info()` 已实现 [M4, commit `684a112`]（`crates/vane-core/src/api/inspect.rs` + `crates/vane-core/src/api/db.rs`）。FFI/Node/Wasm 绑定层 inspect 函数落地**顺延**——参照 §12.2 已有的"（未实现，顺延）"同款标注模式。core 层 inspect API 纯新增，不改 M0-M3 冻结 FFI 签名。
+> **实现状态**：core 层 `Db::stats()` / `Db::segment_info()` / `Db::collection_segment_info()` 已实现 [M4, commit `684a112`]（`crates/vane-core/src/api/inspect.rs` + `crates/vane-core/src/api/db.rs`）。FFI `vane_db_stats` / `vane_db_segment_info` + Node `stats()`/`segmentInfo()` + Wasm 2 函数全实现 [M4, commit `5143885`]。core 层 inspect API 纯新增，不改 M0-M3 冻结 FFI 签名。
 
 **返回结构体字段概要**（7 structs/enums，源自 `crates/vane-core/src/api/inspect.rs`）：
 
@@ -91,7 +91,7 @@ ExecutorKind = Serial | Rayon
 
 **rationale**：
 
-M4 Phase 5b 交付了 core 层 inspect API（commit `684a112`），提供 DB 级统计与段级信息，支持健康检查（词典降级/段损坏/hnsw 缺失）。phase0-design.md §5（820-825 行）假设 FFI 层同步加 `vane_db_stats`/`vane_db_segment_info`，但实际 Phase 5b 只实现 core 层——FFI/Node/Wasm 绑定层 inspect 落地顺延。草案诚实反映此现状，用 v1.5 §12.2 已有的"（未实现，顺延）"标注模式，保留规范意图 + 标注实现边界。`crates/vane-ffi/src/` 已 grep 确认无 inspect 函数。
+M4 Phase 5b 交付了 core 层 inspect API（commit `684a112`）+ FFI/Node/Wasm 三绑定层（commit `5143885`），提供 DB 级统计与段级信息，支持健康检查（词典降级/段损坏/hnsw 缺失）。phase0-design.md §5（820-825 行）假设 FFI 层同步加 `vane_db_stats`/`vane_db_segment_info`——实际实现与设计一致，FFI/Node/Wasm 全部落地。`crates/vane-ffi/src/lib.rs`（`vane_db_stats`/`vane_db_segment_info`）+ `crates/vane-node/src/`（`stats()`/`segmentInfo()`）+ `crates/vane-wasm/src/`（2 函数）已验证。
 
 **不触碰**：
 
@@ -110,18 +110,21 @@ SPEC.md §10（333-350 行）列错误码表（0=OK, -1=E_IO … -11=E_INVALID_A
 **不改错误码表**（-1..-11 不变，三侧绑定透传不变）。在 §10 表后、350 行"三侧绑定透传"之后加注释：
 
 ```
-> **v1.6 注**（M4 诊断上下文增强）：错误 String payload 含上下文信息
-> （段 ULID / docid / 操作 / 建议操作），M4 增强，**ADDITIVE**——原消息
-> 保留为前缀，上下文以结构化后缀追加。实现：`append_context(e, ctx)`
-> pub(crate) helper 在 `types.rs`（commit `5fc4ac4`），不改错误码
-> （-1..-11 不变），不改 enum 签名（不加新字段）。无 String payload 的
-> 变体（Busy / DictTooLarge / DictUnavailable / Unsupported）原样返回。
-> 结构化 `VaneError::context()` 方法返回结构化上下文列 **Could**（非本次）。
+> **v1.6 注**（M4 诊断架构重构）：`VaneError` 11 变体统一携带 `ErrorContext`
+> struct（`message: String` + `seg: Option<String>` + `docid: Option<u64>`
+> + `op: Option<&'static str>` + `hint: Option<String>`），替代旧 String
+> payload。`ErrorContext` 提供 builder 链式 `.seg()`/`.docid()`/`.op()`/`.hint()`
+> + `From<String>`/`From<&str>`；`VaneError` 提供 `with_seg()`/`with_docid()`
+> /`with_op()`/`with_hint()` pub(crate) 方法（替代旧 `append_context`）。
+> `VaneError::context()` pub 方法返回 `&ErrorContext`（消费者程序化访问字段，
+> 无需 parse Display）。**错误码 -1..-11 + 名称 E_IO 等不变**（§10 表硬约束）。
+> Display 新格式 `E_CODE: message [seg=... op=... docid=... hint=...]`
+> （None 字段省略）。实现：commit `c34e473`（主重构）+ `d9dcc5f`（fix）。
 ```
 
 **rationale**：
 
-M4 Phase 5c 增强了 `VaneError` 诊断信息（commit `5fc4ac4`）：`append_context(e: VaneError, ctx: &str) -> VaneError` 为 String payload 追加上下文后缀（段 ULID / docid / 操作 / 建议操作），不改错误码、不改 enum 签名。phase0-design.md §5（829-833 行）推荐"先丰富 String，结构化上下文列为 Could"——实现与设计一致。ADDITIVE 语义保证向后兼容：原消息保留为前缀，消费者只读前缀即可获得原行为。
+M4 Phase 6b 重构 `VaneError` 诊断架构（commit `c34e473` + `d9dcc5f`）：11 变体统一携带 `ErrorContext` struct，替代旧 String payload + `append_context` 拼接模式。消费者经 `context()` pub 方法程序化访问 seg/docid/op/hint 字段，无需 parse Display 字符串。phase0-design.md §5（829-833 行）推荐"先丰富 String，结构化上下文列为 Could"——实际实现超越设计提议，直接结构化落地（ErrorContext struct + builder 链式 + `context()` pub 方法 + `with_*` pub(crate) 替代 `append_context`）。错误码 -1..-11 + 名称不变（§10 表硬约束），Display 新格式 `E_CODE: message [seg=... op=... docid=... hint=...]`（None 省略）。
 
 **不触碰**：
 
@@ -253,20 +256,22 @@ I-5 核心断言（441 行"core 算法代码无 `cfg(target_arch)`/`cfg(target_o
 ## Changelog 草案条目（待 apply 时追加到 SPEC.md changelog v1.5 条目之后）
 
 ```
-- **v1.6**（2026-08-13）：M4 生产门槛（数据安全测试+可观测性）后四处修订（用户批准）。S1 §9.2 补列 inspect API FFI 函数面 vane_db_stats/vane_db_segment_info（core 层 Db::stats/segment_info/collection_segment_info 已实现 [M4, 684a112]，FFI/Node/Wasm 绑定顺延，参照 §12.2 顺延模式）。S2 §10 错误码表后补诊断上下文注释（String payload ADDITIVE 含段 ULID/docid/操作/建议，append_context helper，错误码 -1..-11 不变，5fc4ac4）。S3 §13.2 新增第 6-11 项质量门禁（fuzz-smoke/fuzz-long/崩溃恢复/跨版本/并发压测/proptest）+ §13.3 补 dev/optional 依赖不触黑名单注。S4 §14 I-5 扩展 tracing feature 能力开关释义（编译期消除，体积不变，不触黑名单，dae29c6）。不触碰 §1-§8 / §11 / §12 / §13.1 / §13.3 黑名单列表 / §15（M4 不碰 core 检索语义、分发矩阵、性能承诺、里程碑验收）。
+- **v1.6**（2026-08-13）：M4 生产门槛（数据安全测试+可观测性）后四处修订（用户批准）。S1 §9.2 补列 inspect API FFI 函数面 vane_db_stats/vane_db_segment_info（core 层 Db::stats/segment_info/collection_segment_info [M4, 684a112] + FFI/Node/Wasm 三绑定层 [M4, 5143885] 全实现）。S2 §10 错误码表后补 ErrorContext 结构化注（11 变体统一携带 ErrorContext struct [message+seg+docid+op+hint]，builder 链式 + with_* pub(crate) + context() pub，替代旧 String 拼接 + append_context，错误码 -1..-11 不变，c34e473+d9dcc5f）。S3 §13.2 新增第 6-11 项质量门禁（fuzz-smoke/fuzz-long/崩溃恢复/跨版本/并发压测/proptest）+ §13.3 补 dev/optional 依赖不触黑名单注。S4 §14 I-5 扩展 tracing feature 能力开关释义（编译期消除，体积不变，不触黑名单，dae29c6）。不触碰 §1-§8 / §11 / §12 / §13.1 / §13.3 黑名单列表 / §15（M4 不碰 core 检索语义、分发矩阵、性能承诺、里程碑验收）。
 ```
 
 ---
 
 ## 待用户批准检查点
 
+> **用户已批准**（AskUserQuestion 检查点，2026-08-12）：Q1 §9 FFI inspect 立即实现（非顺延，FFI 已落地 5143885）；Q2 §10 诊断选精简正确方式（ErrorContext 结构化，c34e473+d9dcc5f）；Q3 §13.2+6 门禁 + §13.3 注 + §14 I-5 tracing 全批准；Q4 版本号 v1.6 一次性批准。以下原决策清单保留作历史记录。
+
 供编排者 AskUserQuestion 的决策清单：
 
 1. **版本号校正**：SPEC 已 v1.5（M3），M4 修订为 v1.5 → v1.6（phase0-design §5 "v1.4 → v1.5" 标题过时已更正）。是否接受 v1.6 版本号？
 
-2. **§9 inspect FFI 顺延**：core 层 `Db::stats()` / `Db::segment_info()` / `Db::collection_segment_info()` 已实现 [M4, 684a112]，FFI/Node/Wasm 绑定层 inspect 函数顺延（参照 §12.2 "（未实现，顺延）"模式）。是否接受顺延标注（vs 要求立即实现 FFI 层）？
+2. **§9 inspect FFI**：core 层 `Db::stats()` / `Db::segment_info()` / `Db::collection_segment_info()` 已实现 [M4, 684a112]，FFI/Node/Wasm 绑定层 inspect 函数已实现 [M4, 5143885]。是否接受已实现标注？
 
-3. **§10 诊断上下文**：String payload ADDITIVE 注释 + 结构化 `VaneError::context()` 方法列 Could（非本次）。是否接受此路径（vs 要求结构化 context 立即落地）？
+3. **§10 诊断上下文**：ErrorContext 结构化字段替代 String 拼接（11 变体统一携带 ErrorContext struct，builder 链式 + with_* pub(crate) + context() pub，错误码 -1..-11 不变，c34e473+d9dcc5f）。是否接受此路径？
 
 4. **§13.2 +6 门禁 + §13.3 dev/optional 依赖注**：新增第 6-11 项质量门禁 + §13.3 补 dev/optional 依赖不触黑名单注。是否接受？
 
@@ -281,7 +286,7 @@ I-5 核心断言（441 行"core 算法代码无 `cfg(target_arch)`/`cfg(target_o
 | 项 | phase0-design.md §5 提议 | 实际实现 | 草案处理 |
 |---|---|---|---|
 | 版本号 | v1.4 → v1.5（816 行标题） | SPEC 已 v1.5（M3），M4 是 v1.5 → v1.6 | 更正为 v1.5 → v1.6 |
-| §9 FFI inspect | 假设 FFI 层加 `vane_db_stats`/`vane_db_segment_info`（820-824 行） | 仅 core 层实现，FFI/Node/Wasm 绑定未实现 | 诚实标注顺延，参照 §12.2 模式 |
+| §9 FFI inspect | 假设 FFI 层加 `vane_db_stats`/`vane_db_segment_info`（820-824 行） | core + FFI/Node/Wasm 全实现（684a112+5143885） | 与设计一致，全实现 |
 | §13.2 第 8 项 | "meta_slot/WAL/merge/ENOSPC/部分写"（841 行） | 完全一致（`crash_recovery.rs` 5 场景） | 无偏差 |
 | §14 tracing | 传递依赖无 regex/tokio/prost/tonic/openssl/lindera/ndarray/wee_alloc/dashmap/parking_lot（854-855 行） | 实际传递依赖为 pin-project-lite/tracing-attributes/tracing-core/once_cell，确实不触黑名单 | 补充实际传递依赖名称 |
 | proptest-regressions | phase0-design §6 风险 3（867 行）提及需提交 | 已提交于 `crates/vane-core/proptest-regressions/`（非 `tests/` 子目录） | 路径精确标注 |
