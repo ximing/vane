@@ -3,7 +3,7 @@
 //! 纯新增 pub API，不改 M0-M3 冻结签名。`Db::stats()` / `Db::segment_info()`
 //! 返回强类型结构体（FFI 层序列化为 JSON）。
 //!
-//! 健康检查（§3.6 表）：
+//! 健康检查（§9.2 inspect API）：
 //! - 词典降级：jieba feature on 时，collection 的 tokenizer 是 Jieba 但
 //!   `DbInner.jieba_dict` 为 None → Degraded。
 //! - 段损坏：`SegmentReader::open` 失败 → Corrupt（header magic/version 校验、
@@ -12,7 +12,7 @@
 //!
 //! `index_bytes` / `file_sizes`：Vfs trait 无 `size()` 方法（M0 冻结签名），
 //! 用 `read_at` 探测 EOF（offset 0 起循环读 8KB buffer 至 n=0，累计推算 size）。
-//! inspect 非热路径，性能可接受（§3.6 取舍）。
+//! inspect 非热路径，性能可接受（§9.2 取舍）。
 
 use crate::api::collection::CollectionInner;
 use crate::api::types::DictState;
@@ -225,7 +225,7 @@ pub(crate) fn executor_kind() -> ExecutorKind {
 /// - open 成功但 hnsw 缺失（None） → Degraded
 /// - 否则 Healthy
 ///
-/// 注：§3.6 取舍建议"不主动重新 open 校验"，但表 spec 要求"SegmentReader::open 失败 → Corrupt"。
+/// 注：§9.2 inspect API 要求"SegmentReader::open 失败 → Corrupt"（健康检查语义）。
 /// inspect 非热路径，重新 open 可接受，且能真实检测段损坏（文件被外部篡改后）。
 fn segment_health(
     vfs: &Arc<dyn Vfs>,

@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.5）
+# Vane 技术规范（SPEC v1.6）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -322,6 +322,13 @@ vane_load_dict(h, dict_ptr, dict_len) -> i32      // M1 词典分发：注入 ji
 vane_dict_version(out_ptr, out_len*) -> i32       // M1 词典分发：查当前词典日历版本 + sha256 前缀
 ```
 
+**v1.6 补列**（M4 inspect API，已实现）：
+```
+vane_db_stats(db_h, out_arena*) -> i32              // DbStats JSON
+vane_db_segment_info(db_h, out_arena*) -> i32       // Vec<SegmentInfo> JSON
+```
+> 实现：core 层 `Db::stats()` / `Db::segment_info()` / `Db::collection_segment_info()` [M4, `684a112`] + FFI `vane_db_stats`/`vane_db_segment_info` + Node `stats()`/`segmentInfo()` + Wasm 2 函数 [M4, `5143885`]。返回 7 structs（DbStats/CollectionStats/SegmentInfo/FormatVersions/SegmentFileSizes/Health/ExecutorKind）。健康检查语义：`SegmentReader::open` 失败 → `Corrupt`；hnsw 缺失 → `Degraded`（fallback brute）；否则 `Healthy`。`index_bytes`/`file_sizes` 用 `read_at` 探测 EOF 累计推算（Vfs trait 无 `size()` 方法，M0 冻结签名）。
+
 参数/返回一律 JSON 序列化（binding 薄壳原则；性能敏感的 `vane_search` 允许 M1 评估升级为定长二进制，需 spec 修订）。
 
 ### 9.3 Node 例外
@@ -348,6 +355,8 @@ Node **不经过 C ABI**，`vane-node` 用 napi-rs 直连 core（N-API v6+）；
 | -11 | E_INVALID_ARG | 参数非法（topK>1000、filter 作用于非标量字段等） |
 
 三侧绑定透传 code，不得吞并/重编。
+
+> **v1.6 注**（M4 诊断架构重构）：`VaneError` 11 变体统一携带 `ErrorContext` struct（`message: String` + `seg: Option<String>` + `docid: Option<u64>` + `op: Option<&'static str>` + `hint: Option<String>`），替代旧 String payload。`ErrorContext` builder 链式 `.seg()`/`.docid()`/`.op()`/`.hint()` + `From<String>`/`From<&str>`；`VaneError` `with_seg()`/`with_docid()`/`with_op()`/`with_hint()` pub(crate)（替代旧 `append_context`）；`context()` pub 返回 `&ErrorContext`。**错误码 -1..-11 + 名称不变**（本表硬约束）。Display 格式 `E_CODE: message [seg=... op=... docid=... hint=...]`（None 省略）。实现：`c34e473` + `d9dcc5f`。
 
 ---
 
@@ -422,11 +431,20 @@ crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ np
 3. 体积：核心 wasm gzip ≤ 800KB（含 jieba 代码、不含词典）；全功能 ≤ 1.2MB；`@vane-rs/dict-zh` ≤ 1.5MB；`@vane-rs/web` 双变体（simd128/scalar）wasm 各 ≤ 800KB gzip；Go embed 增量 < 2MB；500KB 为 M2 优化目标非门禁。
 4. 平台四包管理器（npm/yarn/pnpm/bun）安装矩阵通过（`@vane-rs/node`）。
 5. Web npm 安装门禁 [M3]：`npm i @vane-rs/web @vane-rs/dict-zh` 在 vite/webpack 可 import + build（install-matrix 扩展或 `examples/vite` + `examples/webpack` build 冒烟）。
+6. fuzz-smoke [M4]：cargo-fuzz 每 target 60s 短跑（push/PR），nightly toolchain + `-Z sanitizer`，5 targets（brute_search_fuzz / hnsw_search_fuzz / persist_roundtrip_fuzz / merge_fuzz / dict_load_fuzz）无 panic/crash。CI job `fuzz-smoke`（`b4aa743`）。
+7. fuzz-long [M4]：cargo-fuzz 每 target 10min 长跑（cron 周日 03:00 UTC + workflow_dispatch），`-max_total_time=600 -max_len=65536`，crash 不阻断 job（`|| true` 容错）但上传 crash artifact。CI job `fuzz-long`（`b4aa743`）。
+8. 崩溃恢复 [M4]：FaultVfs 注入 5 场景（meta_slot 翻转 / WAL flush 中断 / merge 中断 / ENOSPC / 部分写）全通过，崩溃后 manifest 指向完整状态、数据一致（`tests/crash_recovery.rs` --features fault-injection --release）。CI job `crash-recovery`（`b4aa743`）。
+9. 跨版本兼容 [M4]：v0.1.0 真实 fixture 当前版本读取通过（`tests/cross_version_compat.rs` --all-features --release，覆盖 zstd-encode 分支）。CI job `compat`（`b4aa743`）。
+10. 并发压测 [M4]：多线程 search+insert+flush+merge N 轮，timeout 内无 panic/死锁/数据不一致（`tests/stress_concurrency.rs` --release ×3 multi-run 捕捉低概率竞态）。CI job `stress`（`b4aa743`）。
+11. proptest 不变量 [M4]：检索稳定 / round-trip / merge 不丢 256 cases 全通过（`tests/proptest_invariants.rs`，`proptest-regressions/` 提交确保 CI 复现）。CI test job 覆盖（`f849c7b` + `34a9b11`）。
 
 ### 13.3 工程纪律门禁
 
 - `cargo check --target wasm32-unknown-unknown -p vane-core`：core 出现 `std::fs` 即失败（M0 第一天起）。
 - `cargo-deny` 依赖审查 + `cargo bloat` 周报；依赖黑名单：regex / tokio 全套 / prost / tonic / openssl / lindera / ndarray / wee_alloc。
+
+> **v1.6 注**（M4 dev/optional 依赖）：dev/optional 依赖（tracing / proptest / cargo-fuzz / libfuzzer-sys）不触运行时依赖黑名单（regex / tokio / prost / tonic / openssl / lindera / ndarray / wee_alloc / dashmap / parking_lot），cargo-deny 守护。libfuzzer-sys license = `(MIT OR Apache-2.0) AND NCSA` 已在 `deny.toml` [licenses] allow NCSA（`9e262db`）——NCSA 是 libFuzzer C++ 库许可证（OSI approved + FSF Free/Libre），仅 license 允许，不改 [bans] crate 黑名单语义。
+
 - 冻结 corpus 格式兼容测试：旧版本写出的库必须被新版本打开。
 - benchmark CI：性能回退 >10% 报警。
 
@@ -440,6 +458,7 @@ crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ np
 - **I-4 单一分词身份**：任意时刻一 collection 一套 TokenizerId；新写入在 reindex 完成前必须用旧身份。
 - **I-5 核心零平台分支**：core 算法代码无 `cfg(target_arch)`/`cfg(target_os)` 平台分支；平台差异仅在 VFS/Executor 实现。
   - 注：`cfg(feature)` 用于存储编解码能力开关（如 zstd-encode）允许出现在 segment 编解码处；`cfg(target_feature)` 用于同一算法的向量化/标量双实现（如 f32 距离核的 simd128/标量双路径）视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中；向量化能力门控可与 `target_arch` 组合（如 `cfg(all(target_arch = "wasm32", target_feature = "simd128"))`——simd128 仅在 wasm32 有意义，`target_arch` 在此是能力定位而非平台分支），组合整体仍视为能力开关；`cfg(target_arch)`/`cfg(target_os)` 平台分支仍仅限 VFS/Executor 实现。
+  - 注（v1.6，M4 可观测性）：`cfg(feature="tracing")` 是可观测性能力开关（类似 zstd-encode），允许出现在 api/segment/persistence/wal 模块的埋点位置（span/info/debug 宏调用）。不启用时编译期消除（`grep -c tracing = 0` 验证），wasm/native 体积不变（800KB gzip 红线守护，tracing off 时 vane-wasm ~352KB / core --export-all ~650KB）。tracing crate 传递依赖（pin-project-lite / tracing-attributes / tracing-core / once_cell）不触依赖黑名单，cargo-deny 守护。参照 commit `dae29c6`。
 - **I-6 manifest 原子性**：任何崩溃后 manifest 指向完整状态；孤儿段文件可安全清理。
 - **I-7 FFI 内存铁律**：谁分配谁释放，跨边界只借不还；句柄注销后使用 = 明确错误而非 UB。
 - **I-8 binding 薄壳**：三侧绑定无检索逻辑；行为差异视为 bug。
@@ -464,3 +483,4 @@ crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ np
 - **v1.3**（2026-08-10）：M2-13 真实维基 nDCG corpus 落地后一处修订（用户批准）。S1 §13.2-2 ② 修订：真实中文维基 500 篇上 jieba-lite 相对 bigram nDCG@10 门禁从「提升 ≥15%」改为「不退步（≥0%，实测 +0.4%）」——bigram 在真实维基为强基线（nDCG≈0.93，数学上限≈7.5%），+15% 仅在合成边界陷阱语料可达（M1 实测 +84%，由代表性边界歧义 corpus 承载该硬门禁）；相对完整版 <2% 由 200 句 100% 切分一致性覆盖。
 - **v1.4**（2026-08-10）：post-v0.1.1 f32 距离 SIMD128 显式向量化需要，一处修订（用户批准）。S1 §14 I-5 释义扩展（§11 同步）：`cfg(target_feature)` 用于同一算法的向量化/标量双实现（如 f32 距离核的 simd128/标量双路径，归约顺序逐位对齐保证双变体 top-10 一致）视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中（向量化能力门控可与 `target_arch` 组合，如 `cfg(all(target_arch = "wasm32", target_feature = "simd128"))`，组合整体仍视为能力开关而非平台分支——澄清，非扩大）；`cfg(target_arch)`/`cfg(target_os)` 平台分支仍仅限 VFS/Executor 实现。实现参照 commit 5668479（`crates/vane-core/src/vector/mod.rs` f32 距离三核 cfg(target_feature="simd128") 双路径）。
 - **v1.5**（2026-08-11）：M3 Web npm 包交付后五处修订（用户批准）。S1 §12.1 Workspace 补全：补 `crates/vane-dict-zh`（jieba-lite 词典数据 crate，M1 起漏列）+ `bindings/web`（@vane-rs/web npm 包源）[M3]。S2 §12.2 目标矩阵三端→四端：加第六行 Web npm `@vane-rs/web`（wasm-bindgen `--target web` ESM 双变体 simd/scalar + worker + dict_loader + TS 类型，vite/webpack 可 import，wasm ≤800KB gzip，`npm publish --access public`）；Node prebuilt 追加目标标注「（未实现，顺延）」——M1 已完成但 musl/arm64-win 从未实现（release.yml 仅 4 平台），保留规范意图 + 诚实标注现状（决策点 1，用户拍板方案 B）。S3 §12.3 词典分发三渠道→四渠道：Node 通道修正为 `crates/vane-dict-zh` cargo path 依赖 `include_bytes!` 编译期内嵌（非 npm 数据包），删 `@vane/slim`（决策点 2，修正错误——`@vane/slim` 从未存在，Node 端词典是编译期内嵌无「无词典变体」概念）；scope `@vane/dict-zh`→`@vane-rs/dict-zh`（R4 修正）；WASM CDN [M2] 降级为 fallback（`dictData` 优先）；新增第四渠道 WASM npm dictData [M3]（`@vane-rs/dict-zh` npm 包 `data/dict.bin`，Web 端 import → fetch + arrayBuffer → VaneWorker `dictData` 内联注入，优先于 CDN，零强制 CDN）；末句三渠道→四渠道 + `scripts/check-dict-hash.sh` + `crates/vane-dict-zh/tests/dict_test.rs` 引用。S4 §12.4 版本与发布三端→四端：crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ npm `@vane-rs/web` 四端版本号严格同步；`@vane-rs/dict-zh` 走独立日历版（`YYYY.M.0`），与库 semver 解耦。S5 §13.2 质量门禁：§13.2-3 scope `@vane/dict-zh`→`@vane-rs/dict-zh` + 补 `@vane-rs/web` 双变体（simd128/scalar）wasm 各 ≤800KB gzip；§13.2-4 加「（`@vane-rs/node`）」限定；新增第 5 项 Web npm 安装门禁 [M3]（`npm i @vane-rs/web @vane-rs/dict-zh` 在 vite/webpack 可 import + build）。不触碰 §1-§11 / §13.1 / §13.3 / §14 / §15（M3 不碰 core 语义、不变量、性能承诺、里程碑验收）。
+- **v1.6**（2026-08-13）：M4 生产门槛（数据安全测试+可观测性）后四处修订（用户批准）。S1 §9.2 补列 inspect API FFI 函数面 `vane_db_stats`/`vane_db_segment_info`（core 层 `Db::stats`/`segment_info`/`collection_segment_info` [M4, `684a112`] + FFI/Node/Wasm 三绑定层 [M4, `5143885`] 全实现；7 structs DbStats/CollectionStats/SegmentInfo/FormatVersions/SegmentFileSizes/Health/ExecutorKind；健康检查语义 `SegmentReader::open` 失败→Corrupt / hnsw 缺失→Degraded / 否则 Healthy）。S2 §10 错误码表后补 ErrorContext 结构化注（11 变体统一携带 `ErrorContext` struct [message+seg+docid+op+hint]，builder 链式 `.seg()`/`.docid()`/`.op()`/`.hint()` + `From<String>`/`From<&str>`；`VaneError` `with_*` pub(crate) 替代旧 `append_context`；`context()` pub 返回 `&ErrorContext`；错误码 -1..-11 + 名称不变 [本表硬约束]；Display `E_CODE: message [seg=... op=... docid=... hint=...]` None 省略；`c34e473`+`d9dcc5f`）。S3 §13.2 新增第 6-11 项质量门禁（fuzz-smoke/fuzz-long/崩溃恢复/跨版本兼容/并发压测/proptest 不变量，`b4aa743`+`f849c7b`+`34a9b11`）+ §13.3 补 dev/optional 依赖不触运行时黑名单注（tracing/proptest/cargo-fuzz/libfuzzer-sys；libfuzzer-sys NCSA license 已 allow `9e262db`）。S4 §14 I-5 扩展 tracing feature 能力开关释义（`cfg(feature="tracing")` 编译期消除，体积不变，tracing crate 传递依赖 pin-project-lite/tracing-attributes/tracing-core/once_cell 不触黑名单，`dae29c6`）。不触碰 §1-§8 / §11 / §12 / §13.1 / §13.3 黑名单列表 / §15（M4 不碰 core 检索语义、分发矩阵、性能承诺、里程碑验收）。
