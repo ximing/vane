@@ -5,3 +5,5 @@ target/
 index.js
 # napi create-npm-dirs 生成的平台包目录（CI/本地构建产物，不入库）。
 npm/
+# napi-rs 生成的 type-defs 元数据中间产物（由 `napi build` 再生成，不入库）。
+type-defs/
