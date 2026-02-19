@@ -1,0 +1,24 @@
+[package]
+name = "vane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "vane"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vane"
+path = "src/main.rs"
+
+[dependencies]
+vane-core = { workspace = true, features = ["dict-zh", "zstd-encode", "executor-native"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+notify = "6"
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
