@@ -1,3 +1,4 @@
+pub mod chunk;
 pub mod classify;
 pub mod config;
 pub mod error;
