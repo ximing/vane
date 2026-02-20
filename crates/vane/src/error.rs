@@ -3,13 +3,27 @@ use std::fmt;
 #[derive(Debug)]
 pub struct VaneCliError {
     pub message: String,
+    skip: bool,
 }
 
 impl VaneCliError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            skip: false,
         }
+    }
+
+    /// Recoverable skip (oversized file, etc.). The writer logs and continues.
+    pub fn skip(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            skip: true,
+        }
+    }
+
+    pub fn is_skip(&self) -> bool {
+        self.skip
     }
 }
 
