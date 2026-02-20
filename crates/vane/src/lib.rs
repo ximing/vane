@@ -8,4 +8,6 @@ pub mod error;
 pub mod extract;
 pub mod glob_match;
 pub mod home;
+pub mod index;
+pub mod live;
 pub mod project;
