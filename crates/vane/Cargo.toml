@@ -22,3 +22,4 @@ clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 notify = "6"
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+libc = "0.2"
