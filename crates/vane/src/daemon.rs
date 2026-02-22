@@ -11,9 +11,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::cas::Cas;
 use crate::config::{load_config, resolve_policy, Config, ProjectFile, ResolvedPolicy};
+use crate::embed::embedder_from_config;
 use crate::error::VaneCliError;
-use crate::index::{state_path, ProjectState};
+use crate::index::{project_db_path, state_path, ProjectIndex, ProjectState};
 use crate::ipc::{
     encode_response, parse_request, RpcRequest, RpcResponse, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
@@ -21,6 +23,7 @@ use crate::ipc::{
 use crate::live::LiveSet;
 use crate::log::{DailyLogger, Level};
 use crate::project::{project_id, reject_nested};
+use crate::search::{read_by_id, read_by_path, search_all, search_project, ProjectSearch};
 use crate::watch::{watch_roots, WatchEvent, WatchGuard};
 
 enum WriterCmd {
@@ -243,8 +246,8 @@ fn dispatch(req: RpcRequest, shared: &Arc<Shared>) -> RpcResponse {
     let RpcRequest { id, method, params } = req;
     let result = match method.as_str() {
         "status" => handle_status(shared),
-        "search" => Ok(json!([])),
-        "read" => Ok(json!([])),
+        "search" => handle_search(shared, &params),
+        "read" => handle_read(shared, &params),
         "list_roots" => handle_list_roots(shared),
         "reload_config" => writer_call(shared, |resp| WriterCmd::Reload { resp }),
         "add_root" | "remove_root" => match param_path(&params) {
@@ -262,6 +265,204 @@ fn dispatch(req: RpcRequest, shared: &Arc<Shared>) -> RpcResponse {
         Ok(v) => RpcResponse::ok(id, v),
         Err(e) => RpcResponse::err(id, INTERNAL_ERROR, e.message),
     }
+}
+
+fn handle_search(shared: &Arc<Shared>, params: &Value) -> Result<Value, VaneCliError> {
+    let query = params
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| VaneCliError::new("missing params.query"))?;
+    if query.is_empty() {
+        return Ok(json!([]));
+    }
+    let top_k = params
+        .get("top_k")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8)
+        .min(50) as u32;
+    let extractor = params.get("type").and_then(|v| v.as_str());
+    let want_all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let root_filter = params.get("root").and_then(|v| v.as_str());
+
+    let cfg = lock_config(shared)?.clone();
+    let selected = select_projects(&cfg, root_filter, want_all)?;
+    let cas = Cas::new(shared.home.join("rag").join("cas"));
+    let opened = open_search_targets(&shared.home, &cfg, &selected, extractor)?;
+    let scopes: Vec<ProjectSearch<'_>> = opened
+        .iter()
+        .map(|o| ProjectSearch {
+            index: &o.index,
+            embedder: o.embedder.as_ref(),
+            cas: &cas,
+            live: &o.live,
+            root: &o.root,
+            extractor: o.extractor,
+        })
+        .collect();
+    let hits = if scopes.len() <= 1 {
+        match scopes.first() {
+            Some(p) => search_project(p, query, top_k)?,
+            None => Vec::new(),
+        }
+    } else {
+        search_all(&scopes, query, top_k)?
+    };
+    serde_json::to_value(hits).map_err(|e| VaneCliError::new(format!("encode hits: {e}")))
+}
+
+fn handle_read(shared: &Arc<Shared>, params: &Value) -> Result<Value, VaneCliError> {
+    let cas = Cas::new(shared.home.join("rag").join("cas"));
+    let cfg = lock_config(shared)?.clone();
+    if let Some(id) = params.get("id").and_then(|v| v.as_str()) {
+        if !id.is_empty() {
+            let (pid, _, _) = crate::search::parse_doc_id(id)?;
+            let (root, live) = live_for_project(&shared.home, &cfg, Some(&pid), None)?;
+            let chunk = read_by_id(&cas, &live, &pid, &root, id)?;
+            return serde_json::to_value(chunk)
+                .map_err(|e| VaneCliError::new(format!("encode read: {e}")));
+        }
+    }
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| VaneCliError::new("missing params.id or params.path"))?;
+    let root_hint = params.get("root").and_then(|v| v.as_str());
+    let (root, pid, live) = resolve_read_target(&shared.home, &cfg, path, root_hint)?;
+    let chunks = read_by_path(&cas, &live, &pid, &root, path)?;
+    serde_json::to_value(chunks).map_err(|e| VaneCliError::new(format!("encode read: {e}")))
+}
+
+struct OpenedSearch<'a> {
+    index: ProjectIndex,
+    embedder: Box<dyn crate::embed::Embedder>,
+    live: LiveSet,
+    root: String,
+    extractor: Option<&'a str>,
+}
+
+fn select_projects<'a>(
+    cfg: &'a Config,
+    root: Option<&str>,
+    all: bool,
+) -> Result<Vec<&'a crate::config::ProjectEntry>, VaneCliError> {
+    if !all {
+        if let Some(r) = root {
+            let target = canonical_or_as_is(&PathBuf::from(r));
+            let found: Vec<_> = cfg
+                .projects
+                .iter()
+                .filter(|p| canonical_or_as_is(&p.path) == target)
+                .collect();
+            if found.is_empty() {
+                return Err(VaneCliError::new(format!("root not registered: {r}")));
+            }
+            return Ok(found);
+        }
+    }
+    Ok(cfg.projects.iter().collect())
+}
+
+fn open_search_targets<'a>(
+    home: &Path,
+    cfg: &Config,
+    entries: &[&crate::config::ProjectEntry],
+    extractor: Option<&'a str>,
+) -> Result<Vec<OpenedSearch<'a>>, VaneCliError> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let root = canonical_or_as_is(&entry.path);
+        if !root.is_dir() {
+            continue;
+        }
+        let pid = project_id(&root);
+        let state = ProjectState::load(&state_path(home, &pid))?;
+        let (Some(dim), Some(model_id)) = (state.dim, state.embed_model_id.clone()) else {
+            continue;
+        };
+        if !project_db_path(home, &pid).exists() {
+            continue;
+        }
+        let index = match crate::index::open_or_create(home, &pid, dim, &model_id) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let pf = read_project_file(&root);
+        let policy = match resolve_policy(cfg, &root, pf.as_ref()) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let live = LiveSet::load_for_project(home, &pid)?;
+        out.push(OpenedSearch {
+            index,
+            embedder: embedder_from_config(&policy.embed),
+            live,
+            root: root.to_string_lossy().into_owned(),
+            extractor,
+        });
+    }
+    Ok(out)
+}
+
+fn live_for_project(
+    home: &Path,
+    cfg: &Config,
+    pid: Option<&str>,
+    root_hint: Option<&str>,
+) -> Result<(PathBuf, LiveSet), VaneCliError> {
+    if let Some(r) = root_hint {
+        let root = canonical_or_as_is(&PathBuf::from(r));
+        let pid = project_id(&root);
+        let live = LiveSet::load_for_project(home, &pid)?;
+        return Ok((root, live));
+    }
+    if let Some(pid) = pid {
+        for p in &cfg.projects {
+            let root = canonical_or_as_is(&p.path);
+            if project_id(&root) == pid {
+                let live = LiveSet::load_for_project(home, pid)?;
+                return Ok((root, live));
+            }
+        }
+        return Err(VaneCliError::new(format!("unknown project {pid}")));
+    }
+    Err(VaneCliError::new("missing root"))
+}
+
+fn resolve_read_target(
+    home: &Path,
+    cfg: &Config,
+    rel_path: &str,
+    root_hint: Option<&str>,
+) -> Result<(PathBuf, String, LiveSet), VaneCliError> {
+    if let Some(r) = root_hint {
+        let root = canonical_or_as_is(&PathBuf::from(r));
+        let pid = project_id(&root);
+        let live = LiveSet::load_for_project(home, &pid)?;
+        return Ok((root, pid, live));
+    }
+    let mut matches = Vec::new();
+    for p in &cfg.projects {
+        let root = canonical_or_as_is(&p.path);
+        let pid = project_id(&root);
+        let live = LiveSet::load_for_project(home, &pid)?;
+        if live.files.contains_key(rel_path) {
+            matches.push((root, pid, live));
+        }
+    }
+    match matches.len() {
+        0 => Err(VaneCliError::new(format!(
+            "path not in working set: {rel_path}"
+        ))),
+        1 => Ok(matches.pop().expect("len == 1")),
+        _ => Err(VaneCliError::new(format!(
+            "path {rel_path} is in multiple roots; pass params.root"
+        ))),
+    }
+}
+
+fn canonical_or_as_is(path: &Path) -> PathBuf {
+    let expanded = expand_tilde(path);
+    expanded.canonicalize().unwrap_or(expanded)
 }
 
 fn handle_status(shared: &Arc<Shared>) -> Result<Value, VaneCliError> {

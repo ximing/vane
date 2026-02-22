@@ -14,5 +14,7 @@ pub mod ipc;
 pub mod live;
 pub mod log;
 pub mod project;
+pub mod rrf;
+pub mod search;
 pub mod sync;
 pub mod watch;
