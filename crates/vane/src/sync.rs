@@ -8,10 +8,16 @@ use sha2::{Digest, Sha256};
 use crate::cas::{embed_key, extract_key, Cas};
 use crate::chunk::chunk_strategy_id;
 use crate::classify::{classify, should_watch_dir};
-use crate::config::{ChunkConfig, ResolvedPolicy};
+use crate::config::{
+    load_config, resolve_policy, ChunkConfig, EmbedConfig, ProjectFile, ResolvedPolicy,
+};
+use crate::embed::{embed_model_id, embedder_from_config};
 use crate::error::VaneCliError;
 use crate::extract::{extract_image, extract_text, CanonicalDoc, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
-use crate::index::{doc_id, index_doc, state_path, ProjectIndex, ProjectState};
+use crate::index::{
+    doc_id, index_doc, open_or_create_at, project_db_new_path, state_path, swap_new_db,
+    ProjectIndex, ProjectState, RebuildProgress,
+};
 use crate::live::{LiveFile, LiveSet};
 
 const EXTRACTOR_VER: &str = "1";
@@ -32,6 +38,13 @@ pub struct SyncReport {
     pub unchanged: u64,
     pub embedded: u64,
     pub cas_hits: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RebuildReport {
+    pub cas_hits: u64,
+    pub embedded: u64,
+    pub chunks: u64,
 }
 
 struct DiskFile {
@@ -142,6 +155,240 @@ pub fn reconcile_project(
 
     persist_root_state(ctx, &root_str, &strategy_id)?;
     Ok(report)
+}
+
+/// Rebuild the project collection for a new embedding model / dim (§7.4).
+/// Serves the old `db/` until `db.new/` flushes and swaps.
+pub fn rebuild_for_new_model(
+    home: &Path,
+    project_id: &str,
+    new_cfg: &EmbedConfig,
+) -> Result<(), VaneCliError> {
+    let embedder = embedder_from_config(new_cfg);
+    rebuild_for_new_model_with(home, project_id, new_cfg, embedder.as_ref()).map(|_| ())
+}
+
+pub fn rebuild_for_new_model_with(
+    home: &Path,
+    project_id: &str,
+    new_cfg: &EmbedConfig,
+    embedder: &dyn crate::embed::Embedder,
+) -> Result<RebuildReport, VaneCliError> {
+    let dim = embedder.probe_dim()?;
+    let model_id = embed_model_id(&new_cfg.provider, &new_cfg.model, dim);
+    let state_file = state_path(home, project_id);
+    let mut state = ProjectState::load(&state_file)?;
+
+    if state.embed_model_id.as_deref() == Some(model_id.as_str()) && state.dim == Some(dim) {
+        state.rebuild = None;
+        state.reindex_error = None;
+        state.save_atomic(&state_file)?;
+        return Ok(RebuildReport::default());
+    }
+
+    let live = LiveSet::load_for_project(home, project_id)?;
+    let total = live.files.len() as u64;
+    write_rebuild_state(
+        &state_file,
+        &mut state,
+        Some(RebuildProgress { done: 0, total }),
+        None,
+    )?;
+
+    match rebuild_into_new(
+        home, project_id, &model_id, dim, embedder, &live, &mut state,
+    ) {
+        Ok(report) => {
+            swap_new_db(home, project_id)?;
+            let mut state = ProjectState::load(&state_file)?;
+            state.embed_model_id = Some(model_id);
+            state.dim = Some(dim);
+            state.rebuild = None;
+            state.reindex_error = None;
+            state.save_atomic(&state_file)?;
+            Ok(report)
+        }
+        Err(e) => {
+            let db_new = project_db_new_path(home, project_id);
+            if db_new.exists() {
+                let _ = fs::remove_dir_all(&db_new);
+            }
+            let mut state = ProjectState::load(&state_file).unwrap_or(state);
+            state.reindex_error = Some(e.message.clone());
+            let _ = state.save_atomic(&state_file);
+            Err(e)
+        }
+    }
+}
+
+fn rebuild_into_new(
+    home: &Path,
+    project_id: &str,
+    model_id: &str,
+    dim: u32,
+    embedder: &dyn crate::embed::Embedder,
+    live: &LiveSet,
+    state: &mut ProjectState,
+) -> Result<RebuildReport, VaneCliError> {
+    let db_new = project_db_new_path(home, project_id);
+    if db_new.exists() {
+        fs::remove_dir_all(&db_new).map_err(|e| {
+            VaneCliError::new(format!("remove leftover db.new {}: {e}", db_new.display()))
+        })?;
+    }
+
+    let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
+    let new_index = open_or_create_at(&db_new, dim, model_id, prefer_cjk)?;
+    let cas = Cas::new(home.join("rag").join("cas"));
+    let now = unix_now();
+    let root_path = state.root_path.as_deref().map(PathBuf::from);
+    let policy = rebuild_policy(home, root_path.as_deref());
+    let root_str = root_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let ctx = SyncCtx {
+        home,
+        project_id,
+        cas: &cas,
+        index: &new_index,
+        embedder,
+        now,
+    };
+
+    let mut report = RebuildReport::default();
+    let mut to_add = Vec::new();
+    let total = live.files.len() as u64;
+    let state_file = state_path(home, project_id);
+
+    let result = (|| {
+        for (i, (rel, file)) in live.files.iter().enumerate() {
+            let docs =
+                docs_for_rebuild(&ctx, rel, file, root_path.as_deref(), &policy, &mut report)?;
+            let embedded = embed_docs(&ctx, model_id, &docs, dim)?;
+            report.embedded += embedded.n_embed;
+            report.chunks += docs.len() as u64;
+            ctx.cas.touch(&file.extract_key, &embedded.keys, now);
+            for (doc, vector) in docs.iter().zip(embedded.vectors) {
+                if vector.len() != dim as usize {
+                    return Err(VaneCliError::new(format!(
+                        "embedding dim changed: expected {dim}, got {}",
+                        vector.len()
+                    )));
+                }
+                to_add.push(index_doc(project_id, &root_str, doc, Some(vector)));
+            }
+            write_rebuild_state(
+                &state_file,
+                state,
+                Some(RebuildProgress {
+                    done: (i as u64) + 1,
+                    total,
+                }),
+                None,
+            )?;
+        }
+        if !to_add.is_empty() {
+            new_index.add_docs(&to_add)?;
+        }
+        new_index.flush()?;
+        new_index.close()?;
+        Ok(())
+    })();
+
+    drop(new_index);
+    result?;
+    Ok(report)
+}
+
+fn docs_for_rebuild(
+    ctx: &SyncCtx<'_>,
+    rel: &str,
+    file: &LiveFile,
+    root: Option<&Path>,
+    policy: &ResolvedPolicy,
+    report: &mut RebuildReport,
+) -> Result<Vec<CanonicalDoc>, VaneCliError> {
+    if let Some(docs) = ctx.cas.get_extract(&file.extract_key) {
+        report.cas_hits += 1;
+        return Ok(retarget(docs, rel));
+    }
+    let Some(root) = root else {
+        return Err(VaneCliError::new(format!(
+            "extract CAS miss for {rel} and no root_path in state"
+        )));
+    };
+    let abs = root.join(rel);
+    let extractor = classify(rel, policy)
+        .map(|r| r.extractor.clone())
+        .unwrap_or_else(|_| "text".into());
+    let mut sync_report = SyncReport::default();
+    match load_or_extract(
+        ctx.cas,
+        rel,
+        &abs,
+        &extractor,
+        &file.extract_key,
+        &policy.chunk,
+        &mut sync_report,
+    )? {
+        Some(docs) => Ok(docs),
+        None => Err(VaneCliError::new(format!(
+            "cannot extract {rel} during rebuild"
+        ))),
+    }
+}
+
+fn rebuild_policy(home: &Path, root: Option<&Path>) -> ResolvedPolicy {
+    let fallback = ResolvedPolicy {
+        embed: EmbedConfig {
+            provider: "mock".into(),
+            model: "test".into(),
+            base_url: "http://127.0.0.1".into(),
+            api_key: None,
+        },
+        chunk: ChunkConfig {
+            split: "markdown".into(),
+            max_chars: 1200,
+            overlap_chars: 200,
+            min_chars: 50,
+        },
+        exclude: Vec::new(),
+        types: vec![crate::config::TypeRule {
+            glob: "**/*".into(),
+            extractor: "text".into(),
+            enabled: true,
+        }],
+    };
+    let Some(root) = root else {
+        return fallback;
+    };
+    let Ok(cfg) = load_config(home) else {
+        return fallback;
+    };
+    let pf = fs::read_to_string(root.join(".vane.toml"))
+        .ok()
+        .and_then(|t| ProjectFile::parse_toml(&t).ok());
+    resolve_policy(&cfg, root, pf.as_ref()).unwrap_or(fallback)
+}
+
+fn write_rebuild_state(
+    path: &Path,
+    state: &mut ProjectState,
+    rebuild: Option<RebuildProgress>,
+    reindex_error: Option<String>,
+) -> Result<(), VaneCliError> {
+    state.rebuild = rebuild;
+    state.reindex_error = reindex_error;
+    state.save_atomic(path)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn require_no_rebuild(ctx: &SyncCtx<'_>) -> Result<(), VaneCliError> {

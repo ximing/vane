@@ -42,9 +42,15 @@ pub struct ProjectState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_fallback: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rebuild: Option<serde_json::Value>,
+    pub rebuild: Option<RebuildProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reindex_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RebuildProgress {
+    pub done: u64,
+    pub total: u64,
 }
 
 impl ProjectState {
@@ -64,18 +70,24 @@ impl ProjectState {
     }
 }
 
+pub fn project_dir(home: &Path, project_id: &str) -> PathBuf {
+    home.join("rag").join("projects").join(project_id)
+}
+
 pub fn project_db_path(home: &Path, project_id: &str) -> PathBuf {
-    home.join("rag")
-        .join("projects")
-        .join(project_id)
-        .join("db")
+    project_dir(home, project_id).join("db")
+}
+
+pub fn project_db_new_path(home: &Path, project_id: &str) -> PathBuf {
+    project_dir(home, project_id).join("db.new")
+}
+
+pub fn project_db_prev_path(home: &Path, project_id: &str) -> PathBuf {
+    project_dir(home, project_id).join("db.prev")
 }
 
 pub fn state_path(home: &Path, project_id: &str) -> PathBuf {
-    home.join("rag")
-        .join("projects")
-        .join(project_id)
-        .join("state.json")
+    project_dir(home, project_id).join("state.json")
 }
 
 /// `{project_id}:{rel_path}#{chunk_index}`
@@ -120,8 +132,32 @@ pub fn open_or_create(
     dim: u32,
     model_id: &str,
 ) -> Result<ProjectIndex, VaneCliError> {
-    let db_dir = project_db_path(home, project_id);
-    fs::create_dir_all(&db_dir).map_err(|e| io_err("create project db dir", &db_dir, e))?;
+    let state_file = state_path(home, project_id);
+    let mut state = ProjectState::load(&state_file)?;
+    let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
+    let idx = open_or_create_at(
+        &project_db_path(home, project_id),
+        dim,
+        model_id,
+        prefer_cjk,
+    )?;
+    state.embed_model_id = Some(model_id.to_string());
+    state.dim = Some(dim);
+    if idx.tokenizer_fallback {
+        state.tokenizer_fallback = Some("cjk_bigram".into());
+    }
+    state.save_atomic(&state_file)?;
+    Ok(idx)
+}
+
+/// Open or create a Vane db at `db_dir` without writing `state.json`.
+pub fn open_or_create_at(
+    db_dir: &Path,
+    dim: u32,
+    model_id: &str,
+    prefer_cjk: bool,
+) -> Result<ProjectIndex, VaneCliError> {
+    fs::create_dir_all(db_dir).map_err(|e| io_err("create project db dir", db_dir, e))?;
     let db_path = db_dir
         .to_str()
         .ok_or_else(|| VaneCliError::new(format!("db path is not utf-8: {}", db_dir.display())))?;
@@ -134,10 +170,6 @@ pub fn open_or_create(
     let db = Db::open(vfs, db_path, open_opts).map_err(core_err)?;
 
     let schema = docs_schema(dim)?;
-    let state_file = state_path(home, project_id);
-    let mut state = ProjectState::load(&state_file)?;
-    let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
-
     let (col, tokenizer_fallback) = if prefer_cjk {
         (
             open_collection(&db, schema, BuiltinTokenizer::CjkBigram).map_err(core_err)?,
@@ -154,13 +186,6 @@ pub fn open_or_create(
         }
     };
 
-    state.embed_model_id = Some(model_id.to_string());
-    state.dim = Some(dim);
-    if tokenizer_fallback {
-        state.tokenizer_fallback = Some("cjk_bigram".into());
-    }
-    state.save_atomic(&state_file)?;
-
     Ok(ProjectIndex {
         db,
         col,
@@ -168,6 +193,45 @@ pub fn open_or_create(
         model_id: model_id.to_string(),
         tokenizer_fallback,
     })
+}
+
+/// `db` → `db.prev`, `db.new` → `db`, then delete `db.prev`.
+pub fn swap_new_db(home: &Path, project_id: &str) -> Result<(), VaneCliError> {
+    let db = project_db_path(home, project_id);
+    let new = project_db_new_path(home, project_id);
+    let prev = project_db_prev_path(home, project_id);
+    if !new.exists() {
+        return Err(VaneCliError::new(format!(
+            "rebuild swap missing {}",
+            new.display()
+        )));
+    }
+    if prev.exists() {
+        fs::remove_dir_all(&prev).map_err(|e| io_err("remove leftover db.prev", &prev, e))?;
+    }
+    if db.exists() {
+        fs::rename(&db, &prev).map_err(|e| {
+            VaneCliError::new(format!(
+                "rename {} -> {}: {e}",
+                db.display(),
+                prev.display()
+            ))
+        })?;
+    }
+    if let Err(e) = fs::rename(&new, &db) {
+        if prev.exists() && !db.exists() {
+            let _ = fs::rename(&prev, &db);
+        }
+        return Err(VaneCliError::new(format!(
+            "rename {} -> {}: {e}",
+            new.display(),
+            db.display()
+        )));
+    }
+    if prev.exists() {
+        fs::remove_dir_all(&prev).map_err(|e| io_err("remove db.prev after swap", &prev, e))?;
+    }
+    Ok(())
 }
 
 impl ProjectIndex {
