@@ -15,3 +15,4 @@ pub mod live;
 pub mod log;
 pub mod project;
 pub mod sync;
+pub mod watch;
