@@ -113,6 +113,31 @@ fn pid_alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+pub fn is_running(home: &Path) -> bool {
+    UnixStream::connect(socket_path(home)).is_ok()
+}
+
+pub fn stop_daemon(home: &Path) -> Result<(), VaneCliError> {
+    if let Ok(text) = fs::read_to_string(pid_path(home)) {
+        if let Ok(pid) = text.trim().parse::<u32>() {
+            if pid > 1 && pid != std::process::id() && pid_alive(pid) {
+                let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(VaneCliError::new(format!("stop pid {pid}: {err}")));
+                    }
+                }
+            }
+        }
+    }
+    let sock = socket_path(home);
+    if sock.exists() {
+        let _ = fs::remove_file(&sock);
+    }
+    Ok(())
+}
+
 fn write_pid(file: &mut File) -> Result<(), VaneCliError> {
     file.set_len(0)
         .map_err(|e| VaneCliError::new(format!("truncate pid file: {e}")))?;

@@ -17,5 +17,7 @@ pub mod mcp;
 pub mod project;
 pub mod rrf;
 pub mod search;
+pub mod service;
 pub mod sync;
 pub mod watch;
+pub mod wizard;
