@@ -214,6 +214,7 @@ pub fn rebuild_for_new_model_with(
                 let _ = fs::remove_dir_all(&db_new);
             }
             let mut state = ProjectState::load(&state_file).unwrap_or(state);
+            state.rebuild = None;
             state.reindex_error = Some(e.message.clone());
             let _ = state.save_atomic(&state_file);
             Err(e)

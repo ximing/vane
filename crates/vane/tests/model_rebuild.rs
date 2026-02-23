@@ -1,16 +1,21 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde_json::json;
 use vane::cas::Cas;
 use vane::config::{ChunkConfig, EmbedConfig, ResolvedPolicy, TypeRule};
 use vane::embed::{embed_model_id, Embedder, MockEmbedder};
 use vane::error::VaneCliError;
 use vane::index::{doc_id, open_or_create, project_db_path, state_path, ProjectState};
+use vane::ipc;
 use vane::live::LiveSet;
 use vane::project::project_id;
 use vane::sync::{rebuild_for_new_model, rebuild_for_new_model_with, reconcile_project, SyncCtx};
@@ -328,7 +333,7 @@ fn failed_rebuild_leaves_old_db_queryable() {
     let tmp = tempfile_dir();
     assert_isolated(&tmp);
 
-    let (_root, pid, old_dim, old_model) = setup_indexed(&tmp);
+    let (root, pid, old_dim, old_model) = setup_indexed(&tmp);
     let old_idx = open_or_create(&tmp, &pid, old_dim, &old_model).unwrap();
     assert!(old_idx
         .search(&text_query("鉴权"))
@@ -361,6 +366,11 @@ fn failed_rebuild_leaves_old_db_queryable() {
     assert_eq!(state.dim, Some(old_dim), "failed rebuild must not swap dim");
     assert_eq!(state.embed_model_id.as_deref(), Some(old_model.as_str()));
     assert!(
+        state.rebuild.is_none(),
+        "failed rebuild must clear rebuild progress so status is not stuck, got {:?}",
+        state.rebuild
+    );
+    assert!(
         state
             .reindex_error
             .as_deref()
@@ -380,5 +390,333 @@ fn failed_rebuild_leaves_old_db_queryable() {
             .iter()
             .any(|h| h.id == doc_id(&pid, "docs/intro.md", 0)),
         "reopened old db must still search after failed rebuild"
+    );
+
+    // Leftover rebuild progress would make incremental sync refuse the old db.
+    let cas = Cas::new(tmp.join("rag").join("cas"));
+    let embedder = mock_embedder(old_dim);
+    let mut ctx = SyncCtx {
+        home: &tmp,
+        project_id: &pid,
+        cas: &cas,
+        index: &reopened,
+        embedder: &embedder,
+        now: 1_700_000_001,
+    };
+    reconcile_project(&mut ctx, &root, &policy()).expect(
+        "failed rebuild must not leave reconcile_project blocked with \"model rebuild required\"",
+    );
+}
+
+/// Short home path so `$VANE_HOME/run/vane.sock` fits `sockaddr_un` on macOS.
+fn tempfile_dir_sock() -> TempHome {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "vm{}-{n}-{:x}",
+        std::process::id(),
+        (nanos % 0xfff) as u16
+    ));
+    fs::create_dir_all(&path).unwrap();
+    std::env::set_var("VANE_HOME", &path);
+    TempHome { path }
+}
+
+fn fake_user_home(home: &Path) -> PathBuf {
+    let fake = home.join("fake-user-home");
+    fs::create_dir_all(&fake).unwrap();
+    fake
+}
+
+struct FakeOllama {
+    base_url: String,
+    models: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeOllama {
+    fn spawn() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake ollama");
+        let addr = listener.local_addr().expect("local_addr");
+        let models = Arc::new(Mutex::new(Vec::new()));
+        let models_thread = Arc::clone(&models);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let seen = Arc::clone(&models_thread);
+                thread::spawn(move || handle_fake_ollama(stream, &seen));
+            }
+        });
+        Self {
+            base_url: format!("http://{addr}"),
+            models,
+        }
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.models.lock().expect("models").clone()
+    }
+}
+
+fn handle_fake_ollama(mut stream: TcpStream, seen: &Mutex<Vec<String>>) {
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 2048];
+    let headers_end;
+    loop {
+        let n = match stream.read(&mut tmp) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            headers_end = pos + 4;
+            break;
+        }
+        if buf.len() > 64 * 1024 {
+            return;
+        }
+    }
+    let header_text = String::from_utf8_lossy(&buf[..headers_end]);
+    let content_len = header_text
+        .lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            if k.eq_ignore_ascii_case("content-length") {
+                v.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while buf.len().saturating_sub(headers_end) < content_len {
+        let n = match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    let body = &buf[headers_end..buf.len().min(headers_end + content_len)];
+    let model = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    if let Ok(mut models) = seen.lock() {
+        models.push(model.clone());
+    }
+    let dim = if model.contains("8") { 8 } else { 4 };
+    let embedding: Vec<f32> = vec![0.1; dim];
+    let payload = json!({ "embedding": embedding }).to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.flush();
+}
+
+fn write_daemon_config(home: &Path, project: &Path, base_url: &str) {
+    let cfg = home.join("config").join("config.toml");
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[defaults.embed]
+provider = "ollama"
+model = "test"
+base_url = "{base_url}"
+
+[[projects]]
+path = "{}"
+"#,
+            project.display()
+        ),
+    )
+    .unwrap();
+}
+
+fn write_model_overlay(root: &Path, model: &str) {
+    fs::write(
+        root.join(".vane.toml"),
+        format!("[embed]\nmodel = \"{model}\"\n"),
+    )
+    .unwrap();
+}
+
+struct DaemonProcess {
+    child: Child,
+}
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn socket_path(home: &Path) -> PathBuf {
+    home.join("run").join("vane.sock")
+}
+
+fn wait_for_socket(home: &Path, child: &mut Child, timeout: Duration) {
+    let sock = socket_path(home);
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut err = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut err);
+            }
+            panic!("daemon exited early {status}: {err}");
+        }
+        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("daemon socket not ready at {}", sock.display());
+}
+
+fn spawn_daemon(home: &Path) -> DaemonProcess {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    let fake_home = fake_user_home(home);
+    let mut child = Command::new(bin)
+        .args(["daemon", "--home", home.to_str().expect("utf-8 home")])
+        .env("VANE_HOME", home)
+        .env("HOME", &fake_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn vane daemon");
+    wait_for_socket(home, &mut child, Duration::from_secs(8));
+    DaemonProcess { child }
+}
+
+fn daemon_search(home: &Path, root: &Path, query: &str) -> serde_json::Value {
+    ipc::rpc_call(
+        home,
+        "search",
+        json!({
+            "query": query,
+            "root": root.display().to_string(),
+            "top_k": 8
+        }),
+    )
+    .unwrap_or_else(|e| panic!("daemon search failed: {e}"))
+}
+
+fn assert_old_model_hybrid_hit(hits: &serde_json::Value, pid: &str, rel: &str) {
+    let arr = hits
+        .as_array()
+        .unwrap_or_else(|| panic!("hits array, got {hits}"));
+    let want = doc_id(pid, rel, 0);
+    let hit = arr
+        .iter()
+        .find(|h| h["id"] == want)
+        .unwrap_or_else(|| panic!("daemon search must return old-db hit {want}, hits={arr:?}"));
+    assert_eq!(
+        hit["degraded"], false,
+        "daemon search must keep hybrid on the serving (old) model, not degrade to BM25 after overlay/dim mismatch, hit={hit}"
+    );
+}
+
+#[test]
+fn daemon_search_uses_old_model_while_rebuild_runs() {
+    let tmp = tempfile_dir_sock();
+    assert_isolated(&tmp);
+
+    let (root, pid, _old_dim, _old_model) = setup_indexed(&tmp);
+    let fake = FakeOllama::spawn();
+    write_daemon_config(&tmp, &root, &fake.base_url);
+    // Same order as `vane model`: persist the new overlay before swap.
+    write_model_overlay(&root, "test-8");
+
+    let _daemon = spawn_daemon(&tmp);
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel();
+    let embedder = GateEmbedder {
+        dim: 8,
+        started: Mutex::new(Some(started_tx)),
+        go: Mutex::new(Some(go_rx)),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let home = tmp.path.clone();
+    let pid_clone = pid.clone();
+    let handle = thread::spawn(move || {
+        rebuild_for_new_model_with(&home, &pid_clone, &embed_cfg("test-8"), &embedder)
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("rebuild should reach embed while old db is still live");
+
+    let hits = daemon_search(&tmp, &root, "鉴权");
+    assert_old_model_hybrid_hit(&hits, &pid, "docs/auth.md");
+    let searched = fake.models();
+    assert!(
+        searched.iter().any(|m| m == "test") && searched.iter().all(|m| m != "test-8"),
+        "daemon search during rebuild must embed with the old serving model, saw {searched:?}"
+    );
+
+    go_tx.send(()).unwrap();
+    handle.join().expect("rebuild thread").unwrap();
+}
+
+#[test]
+fn daemon_search_keeps_old_model_after_failed_rebuild() {
+    let tmp = tempfile_dir_sock();
+    assert_isolated(&tmp);
+
+    let (root, pid, old_dim, old_model) = setup_indexed(&tmp);
+    let fake = FakeOllama::spawn();
+    write_daemon_config(&tmp, &root, &fake.base_url);
+    write_model_overlay(&root, "test-8");
+
+    let embedder = FailAfterEmbeds {
+        dim: 8,
+        ok_embeds: Mutex::new(1),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let err = rebuild_for_new_model_with(&tmp, &pid, &embed_cfg("test-8"), &embedder).unwrap_err();
+    assert!(
+        err.message.contains("mid-rebuild") || err.message.contains("embed failed"),
+        "expected mid-rebuild embed error, got {}",
+        err.message
+    );
+
+    let state = ProjectState::load(&state_path(&tmp, &pid)).unwrap();
+    assert_eq!(state.dim, Some(old_dim));
+    assert_eq!(state.embed_model_id.as_deref(), Some(old_model.as_str()));
+    assert!(state.rebuild.is_none());
+    assert!(state.reindex_error.is_some());
+
+    let _daemon = spawn_daemon(&tmp);
+    let listed = ipc::rpc_call(&tmp, "list_roots", json!({})).unwrap();
+    let root_st = &listed["roots"][0];
+    assert_eq!(
+        root_st["rebuilding"], false,
+        "status must not stay rebuilding after a failed rebuild, got {root_st}"
+    );
+    assert!(
+        root_st["reindex_error"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()),
+        "status must surface reindex_error, got {root_st}"
+    );
+
+    let hits = daemon_search(&tmp, &root, "鉴权");
+    assert_old_model_hybrid_hit(&hits, &pid, "docs/auth.md");
+    let searched = fake.models();
+    assert!(
+        searched.iter().any(|m| m == "test") && searched.iter().all(|m| m != "test-8"),
+        "daemon search after failed rebuild must embed with the old serving model, saw {searched:?}"
     );
 }
