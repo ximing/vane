@@ -7,6 +7,7 @@ pub mod dirty;
 pub mod embed;
 pub mod error;
 pub mod extract;
+pub mod gc;
 pub mod glob_match;
 pub mod home;
 pub mod index;
