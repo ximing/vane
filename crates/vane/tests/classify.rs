@@ -1,5 +1,7 @@
 use vane::classify::{classify, should_watch_dir, SkipReason};
-use vane::config::{ChunkConfig, EmbedConfig, ResolvedPolicy, TypeRule};
+use vane::config::{
+    default_exclude, default_types, ChunkConfig, EmbedConfig, ResolvedPolicy, TypeRule,
+};
 
 fn policy(exclude: &[&str], types: &[(&str, &str, bool)]) -> ResolvedPolicy {
     ResolvedPolicy {
@@ -55,6 +57,29 @@ fn should_watch_dir_skips_excluded_trees() {
     assert!(!should_watch_dir("secret", &pol));
     assert!(should_watch_dir("docs", &pol));
     assert!(should_watch_dir("app", &pol));
+}
+
+#[test]
+fn default_exclude_and_types_keep_markdown() {
+    let pol = ResolvedPolicy {
+        embed: EmbedConfig {
+            provider: "ollama".into(),
+            model: "nomic-embed-text".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            api_key: None,
+        },
+        chunk: ChunkConfig {
+            split: "markdown".into(),
+            max_chars: 1200,
+            overlap_chars: 200,
+            min_chars: 50,
+        },
+        exclude: default_exclude(),
+        types: default_types(),
+    };
+    assert!(should_watch_dir("docs", &pol), "docs/ must be watched");
+    let rule = classify("docs/auth.md", &pol).expect("docs/auth.md is text");
+    assert_eq!(rule.extractor, "text");
 }
 
 #[test]

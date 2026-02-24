@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
@@ -15,10 +16,13 @@ use crate::cas::Cas;
 use crate::config::{
     load_config, resolve_policy, Config, EmbedConfig, ProjectFile, ResolvedPolicy,
 };
-use crate::embed::{embedder_from_config, serving_embed_config};
+use crate::dirty::{dirty_path, DirtyQueue};
+use crate::embed::{
+    embed_model_id, embedder_from_config, parse_embed_model_id, serving_embed_config,
+};
 use crate::error::VaneCliError;
 use crate::gc::{collect_live_keys, gc_all, gc_project, gc_ttl};
-use crate::index::{open_existing, state_path, ProjectIndex, ProjectState};
+use crate::index::{open_existing, open_or_create, state_path, ProjectIndex, ProjectState};
 use crate::ipc::{
     encode_response, parse_request, RpcRequest, RpcResponse, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
@@ -27,7 +31,7 @@ use crate::live::LiveSet;
 use crate::log::{DailyLogger, Level, NaiveDate};
 use crate::project::{project_id, reject_nested};
 use crate::search::{read_by_id, read_by_path, search_all, search_project, ProjectSearch};
-use crate::sync::rebuild_for_new_model;
+use crate::sync::{rebuild_for_new_model, reconcile_project, SyncCtx};
 use crate::watch::{watch_roots, WatchEvent, WatchGuard};
 
 enum WriterCmd {
@@ -56,6 +60,7 @@ enum WriterCmd {
         resp: Sender<Result<Value, VaneCliError>>,
     },
     TtlGc,
+    ReconcileAll,
     Shutdown,
 }
 
@@ -67,6 +72,8 @@ struct Shared {
     watch_tx: Sender<Vec<WatchEvent>>,
     watch: Mutex<Option<WatchGuard>>,
     last_ttl_date: Mutex<Option<NaiveDate>>,
+    dirty: Mutex<DirtyQueue>,
+    serving: Mutex<HashMap<String, crate::index::ProjectIndex>>,
 }
 
 pub fn socket_path(home: &Path) -> PathBuf {
@@ -81,6 +88,7 @@ pub fn acquire_pid_lock(home: &Path) -> Result<File, VaneCliError> {
     let run = home.join("run");
     fs::create_dir_all(&run)
         .map_err(|e| VaneCliError::new(format!("create run dir {}: {e}", run.display())))?;
+    let _ = fs::set_permissions(&run, fs::Permissions::from_mode(0o700));
     let path = pid_path(home);
     let mut file = OpenOptions::new()
         .read(true)
@@ -170,8 +178,12 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
     if sock.exists() {
         let _ = fs::remove_file(&sock);
     }
+    let old_umask = unsafe { libc::umask(0o077) };
     let listener = UnixListener::bind(&sock)
         .map_err(|e| VaneCliError::new(format!("bind {}: {e}", sock.display())))?;
+    unsafe {
+        libc::umask(old_umask);
+    }
     fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))
         .map_err(|e| VaneCliError::new(format!("chmod socket: {e}")))?;
 
@@ -185,6 +197,8 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
         watch_tx,
         watch: Mutex::new(None),
         last_ttl_date: Mutex::new(None),
+        dirty: Mutex::new(DirtyQueue::load(&dirty_path(&home))),
+        serving: Mutex::new(HashMap::new()),
     });
     let writer_shared = Arc::clone(&shared);
     let writer_thread = thread::Builder::new()
@@ -206,6 +220,7 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
 
     restart_watch(&shared);
     let _ = tx.send(WriterCmd::TtlGc);
+    let _ = tx.send(WriterCmd::ReconcileAll);
 
     let result = accept_loop(&listener, &shared);
     let _ = tx.send(WriterCmd::Shutdown);
@@ -220,7 +235,15 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
 fn accept_loop(listener: &UnixListener, shared: &Arc<Shared>) -> Result<(), VaneCliError> {
     loop {
         match listener.accept() {
-            Ok((stream, _)) => handle_client(stream, shared),
+            Ok((stream, _)) => {
+                let rpc_shared = Arc::clone(shared);
+                if let Err(e) = thread::Builder::new()
+                    .name("vane-rpc".into())
+                    .spawn(move || handle_client(stream, &rpc_shared))
+                {
+                    log_msg(shared, Level::Warn, &format!("spawn rpc thread: {e}"));
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(VaneCliError::new(format!("accept: {e}"))),
         }
@@ -342,7 +365,7 @@ fn handle_search(shared: &Arc<Shared>, params: &Value) -> Result<Value, VaneCliE
     let cfg = lock_config(shared)?.clone();
     let selected = select_projects(&cfg, root_filter, want_all)?;
     let cas = Cas::new(shared.home.join("rag").join("cas"));
-    let opened = open_search_targets(&shared.home, &cfg, &selected, extractor)?;
+    let opened = open_search_targets(shared, &cfg, &selected, extractor)?;
     let scopes: Vec<ProjectSearch<'_>> = opened
         .iter()
         .map(|o| ProjectSearch {
@@ -418,11 +441,12 @@ fn select_projects<'a>(
 }
 
 fn open_search_targets<'a>(
-    home: &Path,
+    shared: &Shared,
     cfg: &Config,
     entries: &[&crate::config::ProjectEntry],
     extractor: Option<&'a str>,
 ) -> Result<Vec<OpenedSearch<'a>>, VaneCliError> {
+    let home = &shared.home;
     let mut out = Vec::new();
     for entry in entries {
         let root = canonical_or_as_is(&entry.path);
@@ -435,11 +459,35 @@ fn open_search_targets<'a>(
             continue;
         };
         let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
-        let index = match open_existing(home, &pid, dim, &model_id, prefer_cjk) {
-            Ok(i) => i,
+        let cached = shared
+            .serving
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&pid).cloned());
+        let index = if let Some(idx) = cached {
+            idx
+        } else {
+            match open_existing(home, &pid, dim, &model_id, prefer_cjk) {
+                Ok(i) => i,
+                Err(e) => {
+                    let db = crate::index::project_db_path(home, &pid);
+                    log_msg(
+                        shared,
+                        Level::Warn,
+                        &format!(
+                            "open {pid} for search: {e} (db={} exists={})",
+                            db.display(),
+                            db.is_dir()
+                        ),
+                    );
+                    continue;
+                }
+            }
+        };
+        let pf = match load_project_file(&root) {
+            Ok(v) => v,
             Err(_) => continue,
         };
-        let pf = read_project_file(&root);
         let policy = match resolve_policy(cfg, &root, pf.as_ref()) {
             Ok(p) => p,
             Err(_) => continue,
@@ -447,11 +495,15 @@ fn open_search_targets<'a>(
         let embed_cfg =
             serving_embed_config(&policy.embed, &model_id, state.embed_base_url.as_deref());
         let live = LiveSet::load_for_project(home, &pid)?;
+        let root_key = state
+            .root_path
+            .clone()
+            .unwrap_or_else(|| root.to_string_lossy().into_owned());
         out.push(OpenedSearch {
             index,
             embedder: embedder_from_config(&embed_cfg),
             live,
-            root: root.to_string_lossy().into_owned(),
+            root: root_key,
             extractor,
         });
     }
@@ -548,7 +600,8 @@ fn handle_list_roots(shared: &Arc<Shared>) -> Result<Value, VaneCliError> {
             "model": state.embed_model_id,
             "dim": state.dim,
             "live_files": live.files.len(),
-            "last_reconcile": Value::Null,
+            "last_reconcile": state.last_reconcile,
+            "tokenizer_fallback": state.tokenizer_fallback,
             "rebuilding": state.rebuild.is_some(),
             "rebuild": state.rebuild,
             "reindex_error": state.reindex_error,
@@ -711,7 +764,13 @@ fn do_rebuild(
     let expanded = expand_tilde(root);
     let canon = expanded.canonicalize().unwrap_or_else(|_| expanded.clone());
     let pid = project_id(&canon);
-    let pf = read_project_file(&canon);
+    let pf = match load_project_file(&canon) {
+        Ok(v) => v,
+        Err(e) => {
+            log_msg(shared, Level::Error, &e.message);
+            return Err(e);
+        }
+    };
     let mut policy = resolve_policy(&cfg, &canon, pf.as_ref())?;
     if !embed_over.provider.is_empty() {
         policy.embed.provider = embed_over.provider.clone();
@@ -726,6 +785,7 @@ fn do_rebuild(
         policy.embed.api_key = embed_over.api_key.clone();
     }
     rebuild_for_new_model(&shared.home, &pid, &policy.embed)?;
+    let _ = reconcile_root(shared, &canon);
     log_msg(
         shared,
         Level::Info,
@@ -780,6 +840,9 @@ fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
             WriterCmd::TtlGc => {
                 // `maybe_run_ttl` above runs once per local calendar day.
             }
+            WriterCmd::ReconcileAll => {
+                reconcile_all(&shared);
+            }
         }
     }
 }
@@ -798,6 +861,13 @@ fn handle_watch_batch(shared: &Shared, events: Vec<WatchEvent>) {
     );
     if reload {
         let _ = do_reload(shared);
+        return;
+    }
+    let roots: BTreeSet<PathBuf> = events.into_iter().map(|e| e.root).collect();
+    for root in roots {
+        if let Err(e) = reconcile_root(shared, &root) {
+            log_msg(shared, Level::Warn, &e.message);
+        }
     }
 }
 
@@ -810,6 +880,7 @@ fn do_reload(shared: &Shared) -> Result<Value, VaneCliError> {
     }
     reopen_logger(shared, retain);
     restart_watch(shared);
+    reconcile_all(shared);
     log_msg(shared, Level::Info, "config reloaded");
     Ok(json!({ "ok": true }))
 }
@@ -831,6 +902,9 @@ fn do_add_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
         Ok(())
     })?;
     restart_watch(shared);
+    if let Err(e) = reconcile_root(shared, &canon) {
+        log_msg(shared, Level::Warn, &e.message);
+    }
     log_msg(
         shared,
         Level::Info,
@@ -935,7 +1009,10 @@ fn collect_watch_targets(cfg: &Config) -> Vec<(PathBuf, ResolvedPolicy)> {
         if !root.is_dir() {
             continue;
         }
-        let pf = read_project_file(&root);
+        let pf = match load_project_file(&root) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         match resolve_policy(cfg, &root, pf.as_ref()) {
             Ok(pol) => out.push((root, pol)),
             Err(_) => continue,
@@ -944,10 +1021,163 @@ fn collect_watch_targets(cfg: &Config) -> Vec<(PathBuf, ResolvedPolicy)> {
     out
 }
 
-fn read_project_file(root: &Path) -> Option<ProjectFile> {
+fn load_project_file(root: &Path) -> Result<Option<ProjectFile>, VaneCliError> {
     let path = root.join(".vane.toml");
-    let text = fs::read_to_string(path).ok()?;
-    ProjectFile::parse_toml(&text).ok()
+    match fs::read_to_string(&path) {
+        Ok(text) => ProjectFile::parse_toml(&text)
+            .map(Some)
+            .map_err(|e| VaneCliError::new(format!("{}: {e}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(VaneCliError::new(format!("read {}: {e}", path.display()))),
+    }
+}
+
+fn reconcile_all(shared: &Shared) {
+    let projects = match lock_config(shared) {
+        Ok(cfg) => cfg.projects.clone(),
+        Err(e) => {
+            log_msg(shared, Level::Warn, &e.message);
+            return;
+        }
+    };
+    for proj in projects {
+        if let Err(e) = reconcile_root(shared, &proj.path) {
+            log_msg(shared, Level::Warn, &e.message);
+        }
+    }
+    save_dirty(shared);
+}
+
+fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
+    let cfg = lock_config(shared)?.clone();
+    let expanded = expand_tilde(root);
+    let canon = match expanded.canonicalize() {
+        Ok(p) if p.is_dir() => p,
+        Ok(p) => {
+            log_msg(
+                shared,
+                Level::Warn,
+                &format!("skip root, not a directory: {}", p.display()),
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            log_msg(
+                shared,
+                Level::Warn,
+                &format!("canonicalize {}: {e}", expanded.display()),
+            );
+            return Ok(());
+        }
+    };
+    let pid = project_id(&canon);
+    let pf = match load_project_file(&canon) {
+        Ok(v) => v,
+        Err(e) => {
+            log_msg(shared, Level::Error, &e.message);
+            return Ok(());
+        }
+    };
+    let policy = match resolve_policy(&cfg, &canon, pf.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
+            log_msg(shared, Level::Warn, &e.message);
+            return Ok(());
+        }
+    };
+    let state = ProjectState::load(&state_path(&shared.home, &pid))?;
+    if let (Some(dim), Some(model_id)) = (state.dim, state.embed_model_id.clone()) {
+        let rebuild_pending = match parse_embed_model_id(&model_id) {
+            Some((prov, model, _)) => {
+                prov != policy.embed.provider.as_str() || model != policy.embed.model.as_str()
+            }
+            None => false,
+        };
+        if rebuild_pending {
+            let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
+            match open_existing(&shared.home, &pid, dim, &model_id, prefer_cjk) {
+                Ok(idx) => {
+                    if let Ok(mut serving) = shared.serving.lock() {
+                        serving.insert(pid, idx);
+                    }
+                    log_msg(
+                        shared,
+                        Level::Info,
+                        &format!("serving {model_id} until rebuild finishes"),
+                    );
+                }
+                Err(e) => log_msg(
+                    shared,
+                    Level::Warn,
+                    &format!("open serving index {pid}: {e}"),
+                ),
+            }
+            return Ok(());
+        }
+    }
+    let embedder = embedder_from_config(&policy.embed);
+    let dim = match embedder.probe_dim() {
+        Ok(d) => d,
+        Err(e) => {
+            log_msg(
+                shared,
+                Level::Warn,
+                &format!("embed probe {}: {e}", canon.display()),
+            );
+            return Ok(());
+        }
+    };
+    let model_id = embed_model_id(&policy.embed.provider, &policy.embed.model, dim);
+    let cas = Cas::new(shared.home.join("rag").join("cas"));
+    let idx = match open_or_create(&shared.home, &pid, dim, &model_id) {
+        Ok(i) => i,
+        Err(e) => {
+            log_msg(shared, Level::Warn, &format!("open index {pid}: {e}"));
+            return Ok(());
+        }
+    };
+    let now = unix_now();
+    let result = {
+        let mut dirty = shared
+            .dirty
+            .lock()
+            .map_err(|_| VaneCliError::new("dirty lock poisoned"))?;
+        let mut ctx = SyncCtx {
+            home: &shared.home,
+            project_id: &pid,
+            cas: &cas,
+            index: &idx,
+            embedder: embedder.as_ref(),
+            now,
+            dirty: Some(&mut dirty),
+        };
+        reconcile_project(&mut ctx, &canon, &policy)
+    };
+    match result {
+        Ok(report) => log_msg(
+            shared,
+            Level::Info,
+            &format!(
+                "reconcile {pid} scanned={} added={} deleted={} unchanged={} embedded={}",
+                report.scanned, report.added, report.deleted, report.unchanged, report.embedded
+            ),
+        ),
+        Err(e) => log_msg(shared, Level::Warn, &format!("reconcile {pid}: {e}")),
+    }
+    if let Ok(mut serving) = shared.serving.lock() {
+        serving.insert(pid, idx);
+    }
+    save_dirty(shared);
+    Ok(())
+}
+
+fn save_dirty(shared: &Shared) {
+    let Ok(dirty) = shared.dirty.lock() else {
+        return;
+    };
+    if let Err(e) = dirty.save(&dirty_path(&shared.home)) {
+        log_msg(shared, Level::Warn, &e.message);
+    }
 }
 
 fn reopen_logger(shared: &Shared, retain_days: u32) {

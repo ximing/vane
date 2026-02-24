@@ -31,6 +31,18 @@ pub struct ProjectIndex {
     tokenizer_fallback: bool,
 }
 
+impl Clone for ProjectIndex {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            col: self.col.clone(),
+            dim: self.dim,
+            model_id: self.model_id.clone(),
+            tokenizer_fallback: self.tokenizer_fallback,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +59,8 @@ pub struct ProjectState {
     /// Query embedding restores this while a new overlay is waiting to swap (§7.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconcile: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuild: Option<RebuildProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -341,6 +355,17 @@ impl ProjectIndex {
         }
         self.compact()?;
         Ok(true)
+    }
+
+    /// Live / tombstoned counts from `Db::stats` after a flush.
+    pub fn live_and_tombstoned(&self) -> (u64, u64) {
+        self.db
+            .stats()
+            .collections
+            .into_iter()
+            .find(|c| c.name == COLLECTION_NAME)
+            .map(|c| (c.live_docs, c.tombstoned_docs))
+            .unwrap_or((0, 0))
     }
 
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<Hit>, VaneCliError> {

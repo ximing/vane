@@ -151,6 +151,7 @@ fn new_file_embeds_once_second_reconcile_is_noop() {
         index: &idx,
         embedder: &embedder,
         now: 1_700_000_000,
+        dirty: None,
     };
 
     let first = reconcile_project(&mut ctx, &root, &policy()).unwrap();
@@ -196,6 +197,7 @@ fn delete_removes_from_search() {
         index: &idx,
         embedder: &embedder,
         now: 1_700_000_000,
+        dirty: None,
     };
 
     reconcile_project(&mut ctx, &root, &policy()).unwrap();
@@ -234,6 +236,7 @@ fn rename_does_not_embed() {
         index: &idx,
         embedder: &embedder,
         now: 1_700_000_000,
+        dirty: None,
     };
 
     let first = reconcile_project(&mut ctx, &root, &policy()).unwrap();
@@ -250,6 +253,7 @@ fn rename_does_not_embed() {
         index: &idx,
         embedder: &panic_embedder,
         now: 1_700_000_001,
+        dirty: None,
     };
     let renamed = reconcile_project(&mut ctx, &root, &policy()).unwrap();
     assert_eq!(renamed.embedded, 0, "rename must reuse embed CAS");
@@ -297,6 +301,7 @@ fn model_mismatch_requires_rebuild() {
         index: &idx,
         embedder: &embedder,
         now: 1_700_000_000,
+        dirty: None,
     };
     let err = reconcile_project(&mut ctx, &root, &policy()).unwrap_err();
     assert!(

@@ -29,6 +29,7 @@ pub struct SyncCtx<'a> {
     pub index: &'a ProjectIndex,
     pub embedder: &'a dyn crate::embed::Embedder,
     pub now: u64,
+    pub dirty: Option<&'a mut crate::dirty::DirtyQueue>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +39,7 @@ pub struct SyncReport {
     pub unchanged: u64,
     pub embedded: u64,
     pub cas_hits: u64,
+    pub scanned: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -71,7 +73,10 @@ pub fn reconcile_project(
     let on_disk = collect_files(&root_canon, policy)?;
     let live = LiveSet::load_for_project(ctx.home, ctx.project_id)?;
 
-    let mut report = SyncReport::default();
+    let mut report = SyncReport {
+        scanned: on_disk.len() as u64,
+        ..SyncReport::default()
+    };
     let mut new_live = LiveSet::default();
     let mut to_add = Vec::new();
     let mut to_delete = Vec::new();
@@ -107,7 +112,18 @@ pub fn reconcile_project(
             Err(e) => return Err(e),
         };
 
-        let embedded = embed_docs(ctx, model_id, &docs, ctx.index.dim())?;
+        let embedded = match embed_docs(ctx, model_id, &docs, ctx.index.dim()) {
+            Ok(e) => e,
+            Err(_) => {
+                if let Some(dirty) = ctx.dirty.as_mut() {
+                    dirty.push(ctx.project_id, rel);
+                }
+                continue;
+            }
+        };
+        if let Some(dirty) = ctx.dirty.as_mut() {
+            dirty.clear(ctx.project_id, rel);
+        }
         report.embedded += embedded.n_embed;
         ctx.cas.touch(&ek, &embedded.keys, ctx.now);
 
@@ -259,6 +275,7 @@ fn rebuild_into_new(
         index: &new_index,
         embedder,
         now,
+        dirty: None,
     };
 
     let mut report = RebuildReport::default();
@@ -418,6 +435,12 @@ fn persist_root_state(
     let mut state = ProjectState::load(&path)?;
     state.root_path = Some(root_str.to_string());
     state.chunk_strategy_id = Some(strategy_id.to_string());
+    state.embed_model_id = Some(ctx.index.model_id().to_string());
+    state.dim = Some(ctx.index.dim());
+    state.last_reconcile = Some(ctx.now);
+    if ctx.index.tokenizer_fallback() {
+        state.tokenizer_fallback = Some("cjk_bigram".into());
+    }
     if state.embed_base_url.as_deref().unwrap_or("").is_empty() && !embed_base_url.is_empty() {
         state.embed_base_url = Some(embed_base_url.to_string());
     }
