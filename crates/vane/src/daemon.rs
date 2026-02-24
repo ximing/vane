@@ -18,7 +18,7 @@ use crate::config::{
 use crate::embed::{embedder_from_config, serving_embed_config};
 use crate::error::VaneCliError;
 use crate::gc::{collect_live_keys, gc_all, gc_project, gc_ttl};
-use crate::index::{open_or_create_at, project_db_path, state_path, ProjectIndex, ProjectState};
+use crate::index::{open_existing, state_path, ProjectIndex, ProjectState};
 use crate::ipc::{
     encode_response, parse_request, RpcRequest, RpcResponse, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
@@ -434,21 +434,18 @@ fn open_search_targets<'a>(
         let (Some(dim), Some(model_id)) = (state.dim, state.embed_model_id.clone()) else {
             continue;
         };
-        if !project_db_path(home, &pid).exists() {
-            continue;
-        }
         let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
-        let index =
-            match open_or_create_at(&project_db_path(home, &pid), dim, &model_id, prefer_cjk) {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
+        let index = match open_existing(home, &pid, dim, &model_id, prefer_cjk) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
         let pf = read_project_file(&root);
         let policy = match resolve_policy(cfg, &root, pf.as_ref()) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let embed_cfg = serving_embed_config(&policy.embed, &model_id);
+        let embed_cfg =
+            serving_embed_config(&policy.embed, &model_id, state.embed_base_url.as_deref());
         let live = LiveSet::load_for_project(home, &pid)?;
         out.push(OpenedSearch {
             index,

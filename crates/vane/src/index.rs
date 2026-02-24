@@ -3,6 +3,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,10 @@ pub struct ProjectState {
     pub chunk_strategy_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_fallback: Option<String>,
+    /// Base URL that produced the collection currently on disk (`db/` or `db.prev`).
+    /// Query embedding restores this while a new overlay is waiting to swap (§7.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuild: Option<RebuildProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +164,64 @@ pub fn open_or_create_at(
     prefer_cjk: bool,
 ) -> Result<ProjectIndex, VaneCliError> {
     fs::create_dir_all(db_dir).map_err(|e| io_err("create project db dir", db_dir, e))?;
+    open_at(db_dir, dim, model_id, prefer_cjk)
+}
+
+/// Open the serving collection for search/read. Never creates `db/`.
+///
+/// Mid-swap (`db` → `db.prev`, `db.new` → `db`) a query must not `mkdir`
+/// an empty `db/` — that would make `rename(db.new, db)` fail and skip
+/// rollback. If `db/` is missing or does not match `dim`/`model_id`, retry
+/// briefly and open `db.prev` when present.
+pub fn open_existing(
+    home: &Path,
+    project_id: &str,
+    dim: u32,
+    model_id: &str,
+    prefer_cjk: bool,
+) -> Result<ProjectIndex, VaneCliError> {
+    const ATTEMPTS: u32 = 8;
+    const DELAY: Duration = Duration::from_millis(15);
+    let db = project_db_path(home, project_id);
+    let prev = project_db_prev_path(home, project_id);
+    let mut last = VaneCliError::new(format!(
+        "no existing collection at {} or {}",
+        db.display(),
+        prev.display()
+    ));
+    for i in 0..ATTEMPTS {
+        if is_populated_dir(&db) {
+            match open_at(&db, dim, model_id, prefer_cjk) {
+                Ok(idx) => return Ok(idx),
+                Err(e) => last = e,
+            }
+        }
+        if is_populated_dir(&prev) {
+            match open_at(&prev, dim, model_id, prefer_cjk) {
+                Ok(idx) => return Ok(idx),
+                Err(e) => last = e,
+            }
+        }
+        if i + 1 < ATTEMPTS {
+            thread::sleep(DELAY);
+        }
+    }
+    Err(last)
+}
+
+fn is_populated_dir(path: &Path) -> bool {
+    path.is_dir()
+        && fs::read_dir(path)
+            .ok()
+            .is_some_and(|mut it| it.next().is_some())
+}
+
+fn open_at(
+    db_dir: &Path,
+    dim: u32,
+    model_id: &str,
+    prefer_cjk: bool,
+) -> Result<ProjectIndex, VaneCliError> {
     let db_path = db_dir
         .to_str()
         .ok_or_else(|| VaneCliError::new(format!("db path is not utf-8: {}", db_dir.display())))?;
@@ -195,7 +259,8 @@ pub fn open_or_create_at(
     })
 }
 
-/// `db` → `db.prev`, `db.new` → `db`, then delete `db.prev`.
+/// `db` → `db.prev`, `db.new` → `db`. Leaves `db.prev` so the caller can
+/// update `state.json` first, then delete prev (§7.4).
 pub fn swap_new_db(home: &Path, project_id: &str) -> Result<(), VaneCliError> {
     let db = project_db_path(home, project_id);
     let new = project_db_new_path(home, project_id);
@@ -228,8 +293,15 @@ pub fn swap_new_db(home: &Path, project_id: &str) -> Result<(), VaneCliError> {
             db.display()
         )));
     }
+    Ok(())
+}
+
+/// Delete `db.prev` after `state.json` has the new embed_model_id/dim.
+pub fn remove_db_prev(home: &Path, project_id: &str) -> Result<(), VaneCliError> {
+    let prev = project_db_prev_path(home, project_id);
     if prev.exists() {
-        fs::remove_dir_all(&prev).map_err(|e| io_err("remove db.prev after swap", &prev, e))?;
+        fs::remove_dir_all(&prev)
+            .map_err(|e| io_err("remove db.prev after state update", &prev, e))?;
     }
     Ok(())
 }

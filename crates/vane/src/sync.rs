@@ -15,8 +15,8 @@ use crate::embed::{embed_model_id, embedder_from_config};
 use crate::error::VaneCliError;
 use crate::extract::{extract_image, extract_text, CanonicalDoc, IMAGE_MAX_BYTES, TEXT_MAX_BYTES};
 use crate::index::{
-    doc_id, index_doc, open_or_create_at, project_db_new_path, state_path, swap_new_db,
-    ProjectIndex, ProjectState, RebuildProgress,
+    doc_id, index_doc, open_or_create_at, project_db_new_path, remove_db_prev, state_path,
+    swap_new_db, ProjectIndex, ProjectState, RebuildProgress,
 };
 use crate::live::{LiveFile, LiveSet};
 
@@ -153,7 +153,7 @@ pub fn reconcile_project(
         new_live.save_for_project(ctx.home, ctx.project_id)?;
     }
 
-    persist_root_state(ctx, &root_str, &strategy_id)?;
+    persist_root_state(ctx, &root_str, &strategy_id, &policy.embed.base_url)?;
     Ok(report)
 }
 
@@ -203,9 +203,12 @@ pub fn rebuild_for_new_model_with(
             let mut state = ProjectState::load(&state_file)?;
             state.embed_model_id = Some(model_id);
             state.dim = Some(dim);
+            state.embed_base_url = Some(new_cfg.base_url.clone());
             state.rebuild = None;
             state.reindex_error = None;
             state.save_atomic(&state_file)?;
+            // §7.4: delete prev only after state.json has the new model/dim.
+            let _ = remove_db_prev(home, project_id);
             Ok(report)
         }
         Err(e) => {
@@ -409,11 +412,15 @@ fn persist_root_state(
     ctx: &SyncCtx<'_>,
     root_str: &str,
     strategy_id: &str,
+    embed_base_url: &str,
 ) -> Result<(), VaneCliError> {
     let path = state_path(ctx.home, ctx.project_id);
     let mut state = ProjectState::load(&path)?;
     state.root_path = Some(root_str.to_string());
     state.chunk_strategy_id = Some(strategy_id.to_string());
+    if state.embed_base_url.as_deref().unwrap_or("").is_empty() && !embed_base_url.is_empty() {
+        state.embed_base_url = Some(embed_base_url.to_string());
+    }
     state.save_atomic(&path)
 }
 
