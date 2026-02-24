@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vane::cas::Cas;
 use vane::config::load_config;
 use vane::extract::CanonicalDoc;
-use vane::gc::{gc_project, gc_ttl, LiveKeySet};
+use vane::gc::{gc_all, gc_project, gc_ttl, LiveKeySet};
 use vane::index::{project_db_prev_path, project_dir, state_path, ProjectState};
-use vane::live::{LiveFile, LiveSet};
+use vane::live::{live_path, LiveFile, LiveSet};
 use vane::project::project_id;
 
 const DAY: u64 = 86_400;
@@ -157,7 +157,7 @@ fn gc_project_keeps_shared_extract_key() {
     write_live(&home, &pid_a, None);
     write_live(&home, &pid_b, Some(k));
 
-    let report = gc_project(&home, &root_a, &lives_from(&[k]), &cas);
+    let report = gc_project(&home, &root_a, &lives_from(&[k]), &cas).unwrap();
     assert_eq!(report.extract_deleted, 0, "B still pins shared extract {k}");
     assert!(
         cas.get_extract(k).is_some(),
@@ -189,7 +189,7 @@ fn gc_project_deletes_unreferenced_extract_immediately() {
     fs::create_dir_all(&prev).unwrap();
     fs::write(prev.join("stale"), b"old").unwrap();
 
-    let report = gc_project(&home, &root_a, &lives_from(&[]), &cas);
+    let report = gc_project(&home, &root_a, &lives_from(&[]), &cas).unwrap();
     assert!(
         report.extract_deleted >= 1,
         "unreferenced extract must be deleted immediately"
@@ -258,7 +258,7 @@ fn gc_never_deletes_user_source_files() {
     seed_cas(&cas, "src-k", "src-e", 1);
     write_live(&home, &pid, None);
 
-    let _ = gc_project(&home, &root, &lives_from(&[]), &cas);
+    let _ = gc_project(&home, &root, &lives_from(&[]), &cas).unwrap();
     assert!(
         src.is_file(),
         "gc must never delete files under the project source root"
@@ -282,4 +282,112 @@ fn cas_retain_days_zero_rejected_at_config_load() {
         "got {}",
         err.message
     );
+}
+
+#[test]
+fn gc_all_fail_closed_when_config_unreadable() {
+    let home = tempfile_dir();
+    let root = make_root(&home, "a");
+    write_config(&home, &[&root]);
+    let pid = project_id(&root);
+    write_state(&home, &pid, &root);
+
+    let cas = Cas::new(home.join("rag").join("cas"));
+    let k = "pinned-extract-k";
+    let embed = "pinned-embed-k";
+    seed_cas(&cas, k, embed, 1_700_000_000);
+    write_live(&home, &pid, Some(k));
+
+    let leftover = project_dir(&home, "leftover-unregistered");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("marker"), b"keep").unwrap();
+
+    fs::write(home.join("config").join("config.toml"), "not toml [[[").unwrap();
+
+    let err = gc_all(&home, &cas).expect_err("gc_all must fail closed if config cannot be read");
+    assert!(
+        !err.message.is_empty(),
+        "fail-closed error should explain why live union was not built"
+    );
+    assert!(
+        cas.get_extract(k).is_some(),
+        "fail-open empty live would wipe every extract"
+    );
+    assert!(
+        cas.get_embed(embed).is_some(),
+        "fail-open empty live would wipe every embed"
+    );
+    assert!(
+        project_dir(&home, &pid).exists(),
+        "registered project dir must survive unreadable config"
+    );
+    assert!(
+        leftover.join("marker").is_file(),
+        "leftover project dir must survive unreadable config"
+    );
+}
+
+#[test]
+fn gc_all_fail_closed_when_one_live_json_unreadable() {
+    let home = tempfile_dir();
+    let root_a = make_root(&home, "a");
+    let root_b = make_root(&home, "b");
+    write_config(&home, &[&root_a, &root_b]);
+    let pid_a = project_id(&root_a);
+    let pid_b = project_id(&root_b);
+    write_state(&home, &pid_a, &root_a);
+    write_state(&home, &pid_b, &root_b);
+
+    let cas = Cas::new(home.join("rag").join("cas"));
+    let k = "shared-live-k";
+    let embed = "shared-live-e";
+    seed_cas(&cas, k, embed, 1_700_000_000);
+    write_live(&home, &pid_a, Some(k));
+    write_live(&home, &pid_b, Some(k));
+    fs::write(live_path(&home, &pid_b), "{not-json").unwrap();
+
+    let err =
+        gc_all(&home, &cas).expect_err("gc_all must fail closed if one live.json cannot be read");
+    assert!(
+        err.message.contains("live.json") || err.message.contains("parse"),
+        "got {}",
+        err.message
+    );
+    assert!(
+        cas.get_extract(k).is_some(),
+        "partial live union must not wipe CAS"
+    );
+    assert!(cas.get_embed(embed).is_some());
+    assert!(project_dir(&home, &pid_a).exists());
+    assert!(project_dir(&home, &pid_b).exists());
+}
+
+#[test]
+fn gc_project_fail_closed_when_config_unreadable() {
+    let home = tempfile_dir();
+    let root = make_root(&home, "docs");
+    write_config(&home, &[&root]);
+    let pid = project_id(&root);
+    write_state(&home, &pid, &root);
+
+    let cas = Cas::new(home.join("rag").join("cas"));
+    let k = "project-extract-k";
+    let embed = "project-embed-k";
+    seed_cas(&cas, k, embed, 1_700_000_000);
+    write_live(&home, &pid, Some(k));
+
+    fs::write(home.join("config").join("config.toml"), "[[[bad").unwrap();
+
+    gc_project(&home, &root, &lives_from(&[]), &cas)
+        .expect_err("gc_project must fail closed if config cannot be read");
+    assert!(
+        project_dir(&home, &pid).exists(),
+        "unreadable config must not treat a registered project as leftover"
+    );
+    assert!(
+        cas.get_extract(k).is_some(),
+        "must not sweep CAS when live union cannot be confirmed"
+    );
+    assert!(cas.get_embed(embed).is_some());
+    assert!(root.join("notes.md").is_file());
 }

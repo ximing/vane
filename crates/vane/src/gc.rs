@@ -89,12 +89,19 @@ pub fn gc_unreferenced(cas: &Cas, live_keys: &LiveKeySet) -> GcReport {
 ///
 /// Never deletes files under the project source root. If `root` is no longer registered but
 /// `state.json` still records that `root_path`, the leftover `projects/<id>/` directory is removed.
-pub fn gc_project(home: &Path, root: &Path, all_lives: &LiveKeySet, cas: &Cas) -> GcReport {
+///
+/// Fails closed if config cannot be read: no leftover-dir delete and no CAS sweep.
+pub fn gc_project(
+    home: &Path,
+    root: &Path,
+    all_lives: &LiveKeySet,
+    cas: &Cas,
+) -> Result<GcReport, VaneCliError> {
     let mut report = GcReport::default();
     let expanded = expand_root(root);
     let pid = project_id(&expanded);
 
-    if project_is_registered(home, &expanded) {
+    if project_is_registered(home, &expanded)? {
         report.merge(compact_and_drop_prev(home, &pid));
     } else if state_root_matches(home, &pid, &expanded) {
         let dir = project_dir(home, &pid);
@@ -107,14 +114,16 @@ pub fn gc_project(home: &Path, root: &Path, all_lives: &LiveKeySet, cas: &Cas) -
     }
 
     report.merge(gc_unreferenced(cas, all_lives));
-    report
+    Ok(report)
 }
 
 /// Compact every registered project, drop leftover `projects/<id>/` after `rm`, then orphan CAS.
-pub fn gc_all(home: &Path, cas: &Cas) -> GcReport {
+///
+/// Fails closed if the live union cannot be built (unreadable config or any live.json).
+pub fn gc_all(home: &Path, cas: &Cas) -> Result<GcReport, VaneCliError> {
     let mut report = GcReport::default();
-    let live = collect_live_keys(home, cas).unwrap_or_default();
-    let registered = registered_project_ids(home);
+    let live = collect_live_keys(home, cas)?;
+    let registered = registered_project_ids(home)?;
 
     for pid in &registered {
         report.merge(compact_and_drop_prev(home, pid));
@@ -132,7 +141,7 @@ pub fn gc_all(home: &Path, cas: &Cas) -> GcReport {
         }
     }
     report.merge(gc_unreferenced(cas, &live));
-    report
+    Ok(report)
 }
 
 /// Union of extract/embed keys still referenced by **registered** projects.
@@ -242,22 +251,19 @@ fn compact_and_drop_prev(home: &Path, project_id: &str) -> GcReport {
     report
 }
 
-fn project_is_registered(home: &Path, root: &Path) -> bool {
-    let Ok(cfg) = load_config(home) else {
-        return false;
-    };
+fn project_is_registered(home: &Path, root: &Path) -> Result<bool, VaneCliError> {
+    let cfg = load_config(home)?;
     let want = expand_root(root);
-    cfg.projects.iter().any(|p| expand_root(&p.path) == want)
+    Ok(cfg.projects.iter().any(|p| expand_root(&p.path) == want))
 }
 
-fn registered_project_ids(home: &Path) -> BTreeSet<String> {
-    let Ok(cfg) = load_config(home) else {
-        return BTreeSet::new();
-    };
-    cfg.projects
+fn registered_project_ids(home: &Path) -> Result<BTreeSet<String>, VaneCliError> {
+    let cfg = load_config(home)?;
+    Ok(cfg
+        .projects
         .iter()
         .map(|p| project_id(&expand_root(&p.path)))
-        .collect()
+        .collect())
 }
 
 fn list_on_disk_project_ids(home: &Path) -> Vec<String> {
