@@ -43,6 +43,11 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
+    # CDLA-Permissive-2.0 = Community Data License Agreement Permissive 2.0
+    # (Linux Foundation). webpki-roots (Mozilla CA bundle, via ureq `tls` →
+    # rustls) uses this license. Sidecar HTTP client is rustls-only; do not
+    # allow the OpenSSL *license* or the openssl crate.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 # cargo-deny 0.18+ 对 allow 列表中未匹配的 license 报 warning（默认 Warn，
