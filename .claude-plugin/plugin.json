@@ -1,0 +1,19 @@
+{
+  "name": "vane",
+  "description": "Vane sidecar skill: local RAG via the vane CLI and MCP (list_roots, search, read)",
+  "version": "0.3.0",
+  "author": {
+    "name": "ximing"
+  },
+  "homepage": "https://github.com/ximing/vane",
+  "repository": "https://github.com/ximing/vane",
+  "license": "Apache-2.0",
+  "keywords": [
+    "vane",
+    "rag",
+    "mcp",
+    "search",
+    "sidecar",
+    "skills"
+  ]
+}

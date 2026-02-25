@@ -91,4 +91,4 @@ examples/vite/
 }
 ```
 
-`npm install` 时 npm 创建 symlink 指向本地目录。发版后可改为常规版本号 `"@vane-rs/web": "^0.2.0"`。
+`npm install` 时 npm 创建 symlink 指向本地目录。发版后可改为常规版本号 `"@vane-rs/web": "^0.3.0"`。
