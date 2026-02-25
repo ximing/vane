@@ -141,6 +141,12 @@ export default function QuickStart() {
           and the browser. This page walks through install → open → index → search on each
           runtime.
         </p>
+        <Callout type="note" title="Local folders and agents">
+          To index directories on disk and search them from Claude / Cursor without embedding
+          Vane in your own app, use the{' '}
+          <Link to="/guides/sidecar">sidecar CLI</Link> instead (
+          <code>vane init</code> → <code>vane mcp</code>).
+        </Callout>
 
         <h2 id="choose-your-runtime">Choose your runtime</h2>
         <p>

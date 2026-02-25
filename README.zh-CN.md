@@ -32,6 +32,7 @@ Tantivy 级别的文本检索、一体化混合排序，收在一个库里。
 - [功能](#功能)
 - [安装](#安装)
   - [Node.js](#nodejs) · [Go](#go) · [浏览器](#浏览器) · [从源码构建](#从源码构建)
+- [本机侧车 CLI](#本机侧车-cli)
 - [快速开始](#快速开始)
   - [Node.js](#快速开始nodejs) · [Go](#快速开始go) · [浏览器](#快速开始浏览器)
 - [API 参考](#api-参考)
@@ -139,6 +140,9 @@ bash scripts/build-wasm-variants.sh
 # 构建全部
 cargo build --release --workspace
 
+# 只构建侧车 CLI
+cargo build --release -p vane
+
 # CI 使用的完整测试 + 质量门禁
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -147,6 +151,60 @@ cargo test --workspace --all-features
 # WASM 基线（core 必须不含 std::fs / mmap）
 cargo check --target wasm32-unknown-unknown -p vane-core
 ```
+
+## 本机侧车 CLI
+
+检索库本身仍然不生成 embedding。可选的 **`vane` CLI**（`crates/vane`）是叠在上面的本机侧车：
+一个守护进程盯你登记的文件夹，做 markdown/纯文本切片（可选图片元数据），调用 Ollama 或
+OpenAI 兼容 embedding 接口，人用 `vane query` 检索，Agent 走 MCP。
+
+第一版只支持 macOS 与 Linux（Unix socket + launchd / systemd --user），不做 Windows 服务。
+
+**安装**（`v*` GitHub Release 提供 Linux x86_64、macOS arm64、macOS x86_64 预编译）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-cli.sh | sh
+# 安装到 ~/.local/bin/vane（PREFIX=/usr/local 可改）
+```
+
+从源码：
+
+```bash
+cargo install --path crates/vane --locked --force
+# 或不克隆仓库：
+cargo install --git https://github.com/ximing/vane.git --locked --bin vane
+```
+
+**使用：**
+
+```bash
+vane init                 # embedding、第一个目录、排除规则、用户服务
+vane add ~/notes          # 再登记一个根
+vane start                # 若没装用户服务
+vane query "鉴权怎么做"
+vane query "发版" --all
+```
+
+把 stdio MCP 桥交给 Claude Code / Cursor（守护进程必须已在跑）：
+
+```json
+{
+  "mcpServers": {
+    "vane": {
+      "command": "vane",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+把 [`crates/vane/SKILL.md`](crates/vane/SKILL.md) 拷进 Agent 的 skill 目录。Agent 应先
+`list_roots`，再 `search` / `read`，不要自己扫盘。
+
+家目录：`--home` > `VANE_HOME` > `~/.vane`。项目策略写在 `<root>/.vane.toml`（禁止放
+`api_key`）。相同文件字节在分支切换时复用提取/向量缓存。`vane gc` 永不删除用户源文件。
+
+完整说明：[本机侧车 CLI](https://ximing.github.io/vane/guides/sidecar)。
 
 ## 快速开始
 
@@ -392,6 +450,7 @@ native / Node，10 万文档 × 384 维：
 - ✅ `setUserDict` / `reindex` 状态机、中文词典三侧分发（Node/Go/WASM）
 - ✅ 绑定：Node（napi-rs，4 平台）、Go（cgo，4 平台 + wazero 桩）、浏览器
   （wasm-bindgen + Worker，OPFS/IDB，SIMD 双变体）
+- ✅ 本机侧车 CLI（`vane`）：目录监听、CAS、混合检索、MCP stdio（macOS/Linux）
 
 已知缺口：`filter` 已在核心接通但尚未通过绑定查询解析器暴露（见 [过滤](#过滤)）；musl/linux-arm64/
 winx64-arm 的 Node 预编译与 wazero 纯 Go 路径顺延。

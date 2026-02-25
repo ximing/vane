@@ -6,6 +6,7 @@ import Tokenizers from './pages/guides/Tokenizers';
 import Reindex from './pages/guides/Reindex';
 import Persistence from './pages/guides/Persistence';
 import WebIntegration from './pages/guides/WebIntegration';
+import Sidecar from './pages/guides/Sidecar';
 import ApiOverview from './pages/api/Overview';
 import ApiOpen from './pages/api/Open';
 import ApiCollection from './pages/api/Collection';
@@ -34,6 +35,7 @@ export const routes: RouteDef[] = [
   { path: '/guides/reindex', name: 'Custom Dict & Reindex', Component: Reindex },
   { path: '/guides/persistence', name: 'Persistence & Visibility', Component: Persistence },
   { path: '/guides/web-integration', name: 'Web Integration (vite/webpack)', Component: WebIntegration },
+  { path: '/guides/sidecar', name: 'Local Sidecar CLI', Component: Sidecar },
   { path: '/api/overview', name: 'API Overview', Component: ApiOverview },
   { path: '/api/open', name: 'open', Component: ApiOpen },
   { path: '/api/collection', name: 'collection', Component: ApiCollection },

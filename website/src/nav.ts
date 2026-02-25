@@ -27,6 +27,7 @@ export const docsNav: NavSection[] = [
       { label: 'Custom Dict & Reindex', path: '/guides/reindex' },
       { label: 'Persistence & Visibility', path: '/guides/persistence' },
       { label: 'Web Integration', path: '/guides/web-integration' },
+      { label: 'Local Sidecar CLI', path: '/guides/sidecar' },
     ],
   },
   {

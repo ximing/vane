@@ -36,6 +36,7 @@ Tantivy-grade text search, and unified hybrid ranking in one library.
 - [Features](#features)
 - [Install](#install)
   - [Node.js](#nodejs) · [Go](#go) · [Browser](#browser) · [Build from source](#build-from-source)
+- [Local sidecar CLI](#local-sidecar-cli)
 - [Quick start](#quick-start)
   - [Node.js](#quick-start-nodejs) · [Go](#quick-start-go) · [Browser](#quick-start-browser)
 - [API reference](#api-reference)
@@ -159,6 +160,9 @@ for bundler configuration.
 # Build everything
 cargo build --release --workspace
 
+# Sidecar CLI only
+cargo build --release -p vane
+
 # Full test suite + quality gates used by CI
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -167,6 +171,64 @@ cargo test --workspace --all-features
 # WASM baseline (core must stay free of std::fs / mmap)
 cargo check --target wasm32-unknown-unknown -p vane-core
 ```
+
+## Local sidecar CLI
+
+The retrieval library still does not generate embeddings. The optional **`vane` CLI**
+(`crates/vane`) is a native sidecar on top of it: one daemon watches folders you
+register, chunks markdown/plain text (and optional image metadata), calls Ollama or
+an OpenAI-compatible embed API, and serves hybrid search to you via `vane query`
+and to agents via MCP.
+
+macOS and Linux only in v1 (Unix socket + launchd / systemd --user). Windows is not
+supported.
+
+**Install** (Linux x86_64, macOS arm64, macOS x86_64 from a `v*` GitHub Release):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-cli.sh | sh
+# installs to ~/.local/bin/vane  (PREFIX=/usr/local to override)
+```
+
+From source:
+
+```bash
+cargo install --path crates/vane --locked --force
+# or without cloning:
+cargo install --git https://github.com/ximing/vane.git --locked --bin vane
+```
+
+**Use:**
+
+```bash
+vane init                 # embed provider, first folder, excludes, user service
+vane add ~/notes          # register another root
+vane start                # if the service is not installed
+vane query "how does auth work"
+vane query "release" --all
+```
+
+Point Claude Code / Cursor at the stdio MCP bridge (daemon must already be running):
+
+```json
+{
+  "mcpServers": {
+    "vane": {
+      "command": "vane",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Copy [`crates/vane/SKILL.md`](crates/vane/SKILL.md) into the agent's skill directory.
+Agents should call `list_roots`, then `search`, then `read` — not walk the tree.
+
+Home directory: `--home` > `VANE_HOME` > `~/.vane`. Project policy lives in
+`<root>/.vane.toml` (never put `api_key` there). Unchanged file bytes reuse extract
+and embed caches across git checkouts. `vane gc` never deletes your source files.
+
+Full walkthrough: [Local sidecar CLI](https://ximing.github.io/vane/guides/sidecar).
 
 ## Quick start
 
@@ -459,6 +521,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
   (@vane-rs/web npm package — wasm-bindgen + Worker, OPFS/IDB, SIMD dual variants)
 - ✅ `@vane-rs/web` + `@vane-rs/dict-zh` npm packages (ESM, vite 6+/webpack 5 native,
   dictData inline transfer, zero CDN)
+- ✅ Native sidecar CLI (`vane`): folder watch, CAS, hybrid query, MCP stdio (macOS/Linux)
 
 Known gaps: `filter` is wired in core but not yet exposed through the binding query parsers
 (see [Filtering](#filtering)); musl/linux-arm64/winx64-arm Node prebuilts and the wazero
