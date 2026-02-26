@@ -81,6 +81,7 @@ fn policy() -> ResolvedPolicy {
             model: "test".into(),
             base_url: "http://127.0.0.1".into(),
             api_key: None,
+            dim: None,
         },
         chunk: ChunkConfig {
             split: "markdown".into(),
@@ -111,6 +112,7 @@ fn embed_cfg(model: &str) -> EmbedConfig {
         model: model.into(),
         base_url: "http://127.0.0.1".into(),
         api_key: None,
+        dim: None,
     }
 }
 
@@ -794,11 +796,13 @@ fn serving_embed_config_restores_base_url() {
         model: "new-model".into(),
         base_url: "http://new.example:8080".into(),
         api_key: None,
+        dim: None,
     };
     let old_id = embed_model_id("ollama", "old-model", 4);
     let cfg = serving_embed_config(&policy, &old_id, Some("http://127.0.0.1:11434"));
     assert_eq!(cfg.provider, "ollama");
     assert_eq!(cfg.model, "old-model");
+    assert_eq!(cfg.dim, Some(4));
     assert_eq!(
         cfg.base_url, "http://127.0.0.1:11434",
         "query embedding must keep the serving collection's base_url, not the new overlay"

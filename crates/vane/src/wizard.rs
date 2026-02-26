@@ -11,6 +11,7 @@ pub struct InitAnswers {
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    pub dim: Option<u32>,
     pub first_root: Option<PathBuf>,
     pub exclude: Vec<String>,
     pub images: bool,
@@ -92,12 +93,14 @@ where
     } else {
         None
     };
+    let dim = prompt_dim(stdin, stdout)?;
 
     let embed = EmbedConfig {
         provider: provider.clone(),
         model: model.clone(),
         base_url: base_url.clone(),
         api_key: api_key.clone(),
+        dim,
     };
     if provider == "openai_compat" && embed.api_key.is_none() && !env_embed_api_key_set() {
         let _ = writeln!(
@@ -168,6 +171,7 @@ where
         model,
         base_url,
         api_key,
+        dim,
         first_root,
         exclude,
         images,
@@ -181,6 +185,36 @@ fn env_embed_api_key_set() -> bool {
 
 fn env_nonempty(name: &str) -> bool {
     std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+fn prompt_dim<R, W>(stdin: &mut R, stdout: &mut W) -> Result<Option<u32>, VaneCliError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let raw = prompt(
+        stdin,
+        stdout,
+        "Vector dimension (empty to probe from the API)",
+        "",
+    )?;
+    parse_dim(&raw)
+}
+
+pub(crate) fn parse_dim(raw: &str) -> Result<Option<u32>, VaneCliError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let n: u32 = trimmed
+        .parse()
+        .map_err(|_| VaneCliError::new(format!("invalid vector dimension {trimmed:?}")))?;
+    if n == 0 || n > 16_384 {
+        return Err(VaneCliError::new(format!(
+            "vector dimension must be 1..=16384, got {n}"
+        )));
+    }
+    Ok(Some(n))
 }
 
 fn prompt_api_key<R, W>(stdin: &mut R, stdout: &mut W) -> Result<Option<String>, VaneCliError>
@@ -282,6 +316,9 @@ fn write_config_from_answers(home: &Path, answers: &InitAnswers) -> Result<(), V
         .filter(|s| !s.is_empty())
     {
         embed.insert("api_key".into(), toml::Value::String(key.to_string()));
+    }
+    if let Some(dim) = answers.dim {
+        embed.insert("dim".into(), toml::Value::Integer(i64::from(dim)));
     }
 
     let mut rerank = toml::map::Map::new();

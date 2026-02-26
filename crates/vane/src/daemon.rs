@@ -748,6 +748,10 @@ fn lock_config_from_params_embed(
             .get("api_key")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        dim: params
+            .get("dim")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok()),
     })
 }
 
@@ -783,6 +787,9 @@ fn do_rebuild(
     }
     if embed_over.api_key.is_some() {
         policy.embed.api_key = embed_over.api_key.clone();
+    }
+    if embed_over.dim.is_some() {
+        policy.embed.dim = embed_over.dim;
     }
     rebuild_for_new_model(&shared.home, &pid, &policy.embed)?;
     let _ = reconcile_root(shared, &canon);

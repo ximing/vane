@@ -10,6 +10,7 @@ fn policy(exclude: &[&str], types: &[(&str, &str, bool)]) -> ResolvedPolicy {
             model: "nomic-embed-text".into(),
             base_url: "http://127.0.0.1:11434".into(),
             api_key: None,
+            dim: None,
         },
         chunk: ChunkConfig {
             split: "markdown".into(),
@@ -67,6 +68,7 @@ fn default_exclude_and_types_keep_markdown() {
             model: "nomic-embed-text".into(),
             base_url: "http://127.0.0.1:11434".into(),
             api_key: None,
+            dim: None,
         },
         chunk: ChunkConfig {
             split: "markdown".into(),

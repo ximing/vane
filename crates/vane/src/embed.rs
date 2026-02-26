@@ -67,9 +67,10 @@ pub fn serving_embed_config(
     serving_base_url: Option<&str>,
 ) -> EmbedConfig {
     let mut cfg = policy.clone();
-    if let Some((provider, model, _)) = parse_embed_model_id(embed_model_id) {
+    if let Some((provider, model, dim)) = parse_embed_model_id(embed_model_id) {
         cfg.provider = provider.to_string();
         cfg.model = model.to_string();
+        cfg.dim = Some(dim);
     }
     if let Some(url) = serving_base_url {
         if !url.is_empty() {
@@ -98,7 +99,7 @@ pub fn ollama_embedder(cfg: &EmbedConfig) -> OllamaEmbedder {
         agent: http_agent(),
         url: join_url(&cfg.base_url, "/api/embeddings"),
         model: cfg.model.clone(),
-        dim: Mutex::new(None),
+        dim: Mutex::new(cfg.dim),
     }
 }
 
@@ -146,6 +147,7 @@ pub struct OpenAiCompatEmbedder {
     url: String,
     model: String,
     api_key: Option<String>,
+    requested_dim: Option<u32>,
     dim: Mutex<Option<u32>>,
 }
 
@@ -155,7 +157,8 @@ pub fn openai_embedder(cfg: &EmbedConfig) -> OpenAiCompatEmbedder {
         url: openai_embeddings_url(&cfg.base_url),
         model: cfg.model.clone(),
         api_key: cfg.api_key.clone(),
-        dim: Mutex::new(None),
+        requested_dim: cfg.dim,
+        dim: Mutex::new(cfg.dim),
     }
 }
 
@@ -181,11 +184,15 @@ impl Embedder for OpenAiCompatEmbedder {
             if let Some(key) = resolve_api_key(self.api_key.as_deref()) {
                 req = req.set("Authorization", &format!("Bearer {key}"));
             }
+            let mut body = serde_json::json!({
+                "model": self.model,
+                "input": chunk,
+            });
+            if let Some(d) = self.requested_dim {
+                body["dimensions"] = serde_json::json!(d);
+            }
             let resp = req
-                .send_json(serde_json::json!({
-                    "model": self.model,
-                    "input": chunk,
-                }))
+                .send_json(body)
                 .map_err(|e| http_err("openai_compat", e))?;
             let parsed: OpenAiResp = resp
                 .into_json()

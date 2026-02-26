@@ -55,6 +55,8 @@ pub struct EmbedConfig {
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// When set, openai_compat sends `dimensions` and probe/index use this size.
+    pub dim: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,7 @@ pub struct EmbedOverlay {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    pub dim: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -228,6 +231,7 @@ pub fn default_embed() -> EmbedConfig {
         model: DEFAULT_EMBED_MODEL.into(),
         base_url: DEFAULT_EMBED_BASE_URL.into(),
         api_key: None,
+        dim: None,
     }
 }
 
@@ -451,6 +455,7 @@ fn overlay_embed(base: &EmbedConfig, over: &EmbedOverlay) -> EmbedConfig {
             .clone()
             .unwrap_or_else(|| base.base_url.clone()),
         api_key: over.api_key.clone().or_else(|| base.api_key.clone()),
+        dim: over.dim.or(base.dim),
     }
 }
 

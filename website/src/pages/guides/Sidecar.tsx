@@ -23,9 +23,10 @@ const INIT = `vane init
 # 1. Embedding provider: ollama (default) or openai_compat
 # 2. Model / Base URL
 # 3. API key (openai_compat only; empty uses OPENAI_API_KEY / VANE_EMBED_API_KEY)
-# 4. First project root (can skip)
-# 5. Exclude globs (defaults include .git, node_modules, target, *.log, .env, …)
-# 6. Enable image types? (default no)  /  Install user service? (default yes)
+# 4. Vector dimension (empty to probe from the API)
+# 5. First project root (can skip)
+# 6. Exclude globs (defaults include .git, node_modules, target, *.log, .env, …)
+# 7. Enable image types? (default no)  /  Install user service? (default yes)
 
 vane add ~/notes          # if you skipped the first root
 vane start                # if the user service is not installed
