@@ -574,9 +574,19 @@ fn canonical_or_as_is(path: &Path) -> PathBuf {
 
 fn handle_status(shared: &Arc<Shared>) -> Result<Value, VaneCliError> {
     let listed = handle_list_roots(shared)?;
+    let mut roots = listed.get("roots").cloned().unwrap_or_else(|| json!([]));
+    crate::doctor::enrich_status_roots(&shared.home, &mut roots);
+    let dirty_queue_size = match shared.dirty.lock() {
+        Ok(d) => d.len() as u64,
+        Err(_) => crate::doctor::dirty_queue_size(&shared.home),
+    };
     Ok(json!({
         "home": shared.home.display().to_string(),
-        "roots": listed.get("roots").cloned().unwrap_or_else(|| json!([])),
+        "roots": roots,
+        "running": true,
+        "dirty_queue_size": dirty_queue_size,
+        "last_error": crate::doctor::last_error_value(&shared.home),
+        "disk": crate::home::disk_stats(&shared.home),
     }))
 }
 

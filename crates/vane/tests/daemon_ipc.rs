@@ -219,3 +219,48 @@ fn second_daemon_fails_with_already_running() {
         "second daemon stderr should mention already running, got {stderr:?}"
     );
 }
+
+#[test]
+fn status_rpc_includes_additive_keys() {
+    let tmp = tempfile_dir();
+    let project = tmp.join("proj");
+    fs::create_dir_all(&project).unwrap();
+    write_config(&tmp, &project);
+    let _daemon = spawn_daemon(&tmp);
+
+    let mut stream = UnixStream::connect(socket_path(&tmp)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let req = serde_json::json!({"id": "1", "method": "status"});
+    writeln!(stream, "{req}").unwrap();
+
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&line).expect("json response");
+    assert_eq!(v["id"], "1");
+    assert!(
+        v.get("error").is_none() || v["error"].is_null(),
+        "status should succeed, got {v}"
+    );
+    let result = &v["result"];
+    assert_eq!(result["running"], true);
+    assert!(result.get("home").is_some(), "{result}");
+    assert!(
+        result["roots"].is_array(),
+        "status.roots must stay an array: {result}"
+    );
+    assert!(result
+        .get("dirty_queue_size")
+        .and_then(|x| x.as_u64())
+        .is_some());
+    assert!(result.get("disk").is_some());
+    assert!(result["disk"].get("home_bytes").is_some());
+    assert!(result["disk"].get("cas_bytes").is_some());
+    assert!(result.get("last_error").is_some());
+    let dumped = result.to_string();
+    assert!(
+        !dumped.contains("api_key"),
+        "status must not leak api_key: {dumped}"
+    );
+}
