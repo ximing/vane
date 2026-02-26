@@ -160,6 +160,7 @@ fn path_utf8(p: &Path) -> Result<&str, VaneCliError> {
         .ok_or_else(|| VaneCliError::new(format!("non-utf8 path: {}", p.display())))
 }
 
+#[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

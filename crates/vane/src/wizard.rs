@@ -10,6 +10,7 @@ pub struct InitAnswers {
     pub provider: String,
     pub model: String,
     pub base_url: String,
+    pub api_key: Option<String>,
     pub first_root: Option<PathBuf>,
     pub exclude: Vec<String>,
     pub images: bool,
@@ -86,13 +87,24 @@ where
     };
     let model = prompt(stdin, stdout, "Model", &default_model)?;
     let base_url = prompt(stdin, stdout, "Base URL", &default_url)?;
+    let api_key = if provider == "openai_compat" {
+        prompt_api_key(stdin, stdout)?
+    } else {
+        None
+    };
 
     let embed = EmbedConfig {
         provider: provider.clone(),
         model: model.clone(),
         base_url: base_url.clone(),
-        api_key: None,
+        api_key: api_key.clone(),
     };
+    if provider == "openai_compat" && embed.api_key.is_none() && !env_embed_api_key_set() {
+        let _ = writeln!(
+            stdout,
+            "warning: no API key; probe will likely 401. Enter a key, or export OPENAI_API_KEY / VANE_EMBED_API_KEY"
+        );
+    }
     match crate::embed::embedder_from_config(&embed).probe_dim() {
         Ok(dim) => {
             let _ = writeln!(stdout, "probe ok, dim={dim}");
@@ -155,11 +167,40 @@ where
         provider,
         model,
         base_url,
+        api_key,
         first_root,
         exclude,
         images,
         install_service,
     })
+}
+
+fn env_embed_api_key_set() -> bool {
+    env_nonempty("OPENAI_API_KEY") || env_nonempty("VANE_EMBED_API_KEY")
+}
+
+fn env_nonempty(name: &str) -> bool {
+    std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+fn prompt_api_key<R, W>(stdin: &mut R, stdout: &mut W) -> Result<Option<String>, VaneCliError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let hint = if env_nonempty("OPENAI_API_KEY") {
+        "empty keeps OPENAI_API_KEY"
+    } else if env_nonempty("VANE_EMBED_API_KEY") {
+        "empty keeps VANE_EMBED_API_KEY"
+    } else {
+        "empty uses OPENAI_API_KEY / VANE_EMBED_API_KEY"
+    };
+    let raw = prompt(stdin, stdout, &format!("API key ({hint})"), "")?;
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(raw))
+    }
 }
 
 fn folder_to_exclude_glob(s: &str) -> String {
@@ -234,6 +275,14 @@ fn write_config_from_answers(home: &Path, answers: &InitAnswers) -> Result<(), V
         "base_url".into(),
         toml::Value::String(answers.base_url.clone()),
     );
+    if let Some(key) = answers
+        .api_key
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        embed.insert("api_key".into(), toml::Value::String(key.to_string()));
+    }
 
     let mut rerank = toml::map::Map::new();
     rerank.insert("provider".into(), toml::Value::String("none".into()));
@@ -301,7 +350,18 @@ fn write_config_from_answers(home: &Path, answers: &InitAnswers) -> Result<(), V
     let body = toml::to_string_pretty(&toml::Value::Table(root))
         .map_err(|e| VaneCliError::new(format!("serialize config: {e}")))?;
     std::fs::write(&path, body)
-        .map_err(|e| VaneCliError::new(format!("write {}: {e}", path.display())))
+        .map_err(|e| VaneCliError::new(format!("write {}: {e}", path.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)
+            .map_err(|e| VaneCliError::new(format!("stat {}: {e}", path.display())))?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms)
+            .map_err(|e| VaneCliError::new(format!("chmod {}: {e}", path.display())))?;
+    }
+    Ok(())
 }
 
 fn type_rule_value(t: crate::config::TypeRule) -> toml::Value {
