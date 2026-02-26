@@ -235,7 +235,7 @@ pub fn default_embed() -> EmbedConfig {
     }
 }
 
-fn default_chunk() -> ChunkConfig {
+pub fn default_chunk() -> ChunkConfig {
     ChunkConfig {
         split: DEFAULT_CHUNK_SPLIT.into(),
         max_chars: DEFAULT_MAX_CHARS,

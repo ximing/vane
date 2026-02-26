@@ -68,12 +68,10 @@ fn assume_writes_config_toml_with_chosen_exclude() {
         provider: "ollama".into(),
         model: "nomic-embed-text".into(),
         base_url: "http://127.0.0.1:11434".into(),
-        api_key: None,
-        dim: None,
-        first_root: None,
         exclude: vec!["**/node_modules/**".into(), "**/secret/**".into()],
         images: false,
         install_service: false,
+        ..InitAnswers::default()
     };
     let mut out = Vec::new();
     run_init(&tmp, Cursor::new(""), &mut out, Some(answers)).expect("run_init assume");
@@ -118,10 +116,10 @@ fn assume_openai_compat_writes_api_key_to_global_config() {
         base_url: "https://example.invalid/compatible-mode/v1".into(),
         api_key: Some("sk-test-from-init".into()),
         dim: Some(1024),
-        first_root: None,
         exclude: vec!["**/.git/**".into()],
         images: false,
         install_service: false,
+        ..InitAnswers::default()
     };
     let mut out = Vec::new();
     run_init(&tmp, Cursor::new(""), &mut out, Some(answers)).expect("run_init assume");
@@ -169,6 +167,10 @@ fn interactive_openai_compat_asks_for_api_key() {
         "http://127.0.0.1:1/compatible-mode/v1",
         "sk-typed-in-wizard",
         "1024",
+        "markdown",
+        "800",
+        "100",
+        "40",
         "",
         "",
         "",
@@ -194,6 +196,72 @@ fn interactive_openai_compat_asks_for_api_key() {
         printed.contains("Vector dimension"),
         "wizard must prompt for vector dimension, got {printed}"
     );
+    assert_eq!(cfg.defaults.chunk.max_chars, 800);
+    assert_eq!(cfg.defaults.chunk.overlap_chars, 100);
+    assert_eq!(cfg.defaults.chunk.min_chars, 40);
+}
+
+#[test]
+fn reinit_keeps_previous_when_answers_empty() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let first = InitAnswers {
+        provider: "openai_compat".into(),
+        model: "keep-me".into(),
+        base_url: "https://example.invalid/v1".into(),
+        api_key: Some("sk-keep".into()),
+        dim: Some(1024),
+        max_chars: 900,
+        install_service: false,
+        ..InitAnswers::default()
+    };
+    run_init(&tmp, Cursor::new(""), &mut Vec::new(), Some(first)).unwrap();
+    let stdin = [
+        "",  // provider default openai_compat
+        "",  // model keep-me
+        "",  // url
+        "",  // api key keep
+        "",  // dim 1024
+        "",  // split
+        "",  // max_chars 900
+        "",  // overlap
+        "",  // min
+        "",  // first root
+        "",  // uncheck
+        "",  // extra
+        "",  // images
+        "n", // service
+    ]
+    .join("\n")
+        + "\n";
+    run_init(&tmp, Cursor::new(stdin), &mut Vec::new(), None).expect("re-init");
+    let cfg = load_config(&tmp).unwrap();
+    assert_eq!(cfg.defaults.embed.model, "keep-me");
+    assert_eq!(cfg.defaults.embed.api_key.as_deref(), Some("sk-keep"));
+    assert_eq!(cfg.defaults.embed.dim, Some(1024));
+    assert_eq!(cfg.defaults.chunk.max_chars, 900);
+}
+
+#[test]
+fn write_project_toml_has_chunk_not_api_key() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let root = tmp.join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let path = vane::wizard::write_project_toml(
+        &root,
+        &vane::config::ChunkConfig {
+            split: "plain".into(),
+            max_chars: 400,
+            overlap_chars: 40,
+            min_chars: 20,
+        },
+        false,
+    )
+    .unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("max_chars = 400"), "{body}");
+    assert!(!body.contains("api_key"), "{body}");
 }
 
 #[test]

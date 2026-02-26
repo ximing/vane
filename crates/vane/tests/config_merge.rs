@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vane::config::{load_config, resolve_policy, ProjectFile, TypeRule};
-use vane::project::{find_current_root, project_id, reject_nested};
+use vane::project::{
+    find_current_root, find_vane_toml_dir, project_id, reject_nested, resolve_query_scope,
+    QueryScope,
+};
 
 struct TempHome {
     path: PathBuf,
@@ -237,6 +240,42 @@ fn invalid_chunk_rejected() {
         "{}",
         err.message
     );
+}
+
+#[test]
+fn find_vane_toml_dir_walks_up() {
+    let tmp = tempfile_dir();
+    let nested = tmp.join("repo").join("src").join("lib");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(
+        tmp.join("repo").join(".vane.toml"),
+        "[chunk]\nmax_chars = 10\n",
+    )
+    .unwrap();
+    assert_eq!(find_vane_toml_dir(&nested), Some(tmp.join("repo")));
+    assert_eq!(find_vane_toml_dir(&tmp.join("other")), None);
+}
+
+#[test]
+fn resolve_query_scope_prefers_toml_then_registered_then_all() {
+    let tmp = tempfile_dir();
+    let repo = tmp.join("repo");
+    let nested = repo.join("src");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(repo.join(".vane.toml"), "[chunk]\nmax_chars = 10\n").unwrap();
+    let registered = vec![repo.clone()];
+    match resolve_query_scope(&nested, &registered, false) {
+        QueryScope::Root(p) => assert_eq!(p, repo),
+        other => panic!("expected toml root, got {other:?}"),
+    }
+    match resolve_query_scope(&tmp.join("elsewhere"), &registered, false) {
+        QueryScope::All => {}
+        other => panic!("expected All outside registered roots, got {other:?}"),
+    }
+    match resolve_query_scope(&nested, &registered, true) {
+        QueryScope::All => {}
+        other => panic!("--global must force All, got {other:?}"),
+    }
 }
 
 #[test]

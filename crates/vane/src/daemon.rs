@@ -31,7 +31,7 @@ use crate::live::LiveSet;
 use crate::log::{DailyLogger, Level, NaiveDate};
 use crate::project::{project_id, reject_nested};
 use crate::search::{read_by_id, read_by_path, search_all, search_project, ProjectSearch};
-use crate::sync::{rebuild_for_new_model, reconcile_project, SyncCtx};
+use crate::sync::{rebuild_for_new_model, reconcile_project, SyncCtx, SyncReport};
 use crate::watch::{watch_roots, WatchEvent, WatchGuard};
 
 enum WriterCmd {
@@ -909,15 +909,28 @@ fn do_add_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
         Ok(())
     })?;
     restart_watch(shared);
-    if let Err(e) = reconcile_root(shared, &canon) {
-        log_msg(shared, Level::Warn, &e.message);
-    }
+    let report = match reconcile_root(shared, &canon) {
+        Ok(r) => r,
+        Err(e) => {
+            log_msg(shared, Level::Warn, &e.message);
+            SyncReport::default()
+        }
+    };
     log_msg(
         shared,
         Level::Info,
         &format!("added root {}", canon.display()),
     );
-    Ok(json!({ "ok": true, "path": canon.display().to_string() }))
+    Ok(json!({
+        "ok": true,
+        "path": canon.display().to_string(),
+        "scanned": report.scanned,
+        "added": report.added,
+        "deleted": report.deleted,
+        "unchanged": report.unchanged,
+        "embedded": report.embedded,
+        "cas_hits": report.cas_hits,
+    }))
 }
 
 fn do_remove_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
@@ -1055,7 +1068,7 @@ fn reconcile_all(shared: &Shared) {
     save_dirty(shared);
 }
 
-fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
+fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliError> {
     let cfg = lock_config(shared)?.clone();
     let expanded = expand_tilde(root);
     let canon = match expanded.canonicalize() {
@@ -1066,7 +1079,7 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
                 Level::Warn,
                 &format!("skip root, not a directory: {}", p.display()),
             );
-            return Ok(());
+            return Ok(SyncReport::default());
         }
         Err(e) => {
             log_msg(
@@ -1074,7 +1087,7 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
                 Level::Warn,
                 &format!("canonicalize {}: {e}", expanded.display()),
             );
-            return Ok(());
+            return Ok(SyncReport::default());
         }
     };
     let pid = project_id(&canon);
@@ -1082,14 +1095,14 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
         Ok(v) => v,
         Err(e) => {
             log_msg(shared, Level::Error, &e.message);
-            return Ok(());
+            return Ok(SyncReport::default());
         }
     };
     let policy = match resolve_policy(&cfg, &canon, pf.as_ref()) {
         Ok(p) => p,
         Err(e) => {
             log_msg(shared, Level::Warn, &e.message);
-            return Ok(());
+            return Ok(SyncReport::default());
         }
     };
     let state = ProjectState::load(&state_path(&shared.home, &pid))?;
@@ -1119,7 +1132,7 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
                     &format!("open serving index {pid}: {e}"),
                 ),
             }
-            return Ok(());
+            return Ok(SyncReport::default());
         }
     }
     let embedder = embedder_from_config(&policy.embed);
@@ -1131,7 +1144,7 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
                 Level::Warn,
                 &format!("embed probe {}: {e}", canon.display()),
             );
-            return Ok(());
+            return Ok(SyncReport::default());
         }
     };
     let model_id = embed_model_id(&policy.embed.provider, &policy.embed.model, dim);
@@ -1140,7 +1153,7 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
         Ok(i) => i,
         Err(e) => {
             log_msg(shared, Level::Warn, &format!("open index {pid}: {e}"));
-            return Ok(());
+            return Ok(SyncReport::default());
         }
     };
     let now = unix_now();
@@ -1160,22 +1173,28 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<(), VaneCliError> {
         };
         reconcile_project(&mut ctx, &canon, &policy)
     };
-    match result {
-        Ok(report) => log_msg(
-            shared,
-            Level::Info,
-            &format!(
-                "reconcile {pid} scanned={} added={} deleted={} unchanged={} embedded={}",
-                report.scanned, report.added, report.deleted, report.unchanged, report.embedded
-            ),
-        ),
-        Err(e) => log_msg(shared, Level::Warn, &format!("reconcile {pid}: {e}")),
-    }
+    let report = match result {
+        Ok(report) => {
+            log_msg(
+                shared,
+                Level::Info,
+                &format!(
+                    "reconcile {pid} scanned={} added={} deleted={} unchanged={} embedded={}",
+                    report.scanned, report.added, report.deleted, report.unchanged, report.embedded
+                ),
+            );
+            report
+        }
+        Err(e) => {
+            log_msg(shared, Level::Warn, &format!("reconcile {pid}: {e}"));
+            SyncReport::default()
+        }
+    };
     if let Ok(mut serving) = shared.serving.lock() {
         serving.insert(pid, idx);
     }
     save_dirty(shared);
-    Ok(())
+    Ok(report)
 }
 
 fn save_dirty(shared: &Shared) {
