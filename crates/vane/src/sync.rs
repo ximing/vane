@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cas::{embed_key, extract_key, Cas};
 use crate::chunk::chunk_strategy_id;
-use crate::classify::{classify, should_watch_dir};
+use crate::classify::{classify, should_watch_dir, unsupported_extractor, SkipReason};
 use crate::config::{
     load_config, resolve_policy, ChunkConfig, EmbedConfig, ProjectFile, ResolvedPolicy,
 };
@@ -19,6 +19,9 @@ use crate::index::{
     swap_new_db, ProjectIndex, ProjectState, RebuildProgress,
 };
 use crate::live::{LiveFile, LiveSet};
+use crate::progress::{
+    persist_skips, skip_file, Progress, ProgressPhase, SkipFile, SkipFileReason,
+};
 
 const EXTRACTOR_VER: &str = "1";
 
@@ -40,6 +43,7 @@ pub struct SyncReport {
     pub embedded: u64,
     pub cas_hits: u64,
     pub scanned: u64,
+    pub skipped: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,16 +71,65 @@ pub fn reconcile_project(
         .canonicalize()
         .map_err(|e| VaneCliError::new(format!("canonicalize {}: {e}", root.display())))?;
     let root_str = root_canon.to_string_lossy().into_owned();
+    let mut progress = Progress::new(ctx.project_id, &root_str, ProgressPhase::Scan);
+    let _ = progress.save(ctx.home);
+
+    let mut new_skips: Vec<SkipFile> = Vec::new();
+    let mut resolved_paths: Vec<String> = Vec::new();
+    let result = reconcile_once(
+        ctx,
+        &root_canon,
+        &root_str,
+        policy,
+        &mut progress,
+        &mut new_skips,
+        &mut resolved_paths,
+    );
+    let _ = persist_skips(ctx.home, ctx.project_id, new_skips, &resolved_paths);
+    progress.phase = ProgressPhase::Idle;
+    if let Ok(ref report) = result {
+        apply_report(&mut progress, report);
+    }
+    progress.touch();
+    let _ = progress.save(ctx.home);
+    result
+}
+
+fn reconcile_once(
+    ctx: &mut SyncCtx<'_>,
+    root_canon: &Path,
+    root_str: &str,
+    policy: &ResolvedPolicy,
+    progress: &mut Progress,
+    new_skips: &mut Vec<SkipFile>,
+    resolved_paths: &mut Vec<String>,
+) -> Result<SyncReport, VaneCliError> {
     let model_id = ctx.index.model_id();
     let strategy_id = chunk_strategy_id(&policy.chunk, EXTRACTOR_VER);
 
-    let on_disk = collect_files(&root_canon, policy)?;
+    let mut unsupported = Vec::new();
+    let on_disk = collect_files(root_canon, policy, &mut unsupported)?;
     let live = LiveSet::load_for_project(ctx.home, ctx.project_id)?;
 
     let mut report = SyncReport {
         scanned: on_disk.len() as u64,
+        skipped: unsupported.len() as u64,
         ..SyncReport::default()
     };
+    for (rel, extractor) in unsupported {
+        new_skips.push(skip_file(
+            rel,
+            SkipFileReason::ExtractorUnsupported,
+            format!("unsupported extractor {extractor}"),
+        ));
+    }
+
+    progress.phase = ProgressPhase::Extract;
+    progress.total_estimate = on_disk.len() as u64;
+    progress.skipped = report.skipped;
+    progress.touch();
+    let _ = progress.save(ctx.home);
+
     let mut new_live = LiveSet::default();
     let mut to_add = Vec::new();
     let mut to_delete = Vec::new();
@@ -84,20 +137,32 @@ pub fn reconcile_project(
     for (rel, disk) in &on_disk {
         let hash = match sha256_file(&disk.abs) {
             Ok(h) => h,
-            Err(_) => continue,
+            Err(_) => {
+                progress.scanned += 1;
+                continue;
+            }
         };
         let ek = extract_key(&hash, &disk.extractor, EXTRACTOR_VER, &strategy_id);
 
         if let Some(old) = live.files.get(rel) {
             if old.content_sha256 == hash && old.extract_key == ek {
                 report.unchanged += 1;
+                resolved_paths.push(rel.clone());
                 touch_entry(ctx.cas, ek.as_str(), model_id, ctx.now);
                 new_live.files.insert(rel.clone(), old.clone());
+                progress.scanned += 1;
+                apply_report(progress, &report);
+                progress.phase = ProgressPhase::Extract;
+                progress.touch();
+                let _ = progress.save(ctx.home);
                 continue;
             }
             push_ids(&mut to_delete, ctx.project_id, rel, old.chunk_count);
         }
 
+        progress.phase = ProgressPhase::Extract;
+        progress.touch();
+        let _ = progress.save(ctx.home);
         let docs = match load_or_extract(
             ctx.cas,
             rel,
@@ -107,17 +172,42 @@ pub fn reconcile_project(
             &policy.chunk,
             &mut report,
         ) {
-            Ok(Some(docs)) => docs,
-            Ok(None) => continue,
+            Ok(LoadExtract::Docs(docs)) => docs,
+            Ok(LoadExtract::Skip { reason, detail }) => {
+                new_skips.push(skip_file(rel.clone(), reason, detail));
+                report.skipped += 1;
+                progress.scanned += 1;
+                apply_report(progress, &report);
+                progress.touch();
+                let _ = progress.save(ctx.home);
+                continue;
+            }
+            Ok(LoadExtract::Gone) => {
+                progress.scanned += 1;
+                continue;
+            }
             Err(e) => return Err(e),
         };
 
+        progress.phase = ProgressPhase::Embed;
+        progress.touch();
+        let _ = progress.save(ctx.home);
         let embedded = match embed_docs(ctx, model_id, &docs, ctx.index.dim()) {
             Ok(e) => e,
-            Err(_) => {
+            Err(e) => {
                 if let Some(dirty) = ctx.dirty.as_mut() {
                     dirty.push(ctx.project_id, rel);
                 }
+                new_skips.push(skip_file(
+                    rel.clone(),
+                    SkipFileReason::EmbedError,
+                    e.message,
+                ));
+                report.skipped += 1;
+                progress.scanned += 1;
+                apply_report(progress, &report);
+                progress.touch();
+                let _ = progress.save(ctx.home);
                 continue;
             }
         };
@@ -128,7 +218,7 @@ pub fn reconcile_project(
         ctx.cas.touch(&ek, &embedded.keys, ctx.now);
 
         for (doc, vector) in docs.iter().zip(embedded.vectors) {
-            to_add.push(index_doc(ctx.project_id, &root_str, doc, Some(vector)));
+            to_add.push(index_doc(ctx.project_id, root_str, doc, Some(vector)));
         }
         new_live.files.insert(
             rel.clone(),
@@ -139,6 +229,11 @@ pub fn reconcile_project(
             },
         );
         report.added += 1;
+        resolved_paths.push(rel.clone());
+        progress.scanned += 1;
+        apply_report(progress, &report);
+        progress.touch();
+        let _ = progress.save(ctx.home);
     }
 
     for (rel, old) in &live.files {
@@ -147,6 +242,11 @@ pub fn reconcile_project(
             report.deleted += 1;
         }
     }
+
+    progress.phase = ProgressPhase::Flush;
+    apply_report(progress, &report);
+    progress.touch();
+    let _ = progress.save(ctx.home);
 
     if !to_delete.is_empty() {
         ctx.index.delete_ids(&to_delete)?;
@@ -169,8 +269,17 @@ pub fn reconcile_project(
         new_live.save_for_project(ctx.home, ctx.project_id)?;
     }
 
-    persist_root_state(ctx, &root_str, &strategy_id, &policy.embed.base_url)?;
+    persist_root_state(ctx, root_str, &strategy_id, &policy.embed.base_url)?;
     Ok(report)
+}
+
+fn apply_report(progress: &mut Progress, report: &SyncReport) {
+    progress.added = report.added;
+    progress.embedded = report.embedded;
+    progress.skipped = report.skipped;
+    if report.scanned > progress.total_estimate {
+        progress.total_estimate = report.scanned;
+    }
 }
 
 /// Rebuild the project collection for a new embedding model / dim (§7.4).
@@ -354,8 +463,11 @@ fn docs_for_rebuild(
         &policy.chunk,
         &mut sync_report,
     )? {
-        Some(docs) => Ok(docs),
-        None => Err(VaneCliError::new(format!(
+        LoadExtract::Docs(docs) => Ok(docs),
+        LoadExtract::Skip { detail, .. } => Err(VaneCliError::new(format!(
+            "cannot extract {rel} during rebuild ({detail})"
+        ))),
+        LoadExtract::Gone => Err(VaneCliError::new(format!(
             "cannot extract {rel} during rebuild"
         ))),
     }
@@ -448,6 +560,15 @@ fn persist_root_state(
     state.save_atomic(&path)
 }
 
+enum LoadExtract {
+    Docs(Vec<CanonicalDoc>),
+    Skip {
+        reason: SkipFileReason,
+        detail: String,
+    },
+    Gone,
+}
+
 fn load_or_extract(
     cas: &Cas,
     rel: &str,
@@ -456,29 +577,34 @@ fn load_or_extract(
     extract_key: &str,
     chunk: &ChunkConfig,
     report: &mut SyncReport,
-) -> Result<Option<Vec<CanonicalDoc>>, VaneCliError> {
+) -> Result<LoadExtract, VaneCliError> {
     if let Some(docs) = cas.get_extract(extract_key) {
         report.cas_hits += 1;
-        return Ok(Some(retarget(docs, rel)));
+        return Ok(LoadExtract::Docs(retarget(docs, rel)));
     }
     let meta_len = match fs::metadata(abs) {
         Ok(m) => m.len(),
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(LoadExtract::Gone),
     };
     if too_large(extractor, meta_len) {
-        return Ok(None);
+        return Ok(LoadExtract::Skip {
+            reason: SkipFileReason::TooLarge,
+            detail: format!("{meta_len} bytes"),
+        });
     }
     let bytes = match fs::read(abs) {
         Ok(b) => b,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(LoadExtract::Gone),
     };
     match extract_docs(rel, &bytes, extractor, chunk) {
         Ok(docs) => {
             cas.put_extract(extract_key, &docs)?;
-            Ok(Some(docs))
+            Ok(LoadExtract::Docs(docs))
         }
-        Err(e) if skippable(&e) => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => match skip_kind(&e) {
+            Some((reason, detail)) => Ok(LoadExtract::Skip { reason, detail }),
+            None => Err(e),
+        },
     }
 }
 
@@ -588,12 +714,18 @@ fn retarget(mut docs: Vec<CanonicalDoc>, rel: &str) -> Vec<CanonicalDoc> {
     docs
 }
 
-fn skippable(err: &VaneCliError) -> bool {
-    if err.is_skip() {
-        return true;
-    }
+fn skip_kind(err: &VaneCliError) -> Option<(SkipFileReason, String)> {
     let m = err.message.to_ascii_lowercase();
-    m.contains("utf-8") || m.contains("utf8")
+    if m.contains("utf-8") || m.contains("utf8") {
+        return Some((SkipFileReason::InvalidUtf8, err.message.clone()));
+    }
+    if err.is_skip() && m.contains("too large") {
+        return Some((SkipFileReason::TooLarge, err.message.clone()));
+    }
+    if err.is_skip() {
+        return Some((SkipFileReason::ExtractorUnsupported, err.message.clone()));
+    }
+    None
 }
 
 fn too_large(extractor: &str, len: u64) -> bool {
@@ -607,6 +739,7 @@ fn too_large(extractor: &str, len: u64) -> bool {
 fn collect_files(
     root: &Path,
     policy: &ResolvedPolicy,
+    unsupported: &mut Vec<(String, String)>,
 ) -> Result<BTreeMap<String, DiskFile>, VaneCliError> {
     let mut out = BTreeMap::new();
     let mut stack = vec![WalkFrame {
@@ -660,7 +793,7 @@ fn collect_files(
                         policy,
                     );
                 } else if target.is_file() {
-                    maybe_add_file(&mut out, child_rel, child_path, policy);
+                    maybe_add_file(&mut out, child_rel, child_path, policy, unsupported);
                 }
                 continue;
             }
@@ -682,7 +815,7 @@ fn collect_files(
                     policy,
                 );
             } else if ft.is_file() {
-                maybe_add_file(&mut out, child_rel, child_path, policy);
+                maybe_add_file(&mut out, child_rel, child_path, policy, unsupported);
             }
         }
     }
@@ -723,15 +856,24 @@ fn maybe_add_file(
     rel: String,
     abs: PathBuf,
     policy: &ResolvedPolicy,
+    unsupported: &mut Vec<(String, String)>,
 ) {
-    if let Ok(rule) = classify(&rel, policy) {
-        out.insert(
-            rel,
-            DiskFile {
-                abs,
-                extractor: rule.extractor.clone(),
-            },
-        );
+    match classify(&rel, policy) {
+        Ok(rule) => {
+            out.insert(
+                rel,
+                DiskFile {
+                    abs,
+                    extractor: rule.extractor.clone(),
+                },
+            );
+        }
+        Err(SkipReason::Disabled) => {
+            if let Some(name) = unsupported_extractor(&rel, policy) {
+                unsupported.push((rel, name.to_string()));
+            }
+        }
+        Err(SkipReason::Excluded | SkipReason::NoType) => {}
     }
 }
 

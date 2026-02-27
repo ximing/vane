@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -48,6 +49,15 @@ enum Commands {
     Status,
     /// Diagnose sidecar home, daemon, embedder, and registered roots
     Doctor,
+    /// List skipped files (too large, invalid UTF-8, embed / extractor errors)
+    Issues {
+        /// Target a registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Every registered root
+        #[arg(long)]
+        all: bool,
+    },
     /// Run the sidecar daemon in the foreground
     Daemon,
     /// Start the daemon (user service if installed, else background process)
@@ -160,6 +170,7 @@ fn main() -> ExitCode {
         Commands::Exclude { action } => run_glob_policy(&home, PolicyKind::Exclude, action),
         Commands::Status => run_status(&home),
         Commands::Doctor => run_doctor(&home),
+        Commands::Issues { root, all } => run_issues(&home, root, all),
         Commands::Daemon => match vane::daemon::serve_forever(home) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -413,11 +424,15 @@ fn run_add(home: &Path, path: &Path, yes: bool) -> ExitCode {
         }
     }
     let spin = vane::ui::spinner(&format!("indexing {}", resolved.display()));
-    let result = vane::ipc::rpc_call(
-        home,
-        "add_root",
-        json!({ "path": resolved.display().to_string() }),
-    );
+    let result = if vane::ui::stdout_tty() {
+        add_root_poll_progress(home, &resolved, &spin)
+    } else {
+        vane::ipc::rpc_call(
+            home,
+            "add_root",
+            json!({ "path": resolved.display().to_string() }),
+        )
+    };
     spin.finish_and_clear();
     match result {
         Ok(v) => {
@@ -431,18 +446,102 @@ fn run_add(home: &Path, path: &Path, yes: bool) -> ExitCode {
     }
 }
 
+fn add_root_poll_progress(
+    home: &Path,
+    resolved: &Path,
+    spin: &indicatif::ProgressBar,
+) -> Result<serde_json::Value, vane::error::VaneCliError> {
+    let home_rpc = home.to_path_buf();
+    let path = resolved.display().to_string();
+    let handle = std::thread::spawn(move || {
+        vane::ipc::rpc_call(&home_rpc, "add_root", json!({ "path": path }))
+    });
+    while !handle.is_finished() {
+        if let Some(progress) = vane::progress::load_progress(home) {
+            spin.set_message(vane::progress::spinner_message(&progress));
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    handle
+        .join()
+        .unwrap_or_else(|_| Err(vane::error::VaneCliError::new("add_root worker panicked")))
+}
+
 fn print_add_report(root: &Path, v: &serde_json::Value) {
     let scanned = v.get("scanned").and_then(|x| x.as_u64()).unwrap_or(0);
     let added = v.get("added").and_then(|x| x.as_u64()).unwrap_or(0);
     let embedded = v.get("embedded").and_then(|x| x.as_u64()).unwrap_or(0);
     let unchanged = v.get("unchanged").and_then(|x| x.as_u64()).unwrap_or(0);
+    let skipped = v.get("skipped").and_then(|x| x.as_u64()).unwrap_or(0);
     vane::ui::success(&format!(
-        "added {}  scanned {scanned}  new {added}  embedded {embedded}  unchanged {unchanged}",
+        "added {}  scanned {scanned}  new {added}  embedded {embedded}  unchanged {unchanged}  skipped {skipped}",
         root.display()
     ));
     if !vane::ui::interactive() {
         print_json(v);
     }
+}
+
+fn run_issues(home: &Path, root: Option<PathBuf>, all: bool) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    let cfg = match load_config(home) {
+        Ok(c) => c,
+        Err(e) => {
+            vane::ui::error(&e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let selected = if all {
+        cfg.projects
+            .iter()
+            .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
+            .collect()
+    } else if let Some(r) = root {
+        match resolve_root_arg(&r) {
+            Ok(p) => vec![p],
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        match current_issues_root(home) {
+            Ok(p) => vec![p],
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    };
+    let report = vane::progress::issues_report(home, &selected);
+    if vane::ui::stdout_tty() {
+        vane::ui::print_issues(&report);
+        ExitCode::SUCCESS
+    } else {
+        match serde_json::to_value(&report) {
+            Ok(v) => print_json(&v),
+            Err(e) => {
+                vane::ui::error(&format!("encode issues: {e}"));
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+fn current_issues_root(home: &Path) -> Result<PathBuf, vane::error::VaneCliError> {
+    let cfg = load_config(home)?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| vane::error::VaneCliError::new(format!("cannot read cwd: {e}")))?;
+    let roots: Vec<PathBuf> = cfg
+        .projects
+        .iter()
+        .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
+        .collect();
+    find_current_root(&cwd, &roots).ok_or_else(|| {
+        vane::error::VaneCliError::new("cwd is not inside a registered root; pass --root or --all")
+    })
 }
 
 fn run_rm(home: &Path, path: &Path) -> ExitCode {

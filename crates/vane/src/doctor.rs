@@ -97,7 +97,7 @@ pub fn enrich_status_roots(home: &Path, roots: &mut Value) {
                 root["last_error"] = json!(redact_secrets(err));
             }
         }
-        if let Some(n) = skip_count(home, &pid) {
+        if let Some(n) = crate::progress::skip_count(home, &pid) {
             root["skip_count"] = json!(n);
         }
         root["dirty_queue_size"] = json!(dirty.len_for(&pid) as u64);
@@ -439,25 +439,10 @@ fn root_status_object(home: &Path, stored: &Path, dirty: &DirtyQueue) -> Value {
     if let Some(err) = state.last_error.as_deref() {
         obj["last_error"] = json!(redact_secrets(err));
     }
-    if let Some(n) = skip_count(home, &pid) {
+    if let Some(n) = crate::progress::skip_count(home, &pid) {
         obj["skip_count"] = json!(n);
     }
     obj
-}
-
-fn skip_count(home: &Path, project_id: &str) -> Option<u64> {
-    let path = crate::index::project_dir(home, project_id).join("skips.json");
-    if !path.is_file() {
-        return None;
-    }
-    let bytes = fs::read(path).ok()?;
-    let v: Value = serde_json::from_slice(&bytes).ok()?;
-    Some(
-        v.get("files")
-            .and_then(|f| f.as_array())
-            .map(|a| a.len() as u64)
-            .unwrap_or(0),
-    )
 }
 
 fn read_last_error(home: &Path) -> Option<Value> {
@@ -472,12 +457,6 @@ fn read_last_error(home: &Path) -> Option<Value> {
         }
     }
     Some(v)
-}
-
-fn read_progress(home: &Path) -> Option<Value> {
-    let path = home.join("run").join("progress.json");
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
 }
 
 fn selected_roots(
@@ -515,17 +494,12 @@ fn selected_roots(
 }
 
 fn still_indexing_reason(home: &Path, selected: &[PathBuf]) -> Option<String> {
-    if let Some(progress) = read_progress(home) {
-        let phase = progress.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-        if !phase.is_empty() && phase != "idle" {
-            let scanned = progress.get("scanned").and_then(|v| v.as_u64());
-            let total = progress.get("total_estimate").and_then(|v| v.as_u64());
-            let extra = match (scanned, total) {
-                (Some(s), Some(t)) => format!(" {s}/{t}"),
-                _ => String::new(),
-            };
+    if let Some(progress) = crate::progress::load_progress(home) {
+        if progress.phase != crate::progress::ProgressPhase::Idle {
+            let extra = format!(" {}/{}", progress.scanned, progress.total_estimate);
             return Some(format!(
-                "still indexing (phase={phase}{extra}) — wait and retry"
+                "still indexing (phase={}{extra}) — wait and retry",
+                progress.phase.as_str()
             ));
         }
     }
