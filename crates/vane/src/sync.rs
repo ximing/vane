@@ -557,6 +557,7 @@ fn persist_root_state(
     if state.embed_base_url.as_deref().unwrap_or("").is_empty() && !embed_base_url.is_empty() {
         state.embed_base_url = Some(embed_base_url.to_string());
     }
+    state.last_error = None;
     state.save_atomic(&path)
 }
 

@@ -9,6 +9,7 @@ use vane::config::{
     TypeRule,
 };
 use vane::home::{default_fallback, disk_stats, resolve_home};
+use vane::live::LiveSet;
 use vane::project::{find_current_root, project_id, resolve_query_scope, QueryScope};
 use vane::sync::rebuild_for_new_model;
 
@@ -128,6 +129,9 @@ enum Commands {
         /// Vector dimension (openai_compat sends this as `dimensions`)
         #[arg(long)]
         dim: Option<u32>,
+        /// Skip the rebuild confirmation (required when not a TTY)
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// User service (launchd / systemd --user)
     Service {
@@ -241,7 +245,8 @@ fn main() -> ExitCode {
             model,
             base_url,
             dim,
-        } => run_model(&home, global, root, provider, model, base_url, dim),
+            yes,
+        } => run_model(&home, global, root, provider, model, base_url, dim, yes),
         Commands::Service {
             action: ServiceCmd::Uninstall,
         } => run_service_uninstall(&home),
@@ -990,6 +995,7 @@ fn print_search_result(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_model(
     home: &Path,
     global: bool,
@@ -998,6 +1004,7 @@ fn run_model(
     model: Option<String>,
     base_url: Option<String>,
     dim: Option<u32>,
+    yes: bool,
 ) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
@@ -1044,6 +1051,31 @@ fn run_model(
         }
     };
 
+    let live_files = count_live_files(home, &targets);
+    if vane::ui::stdout_tty() {
+        println!("{live_files} live files will be re-embedded");
+    } else {
+        eprintln!("{live_files} live files will be re-embedded");
+    }
+    if !yes {
+        if vane::ui::interactive() {
+            match vane::ui::confirm(&format!("Re-embed {live_files} live files?"), false) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!("vane model: rebuild cancelled");
+                    return ExitCode::from(1);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(1);
+                }
+            }
+        } else {
+            eprintln!("vane model: pass --yes to rebuild (non-interactive)");
+            return ExitCode::from(1);
+        }
+    }
+
     if let Err(e) = write_embed_overlay(home, global, &targets, &provider, &model, &base_url, dim) {
         eprintln!("{e}");
         return ExitCode::from(1);
@@ -1088,6 +1120,18 @@ fn run_model(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn count_live_files(home: &Path, roots: &[PathBuf]) -> u64 {
+    roots
+        .iter()
+        .map(|root| {
+            let pid = project_id(root);
+            LiveSet::load_for_project(home, &pid)
+                .map(|live| live.files.len() as u64)
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 fn rebuild_local(home: &Path, root: &Path) -> Result<(), vane::error::VaneCliError> {

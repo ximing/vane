@@ -808,3 +808,88 @@ fn serving_embed_config_restores_base_url() {
         "query embedding must keep the serving collection's base_url, not the new overlay"
     );
 }
+
+fn run_vane(home: &Path, args: &[&str]) -> (i32, String, String) {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    let output = Command::new(bin)
+        .args(["--home", home.to_str().expect("utf-8 home")])
+        .args(args)
+        .env("VANE_HOME", home)
+        .env("HOME", fake_user_home(home))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run vane");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn model_non_tty_without_yes_exits_1() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let (root, _pid, _dim, _model) = setup_indexed(&tmp);
+    write_daemon_config(&tmp, &root, "http://127.0.0.1:1");
+    let (code, stdout, stderr) = run_vane(
+        &tmp,
+        &[
+            "model",
+            "--root",
+            root.to_str().expect("utf-8 root"),
+            "--model",
+            "test-8",
+        ],
+    );
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("2 live files"),
+        "must print live-file count before rebuild, got {combined}"
+    );
+    assert!(
+        combined.contains("--yes"),
+        "non-TTY model must require --yes, got {combined}"
+    );
+    assert!(
+        !root.join(".vane.toml").exists(),
+        "must not write overlay without --yes"
+    );
+}
+
+#[test]
+fn model_non_tty_with_yes_proceeds() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let (root, pid, _dim, _model) = setup_indexed(&tmp);
+    let fake = FakeOllama::spawn();
+    write_daemon_config(&tmp, &root, &fake.base_url);
+    write_serving_base_url(&tmp, &pid, &fake.base_url);
+    let (code, stdout, stderr) = run_vane(
+        &tmp,
+        &[
+            "model",
+            "--yes",
+            "--root",
+            root.to_str().expect("utf-8 root"),
+            "--model",
+            "test-8",
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("2 live files"),
+        "must print live-file count before rebuild, got {combined}"
+    );
+    assert!(
+        !combined.contains("pass --yes"),
+        "must not demand --yes when it was passed, got {combined}"
+    );
+    let overlay = fs::read_to_string(root.join(".vane.toml")).expect("wrote overlay");
+    assert!(overlay.contains("test-8"), "{overlay}");
+    assert!(!overlay.contains("api_key"), "{overlay}");
+    let dumped = format!("{stdout}{stderr}{overlay}").to_ascii_lowercase();
+    assert!(!dumped.contains("api_key"), "must never print api_key");
+}

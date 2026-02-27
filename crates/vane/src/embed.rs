@@ -293,6 +293,50 @@ fn first_dim(vecs: &[Vec<f32>]) -> Result<u32, VaneCliError> {
         .ok_or_else(|| VaneCliError::new("embed probe returned no vectors"))
 }
 
+/// Always hits the network (unlike [`Embedder::probe_dim`], which may return a
+/// configured dim without a request). Used at init and at reconcile start.
+pub fn live_probe(cfg: &EmbedConfig) -> Result<u32, VaneCliError> {
+    live_probe_with(embedder_from_config(cfg).as_ref(), cfg.dim)
+}
+
+pub fn live_probe_with(
+    embedder: &dyn Embedder,
+    expected_dim: Option<u32>,
+) -> Result<u32, VaneCliError> {
+    let vecs = embedder.embed(&[PROBE_TEXT.to_string()])?;
+    let got = first_dim(&vecs)?;
+    if let Some(want) = expected_dim {
+        if want != got {
+            return Err(VaneCliError::new(format!(
+                "embedding dim mismatch: expected {want}, got {got}"
+            )));
+        }
+    }
+    Ok(got)
+}
+
+pub fn probe_error_code(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("http 401")
+        || m.contains("http 403")
+        || m.contains("unauthorized")
+        || m.contains("invalid_api_key")
+        || m.contains("invalid api key")
+    {
+        "embed_auth"
+    } else if m.contains("dim mismatch") || m.contains("dim changed") {
+        "embed_dim"
+    } else if m.contains("transport")
+        || m.contains("connection refused")
+        || m.contains("timed out")
+        || m.contains("dns")
+    {
+        "embed_unreachable"
+    } else {
+        "embed_probe"
+    }
+}
+
 fn http_err(provider: &str, err: ureq::Error) -> VaneCliError {
     match err {
         ureq::Error::Status(code, resp) => {

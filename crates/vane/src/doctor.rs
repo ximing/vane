@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use crate::classify::{classify, SkipReason};
 use crate::config::{load_config, resolve_policy, Config, ProjectFile};
 use crate::dirty::{dirty_path, DirtyQueue};
 use crate::embed::embedder_from_config;
+use crate::error::VaneCliError;
 use crate::home::disk_stats;
 use crate::index::{state_path, ProjectState};
 use crate::live::LiveSet;
@@ -106,6 +108,96 @@ pub fn enrich_status_roots(home: &Path, roots: &mut Value) {
 
 pub fn last_error_value(home: &Path) -> Value {
     read_last_error(home).unwrap_or(Value::Null)
+}
+
+pub fn last_error_path(home: &Path) -> PathBuf {
+    home.join("run").join("last_error.json")
+}
+
+/// Persist `$VANE_HOME/run/last_error.json` and optional `state.json` last_error.
+/// Secrets are redacted. Does not write `reindex_error`.
+pub fn write_last_error(
+    home: &Path,
+    message: &str,
+    project_id: Option<&str>,
+    code: Option<&str>,
+) -> Result<(), VaneCliError> {
+    let message = crate::log::redact_line(message);
+    let mut body = json!({
+        "at": crate::progress::unix_now(),
+        "message": message,
+    });
+    if let Some(pid) = project_id {
+        body["project_id"] = json!(pid);
+    }
+    if let Some(c) = code {
+        if !c.is_empty() {
+            body["code"] = json!(c);
+        }
+    }
+    let path = last_error_path(home);
+    let bytes = serde_json::to_vec_pretty(&body)
+        .map_err(|e| VaneCliError::new(format!("serialize last_error.json: {e}")))?;
+    atomic_write_last_error(&path, &bytes)?;
+    if let Some(pid) = project_id {
+        let sp = state_path(home, pid);
+        let mut state = ProjectState::load(&sp)?;
+        state.last_error = Some(message);
+        state.save_atomic(&sp)?;
+    }
+    Ok(())
+}
+
+pub fn clear_project_last_error(home: &Path, project_id: &str) {
+    let sp = state_path(home, project_id);
+    if let Ok(mut state) = ProjectState::load(&sp) {
+        if state.last_error.is_some() {
+            state.last_error = None;
+            let _ = state.save_atomic(&sp);
+        }
+    }
+    if let Some(v) = read_last_error(home) {
+        if v.get("project_id").and_then(|p| p.as_str()) == Some(project_id) {
+            let _ = fs::remove_file(last_error_path(home));
+        }
+    }
+}
+
+fn atomic_write_last_error(path: &Path, bytes: &[u8]) -> Result<(), VaneCliError> {
+    let dir = path.parent().ok_or_else(|| {
+        VaneCliError::new(format!(
+            "last_error.json path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(dir).map_err(|e| {
+        VaneCliError::new(format!(
+            "create last_error.json parent {}: {e}",
+            dir.display()
+        ))
+    })?;
+    let tmp = dir.join("last_error.json.tmp");
+    {
+        let mut f = File::create(&tmp).map_err(|e| {
+            VaneCliError::new(format!(
+                "create last_error.json temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        f.write_all(bytes).map_err(|e| {
+            VaneCliError::new(format!("write last_error.json temp {}: {e}", tmp.display()))
+        })?;
+        f.sync_all().map_err(|e| {
+            VaneCliError::new(format!("sync last_error.json temp {}: {e}", tmp.display()))
+        })?;
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        VaneCliError::new(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })
 }
 
 pub fn dirty_queue_size(home: &Path) -> u64 {
@@ -446,7 +538,7 @@ fn root_status_object(home: &Path, stored: &Path, dirty: &DirtyQueue) -> Value {
 }
 
 fn read_last_error(home: &Path) -> Option<Value> {
-    let path = home.join("run").join("last_error.json");
+    let path = last_error_path(home);
     let bytes = fs::read(path).ok()?;
     let mut v: Value = serde_json::from_slice(&bytes).ok()?;
     if let Some(obj) = v.as_object_mut() {

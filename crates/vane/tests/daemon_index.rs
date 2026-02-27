@@ -476,3 +476,31 @@ enabled = true
         "issues must never print api_key: {iout}"
     );
 }
+
+#[test]
+fn add_root_aborts_when_embedder_down_and_writes_last_error() {
+    let _serial = serial_lock();
+    let tmp = tempfile_dir();
+    assert!(tmp.starts_with(std::env::temp_dir()));
+    let project = tmp.join("proj");
+    fs::create_dir_all(project.join("docs")).unwrap();
+    fs::write(project.join("docs/auth.md"), DOC).unwrap();
+    write_embed_config(&tmp, "http://127.0.0.1:1");
+    let _daemon = spawn_daemon(&tmp);
+    let (code, stdout, stderr) = run_cli(&tmp, &tmp, &["add", "-y", project.to_str().unwrap()]);
+    assert_eq!(
+        code, 1,
+        "add_root must fail when embedder is down, stdout={stdout} stderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_ascii_lowercase();
+    assert!(
+        combined.contains("embed"),
+        "add_root error should mention embedder, stdout={stdout} stderr={stderr}"
+    );
+    let last = fs::read_to_string(tmp.join("run").join("last_error.json"))
+        .expect("probe fail must persist last_error.json");
+    assert!(
+        last.to_ascii_lowercase().contains("embed"),
+        "last_error.json should record embedder down, got {last}"
+    );
+}
