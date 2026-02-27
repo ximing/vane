@@ -429,3 +429,293 @@ fn oversized_image_read_returns_path_and_mime_not_base64() {
         body.len()
     );
 }
+
+fn vane_server(v: &Value) -> &Value {
+    &v["mcpServers"]["vane"]
+}
+
+fn run_install_cli(vane_home: &Path, user_home: &Path, args: &[&str]) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    Command::new(bin)
+        .arg("--home")
+        .arg(vane_home)
+        .args(args)
+        .env("VANE_HOME", vane_home)
+        .env("HOME", user_home)
+        .env("GROK_HOME", user_home.join(".grok"))
+        .env("CODEX_HOME", user_home.join(".codex"))
+        .output()
+        .expect("run vane mcp install")
+}
+
+fn stdout_json(output: &std::process::Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "mcp install failed status={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+    serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("piped mcp install must print JSON: {e}; stdout={stdout:?} stderr={stderr:?}")
+    })
+}
+
+#[test]
+fn mcp_install_dry_run_does_not_write_and_lists_claude_cursor() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    let report = vane::mcp::install_mcp(&fake, true, None).expect("dry-run");
+    assert!(report.ok);
+    assert!(report.dry_run);
+    assert!(report.written.is_empty());
+    let paths: Vec<&str> = report.would_write.iter().map(|t| t.path.as_str()).collect();
+    assert!(
+        paths.iter().any(|p| p.ends_with(".claude.json")),
+        "would_write should include ~/.claude.json, got {paths:?}"
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.ends_with(".cursor/mcp.json") || p.ends_with("mcp.json")),
+        "would_write should include ~/.cursor/mcp.json, got {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p.contains(".codex")),
+        "must not invent a Codex file, got {paths:?}"
+    );
+    assert!(!fake.join(".claude.json").exists());
+    assert!(!fake.join(".cursor").exists());
+    assert!(!fake.join(".codex").exists());
+    assert!(!fake
+        .join("Library")
+        .join("Application Support")
+        .join("Claude")
+        .exists());
+}
+
+#[test]
+fn mcp_install_creates_claude_and_cursor_and_preserves_other_servers() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    let claude = fake.join(".claude.json");
+    fs::write(
+        &claude,
+        r#"{
+  "theme": "dark",
+  "mcpServers": {
+    "github": { "command": "npx", "args": ["-y", "github"] }
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    let report = vane::mcp::install_mcp(&fake, false, None).expect("install");
+    assert!(report.ok);
+    assert!(!report.dry_run);
+    assert!(report.would_write.is_empty());
+    assert!(report.written.iter().any(|t| t.client == "claude"));
+    assert!(report.written.iter().any(|t| t.client == "cursor"));
+
+    let claude_v: Value = serde_json::from_str(&fs::read_to_string(&claude).unwrap()).unwrap();
+    assert_eq!(claude_v["theme"], "dark");
+    assert_eq!(claude_v["mcpServers"]["github"]["command"], "npx");
+    assert_eq!(vane_server(&claude_v)["command"], "vane");
+    assert_eq!(vane_server(&claude_v)["args"], json!(["mcp"]));
+
+    let cursor = fake.join(".cursor").join("mcp.json");
+    assert!(cursor.is_file(), "should create ~/.cursor/mcp.json");
+    let cursor_v: Value = serde_json::from_str(&fs::read_to_string(&cursor).unwrap()).unwrap();
+    assert_eq!(vane_server(&cursor_v)["command"], "vane");
+    assert_eq!(vane_server(&cursor_v)["args"], json!(["mcp"]));
+    assert_eq!(cursor_v["mcpServers"].as_object().unwrap().len(), 1);
+
+    assert!(!fake.join(".codex").exists());
+    assert!(!fake
+        .join("Library")
+        .join("Application Support")
+        .join("Claude")
+        .exists());
+    let raw = fs::read_to_string(&claude).unwrap();
+    assert!(!raw.to_ascii_lowercase().contains("api_key"));
+}
+
+#[test]
+fn mcp_install_keeps_extra_vane_keys_and_updates_command() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    fs::write(
+        fake.join(".claude.json"),
+        r#"{
+  "mcpServers": {
+    "vane": {
+      "command": "old-vane",
+      "args": ["nope"],
+      "env": { "FOO": "bar" }
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    vane::mcp::install_mcp(&fake, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+    let v: Value =
+        serde_json::from_str(&fs::read_to_string(fake.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(vane_server(&v)["command"], "vane");
+    assert_eq!(vane_server(&v)["args"], json!(["mcp"]));
+    assert_eq!(vane_server(&v)["env"]["FOO"], "bar");
+}
+
+#[test]
+fn mcp_install_client_flag_limits_targets() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    vane::mcp::install_mcp(&fake, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+    assert!(fake.join(".claude.json").is_file());
+    assert!(!fake.join(".cursor").exists());
+}
+
+#[test]
+fn mcp_install_codex_only_if_present() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    vane::mcp::install_mcp(&fake, false, Some(vane::mcp::McpClient::Codex)).unwrap();
+    assert!(!fake.join(".codex").exists(), "must not create ~/.codex");
+
+    let json_path = fake.join(".codex").join("mcp.json");
+    fs::create_dir_all(json_path.parent().unwrap()).unwrap();
+    fs::write(
+        &json_path,
+        r#"{"mcpServers":{"other":{"command":"echo","args":["hi"]}}}"#,
+    )
+    .unwrap();
+    let toml_path = fake.join(".codex").join("config.toml");
+    fs::write(
+        &toml_path,
+        "[mcp_servers.other]\ncommand = \"echo\"\nargs = [\"hi\"]\n",
+    )
+    .unwrap();
+
+    let report =
+        vane::mcp::install_mcp(&fake, false, Some(vane::mcp::McpClient::Codex)).expect("codex");
+    assert!(report.written.iter().any(|t| t.path.ends_with("mcp.json")));
+    assert!(report
+        .written
+        .iter()
+        .any(|t| t.path.ends_with("config.toml")));
+
+    let json: Value = serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
+    assert_eq!(json["mcpServers"]["other"]["command"], "echo");
+    assert_eq!(json["mcpServers"]["vane"]["command"], "vane");
+    assert_eq!(json["mcpServers"]["vane"]["args"], json!(["mcp"]));
+
+    let toml_body = fs::read_to_string(&toml_path).unwrap();
+    assert!(
+        toml_body.contains("echo"),
+        "must keep the other Codex server, got {toml_body}"
+    );
+    assert!(
+        toml_body.contains("[mcp_servers.vane]"),
+        "must merge [mcp_servers.vane], got {toml_body}"
+    );
+    assert!(
+        toml_body.contains("command = \"vane\""),
+        "vane command, got {toml_body}"
+    );
+    assert!(
+        toml_body.contains("\"mcp\""),
+        "vane args [mcp], got {toml_body}"
+    );
+}
+
+#[test]
+fn mcp_install_grok_toml_if_present_on_all() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    let grok = fake.join(".grok").join("config.toml");
+    fs::create_dir_all(grok.parent().unwrap()).unwrap();
+    fs::write(
+        &grok,
+        "[mcp_servers.fs]\ncommand = \"npx\"\nargs = [\"-y\", \"fs\"]\n",
+    )
+    .unwrap();
+    vane::mcp::install_mcp(&fake, false, None).unwrap();
+    let grok_body = fs::read_to_string(&grok).unwrap();
+    assert!(
+        grok_body.contains("npx"),
+        "must keep the other Grok server, got {grok_body}"
+    );
+    assert!(
+        grok_body.contains("[mcp_servers.vane]"),
+        "must merge [mcp_servers.vane], got {grok_body}"
+    );
+    assert!(
+        grok_body.contains("command = \"vane\""),
+        "vane command, got {grok_body}"
+    );
+}
+
+#[test]
+fn mcp_install_invalid_json_does_not_clobber() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    let claude = fake.join(".claude.json");
+    fs::write(&claude, "{not-json").unwrap();
+    let err = vane::mcp::install_mcp(&fake, false, Some(vane::mcp::McpClient::Claude)).unwrap_err();
+    assert!(
+        err.message.contains("parse") || err.message.contains("JSON"),
+        "invalid JSON must fail closed, got {}",
+        err.message
+    );
+    assert_eq!(fs::read_to_string(&claude).unwrap(), "{not-json");
+}
+
+#[test]
+fn mcp_install_cli_dry_run_json_and_client_limit() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+
+    let dry = run_install_cli(&tmp, &fake, &["mcp", "install", "--dry-run"]);
+    let v = stdout_json(&dry);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["dry_run"], true);
+    let would = v["would_write"].as_array().expect("would_write");
+    assert!(
+        would
+            .iter()
+            .any(|t| t["path"].as_str().unwrap().ends_with(".claude.json")),
+        "would_write={would:?}"
+    );
+    assert!(!fake.join(".claude.json").exists());
+    assert!(!fake.join(".cursor").exists());
+
+    let only = run_install_cli(&tmp, &fake, &["mcp", "install", "--client", "claude"]);
+    let wrote = stdout_json(&only);
+    assert_eq!(wrote["dry_run"], false);
+    assert!(fake.join(".claude.json").is_file());
+    assert!(!fake.join(".cursor").exists());
+    let body: Value =
+        serde_json::from_str(&fs::read_to_string(fake.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(vane_server(&body)["command"], "vane");
+    assert_eq!(vane_server(&body)["args"], json!(["mcp"]));
+}
+
+#[test]
+fn mcp_install_cli_does_not_need_init() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let fake = fake_user_home(&tmp);
+    assert!(!tmp.join("config").join("config.toml").exists());
+    let out = run_install_cli(&tmp, &fake, &["mcp", "install", "--dry-run"]);
+    let v = stdout_json(&out);
+    assert_eq!(v["ok"], true);
+}

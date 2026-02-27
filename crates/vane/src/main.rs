@@ -84,8 +84,11 @@ enum Commands {
         #[arg(long, default_value_t = 8)]
         top_k: u32,
     },
-    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon
-    Mcp,
+    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
     /// Change the embedding model and rebuild the project index
     Model {
         /// Write `[defaults.embed]` in the global config instead of `.vane.toml`
@@ -152,6 +155,19 @@ enum ServiceCmd {
     Uninstall,
 }
 
+#[derive(Subcommand, Debug)]
+enum McpCmd {
+    /// Merge `mcpServers.vane` into Claude / Cursor / Codex configs under $HOME
+    Install {
+        /// Print what would be written without touching files
+        #[arg(long)]
+        dry_run: bool,
+        /// Target one client (default: all known)
+        #[arg(long, value_parser = ["claude", "cursor", "codex"])]
+        client: Option<String>,
+    },
+}
+
 fn resolved_home(cli_home: Option<&std::path::Path>) -> PathBuf {
     let fallback = default_fallback();
     let env_home = std::env::var_os("VANE_HOME");
@@ -180,7 +196,10 @@ fn main() -> ExitCode {
         },
         Commands::Start => run_start(&home),
         Commands::Stop => run_stop(&home),
-        Commands::Mcp => run_mcp(&home),
+        Commands::Mcp { cmd } => match cmd {
+            None => run_mcp(&home),
+            Some(McpCmd::Install { dry_run, client }) => run_mcp_install(dry_run, client),
+        },
         Commands::Query {
             q,
             all,
@@ -226,6 +245,9 @@ fn run_init(home: &Path) -> ExitCode {
     match result {
         Ok(()) => {
             vane::ui::success("initialized");
+            if vane::ui::stdout_tty() {
+                vane::ui::print_next_steps(home);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -378,6 +400,55 @@ fn run_mcp(home: &std::path::Path) -> ExitCode {
     }
 }
 
+fn run_mcp_install(dry_run: bool, client: Option<String>) -> ExitCode {
+    let client = match parse_mcp_client(client.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            vane::ui::error(&e);
+            return ExitCode::from(1);
+        }
+    };
+    let user_home = match std::env::var_os("HOME") {
+        Some(h) if !h.is_empty() => PathBuf::from(h),
+        _ => {
+            vane::ui::error("HOME is not set");
+            return ExitCode::from(1);
+        }
+    };
+    match vane::mcp::install_mcp(&user_home, dry_run, client) {
+        Ok(report) => {
+            if vane::ui::stdout_tty() {
+                vane::ui::print_mcp_install(&report);
+                ExitCode::SUCCESS
+            } else {
+                match serde_json::to_value(&report) {
+                    Ok(v) => print_json(&v),
+                    Err(e) => {
+                        vane::ui::error(&format!("encode mcp install report: {e}"));
+                        ExitCode::from(1)
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            vane::ui::error(&e.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn parse_mcp_client(raw: Option<&str>) -> Result<Option<vane::mcp::McpClient>, String> {
+    match raw {
+        None => Ok(None),
+        Some("claude") => Ok(Some(vane::mcp::McpClient::Claude)),
+        Some("cursor") => Ok(Some(vane::mcp::McpClient::Cursor)),
+        Some("codex") => Ok(Some(vane::mcp::McpClient::Codex)),
+        Some(other) => Err(format!(
+            "unknown MCP client {other:?}, expected claude, cursor, or codex"
+        )),
+    }
+}
+
 fn run_add(home: &Path, path: &Path, yes: bool) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
@@ -437,6 +508,9 @@ fn run_add(home: &Path, path: &Path, yes: bool) -> ExitCode {
     match result {
         Ok(v) => {
             print_add_report(&resolved, &v);
+            if vane::ui::stdout_tty() {
+                vane::ui::print_next_steps(home);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
