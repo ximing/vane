@@ -21,7 +21,7 @@ use crate::embed::{
     embed_model_id, embedder_from_config, parse_embed_model_id, serving_embed_config,
 };
 use crate::error::VaneCliError;
-use crate::gc::{collect_live_keys, gc_all, gc_project, gc_ttl};
+use crate::gc::{collect_live_keys, gc_all_with, gc_project_with, gc_ttl};
 use crate::index::{open_existing, open_or_create, state_path, ProjectIndex, ProjectState};
 use crate::ipc::{
     encode_response, parse_request, RpcRequest, RpcResponse, INTERNAL_ERROR, INVALID_PARAMS,
@@ -58,6 +58,7 @@ enum WriterCmd {
     Gc {
         root: Option<PathBuf>,
         all: bool,
+        dry_run: bool,
         resp: Sender<Result<Value, VaneCliError>>,
     },
     TtlGc,
@@ -333,7 +334,12 @@ fn dispatch(req: RpcRequest, shared: &Arc<Shared>) -> RpcResponse {
             Err(e) => return RpcResponse::err(id, INVALID_PARAMS, e.message),
         },
         "gc" => match gc_params(&params) {
-            Ok((root, all)) => writer_call(shared, |resp| WriterCmd::Gc { root, all, resp }),
+            Ok((root, all, dry_run)) => writer_call(shared, |resp| WriterCmd::Gc {
+                root,
+                all,
+                dry_run,
+                resp,
+            }),
             Err(e) => return RpcResponse::err(id, INVALID_PARAMS, e.message),
         },
         other => {
@@ -632,8 +638,12 @@ fn param_path(params: &Value) -> Result<PathBuf, VaneCliError> {
     Ok(PathBuf::from(s))
 }
 
-fn gc_params(params: &Value) -> Result<(Option<PathBuf>, bool), VaneCliError> {
+fn gc_params(params: &Value) -> Result<(Option<PathBuf>, bool, bool), VaneCliError> {
     let all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = params
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let root = params
         .get("root")
         .and_then(|v| v.as_str())
@@ -642,25 +652,31 @@ fn gc_params(params: &Value) -> Result<(Option<PathBuf>, bool), VaneCliError> {
     if !all && root.is_none() {
         return Err(VaneCliError::new("missing params.root or params.all"));
     }
-    Ok((root, all))
+    Ok((root, all, dry_run))
 }
 
-fn do_gc(shared: &Shared, root: Option<&Path>, all: bool) -> Result<Value, VaneCliError> {
+fn do_gc(
+    shared: &Shared,
+    root: Option<&Path>,
+    all: bool,
+    dry_run: bool,
+) -> Result<Value, VaneCliError> {
     let cas = Cas::new(shared.home.join("rag").join("cas"));
     let report = if all {
-        gc_all(&shared.home, &cas)?
+        gc_all_with(&shared.home, &cas, dry_run)?
     } else {
         let root = root.ok_or_else(|| VaneCliError::new("missing params.root"))?;
         let expanded = expand_tilde(root);
         let canon = expanded.canonicalize().unwrap_or(expanded);
         let live = collect_live_keys(&shared.home, &cas)?;
-        gc_project(&shared.home, &canon, &live, &cas)?
+        gc_project_with(&shared.home, &canon, &live, &cas, dry_run)?
     };
+    let verb = if dry_run { "gc dry-run" } else { "gc" };
     log_msg(
         shared,
         Level::Info,
         &format!(
-            "gc extract={} embed={} db_prev={} projects={} compacted={}",
+            "{verb} extract={} embed={} db_prev={} projects={} compacted={}",
             report.extract_deleted,
             report.embed_deleted,
             report.db_prev_removed,
@@ -832,7 +848,10 @@ where
 
 fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
     while let Ok(cmd) = rx.recv() {
-        maybe_run_ttl(&shared);
+        let skip_ttl = matches!(cmd, WriterCmd::Gc { dry_run: true, .. });
+        if !skip_ttl {
+            maybe_run_ttl(&shared);
+        }
         match cmd {
             WriterCmd::Shutdown => break,
             WriterCmd::Reload { resp } => {
@@ -852,8 +871,13 @@ fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
             WriterCmd::Rebuild { root, embed, resp } => {
                 let _ = resp.send(do_rebuild(&shared, &root, &embed));
             }
-            WriterCmd::Gc { root, all, resp } => {
-                let _ = resp.send(do_gc(&shared, root.as_deref(), all));
+            WriterCmd::Gc {
+                root,
+                all,
+                dry_run,
+                resp,
+            } => {
+                let _ = resp.send(do_gc(&shared, root.as_deref(), all, dry_run));
             }
             WriterCmd::TtlGc => {
                 // `maybe_run_ttl` above runs once per local calendar day.

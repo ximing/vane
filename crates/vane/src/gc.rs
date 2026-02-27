@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cas::{embed_key, Cas};
 use crate::config::load_config;
@@ -49,7 +49,11 @@ impl LiveKeySet {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     pub extract_deleted: u64,
     pub embed_deleted: u64,
@@ -57,6 +61,9 @@ pub struct GcReport {
     pub projects_removed: u64,
     pub compacted: u64,
     pub errors: u64,
+    /// Present in JSON only when `--dry-run` (true).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
 }
 
 impl GcReport {
@@ -75,14 +82,18 @@ pub fn gc_ttl(cas: &Cas, live_keys: &LiveKeySet, now: u64, retain_days: u32) -> 
     let mut live = live_keys.clone();
     live.expand_from_cas(cas);
     let retain_secs = u64::from(retain_days.max(1)) * SECS_PER_DAY;
-    sweep(cas, &live, Some((now, retain_secs)))
+    sweep(cas, &live, Some((now, retain_secs)), false)
 }
 
 /// Delete extract/embed objects that are not referenced by any remaining live set.
 pub fn gc_unreferenced(cas: &Cas, live_keys: &LiveKeySet) -> GcReport {
+    gc_unreferenced_with(cas, live_keys, false)
+}
+
+fn gc_unreferenced_with(cas: &Cas, live_keys: &LiveKeySet, dry_run: bool) -> GcReport {
     let mut live = live_keys.clone();
     live.expand_from_cas(cas);
-    sweep(cas, &live, None)
+    sweep(cas, &live, None, dry_run)
 }
 
 /// Compact the project db, drop `db.prev`, then delete unreferenced CAS using the union of lives.
@@ -97,23 +108,39 @@ pub fn gc_project(
     all_lives: &LiveKeySet,
     cas: &Cas,
 ) -> Result<GcReport, VaneCliError> {
+    gc_project_with(home, root, all_lives, cas, false)
+}
+
+/// Same as [`gc_project`] but never deletes; counts what would be removed.
+pub fn gc_project_with(
+    home: &Path,
+    root: &Path,
+    all_lives: &LiveKeySet,
+    cas: &Cas,
+    dry_run: bool,
+) -> Result<GcReport, VaneCliError> {
     let mut report = GcReport::default();
     let expanded = expand_root(root);
     let pid = project_id(&expanded);
 
     if project_is_registered(home, &expanded)? {
-        report.merge(compact_and_drop_prev(home, &pid));
+        report.merge(compact_and_drop_prev(home, &pid, dry_run));
     } else if state_root_matches(home, &pid, &expanded) {
         let dir = project_dir(home, &pid);
         if dir.exists() {
-            match fs::remove_dir_all(&dir) {
-                Ok(()) => report.projects_removed += 1,
-                Err(_) => report.errors += 1,
+            if dry_run {
+                report.projects_removed += 1;
+            } else {
+                match fs::remove_dir_all(&dir) {
+                    Ok(()) => report.projects_removed += 1,
+                    Err(_) => report.errors += 1,
+                }
             }
         }
     }
 
-    report.merge(gc_unreferenced(cas, all_lives));
+    report.merge(gc_unreferenced_with(cas, all_lives, dry_run));
+    report.dry_run = dry_run;
     Ok(report)
 }
 
@@ -121,12 +148,17 @@ pub fn gc_project(
 ///
 /// Fails closed if the live union cannot be built (unreadable config or any live.json).
 pub fn gc_all(home: &Path, cas: &Cas) -> Result<GcReport, VaneCliError> {
+    gc_all_with(home, cas, false)
+}
+
+/// Same as [`gc_all`] but never deletes; counts what would be removed.
+pub fn gc_all_with(home: &Path, cas: &Cas, dry_run: bool) -> Result<GcReport, VaneCliError> {
     let mut report = GcReport::default();
     let live = collect_live_keys(home, cas)?;
     let registered = registered_project_ids(home)?;
 
     for pid in &registered {
-        report.merge(compact_and_drop_prev(home, pid));
+        report.merge(compact_and_drop_prev(home, pid, dry_run));
     }
     for pid in list_on_disk_project_ids(home) {
         if registered.contains(&pid) {
@@ -134,13 +166,18 @@ pub fn gc_all(home: &Path, cas: &Cas) -> Result<GcReport, VaneCliError> {
         }
         let dir = project_dir(home, &pid);
         if dir.exists() {
-            match fs::remove_dir_all(&dir) {
-                Ok(()) => report.projects_removed += 1,
-                Err(_) => report.errors += 1,
+            if dry_run {
+                report.projects_removed += 1;
+            } else {
+                match fs::remove_dir_all(&dir) {
+                    Ok(()) => report.projects_removed += 1,
+                    Err(_) => report.errors += 1,
+                }
             }
         }
     }
-    report.merge(gc_unreferenced(cas, &live));
+    report.merge(gc_unreferenced_with(cas, &live, dry_run));
+    report.dry_run = dry_run;
     Ok(report)
 }
 
@@ -169,7 +206,7 @@ pub fn collect_live_keys(home: &Path, cas: &Cas) -> Result<LiveKeySet, VaneCliEr
     Ok(keys)
 }
 
-fn sweep(cas: &Cas, live: &LiveKeySet, ttl: Option<(u64, u64)>) -> GcReport {
+fn sweep(cas: &Cas, live: &LiveKeySet, ttl: Option<(u64, u64)>, dry_run: bool) -> GcReport {
     let mut report = GcReport::default();
     let mut cascade = BTreeSet::new();
 
@@ -185,9 +222,13 @@ fn sweep(cas: &Cas, live: &LiveKeySet, ttl: Option<(u64, u64)>) -> GcReport {
         for vk in cas.stored_embed_keys(&key) {
             cascade.insert(vk);
         }
-        match cas.delete_extract(&key) {
-            Ok(()) => report.extract_deleted += 1,
-            Err(_) => report.errors += 1,
+        if dry_run {
+            report.extract_deleted += 1;
+        } else {
+            match cas.delete_extract(&key) {
+                Ok(()) => report.extract_deleted += 1,
+                Err(_) => report.errors += 1,
+            }
         }
     }
 
@@ -200,9 +241,13 @@ fn sweep(cas: &Cas, live: &LiveKeySet, ttl: Option<(u64, u64)>) -> GcReport {
                 continue;
             }
         }
-        match cas.delete_embed(&key) {
-            Ok(()) => report.embed_deleted += 1,
-            Err(_) => report.errors += 1,
+        if dry_run {
+            report.embed_deleted += 1;
+        } else {
+            match cas.delete_embed(&key) {
+                Ok(()) => report.embed_deleted += 1,
+                Err(_) => report.errors += 1,
+            }
         }
     }
     report
@@ -216,13 +261,17 @@ fn age_exceeded(last_seen: Option<u64>, now: u64, retain_secs: u64) -> bool {
     }
 }
 
-fn compact_and_drop_prev(home: &Path, project_id: &str) -> GcReport {
+fn compact_and_drop_prev(home: &Path, project_id: &str, dry_run: bool) -> GcReport {
     let mut report = GcReport::default();
     let prev = project_db_prev_path(home, project_id);
     if prev.exists() {
-        match fs::remove_dir_all(&prev) {
-            Ok(()) => report.db_prev_removed += 1,
-            Err(_) => report.errors += 1,
+        if dry_run {
+            report.db_prev_removed += 1;
+        } else {
+            match fs::remove_dir_all(&prev) {
+                Ok(()) => report.db_prev_removed += 1,
+                Err(_) => report.errors += 1,
+            }
         }
     }
 
@@ -237,6 +286,10 @@ fn compact_and_drop_prev(home: &Path, project_id: &str) -> GcReport {
     let (Some(dim), Some(model_id)) = (state.dim, state.embed_model_id.as_deref()) else {
         return report;
     };
+    if dry_run {
+        report.compacted += 1;
+        return report;
+    }
     let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
     match open_or_create_at(&db, dim, model_id, prefer_cjk) {
         Ok(idx) => {

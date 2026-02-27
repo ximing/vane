@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vane::config::{load_config, resolve_policy, ProjectFile, TypeRule};
+use std::process::Command;
+
+use vane::config::{inspect_policy, load_config, resolve_policy, ProjectFile, TypeRule};
 use vane::project::{
     find_current_root, find_vane_toml_dir, project_id, reject_nested, resolve_query_scope,
     QueryScope,
@@ -225,6 +227,171 @@ dim = 1024
     );
     let cfg = load_config(&tmp).unwrap();
     assert_eq!(cfg.defaults.embed.dim, Some(1024));
+}
+
+#[test]
+fn inspect_policy_layers_and_never_leaks_api_key() {
+    let tmp = tempfile_dir();
+    let proj = tmp.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    let proj = proj.canonicalize().unwrap();
+    write(
+        &tmp.join("config/config.toml"),
+        &format!(
+            r#"
+[defaults.embed]
+provider = "ollama"
+model = "nomic-embed-text"
+base_url = "http://127.0.0.1:11434"
+api_key = "sk-global-secret"
+exclude = ["**/node_modules/**", "**/*.log"]
+[[types]]
+glob = "**/*.md"
+extractor = "text"
+[[projects]]
+path = "{}"
+exclude = ["**/generated/**"]
+[projects.embed]
+model = "proj-model"
+"#,
+            proj.display()
+        ),
+    );
+    let cfg = load_config(&tmp).unwrap();
+    write(
+        &proj.join(".vane.toml"),
+        r#"
+exclude = ["**/tmp/**"]
+[chunk]
+max_chars = 800
+"#,
+    );
+
+    let global = inspect_policy(&cfg, None, true).unwrap();
+    assert!(global.root.is_none());
+    assert!(global.project_id.is_none());
+    assert_eq!(global.source.embed, "global");
+    assert_eq!(global.source.exclude, "global");
+    assert_eq!(global.embed.model, "nomic-embed-text");
+    assert!(global.exclude.project.is_empty());
+    let dumped = serde_json::to_string(&global).unwrap();
+    assert!(
+        !dumped.contains("api_key") && !dumped.contains("sk-global-secret"),
+        "inspect must never emit api_key, got {dumped}"
+    );
+
+    let report = inspect_policy(&cfg, Some(&proj), false).unwrap();
+    assert_eq!(report.root.as_deref(), Some(proj.to_str().unwrap()));
+    assert!(report.project_id.is_some());
+    assert_eq!(report.embed.model, "proj-model");
+    assert_eq!(report.source.embed, "projects");
+    assert_eq!(report.chunk.max_chars, 800);
+    assert_eq!(report.source.chunk, "vane.toml");
+    assert_eq!(report.source.exclude, "vane.toml");
+    assert!(report
+        .exclude
+        .global
+        .iter()
+        .any(|e| e.contains("node_modules")));
+    assert!(report
+        .exclude
+        .project
+        .iter()
+        .any(|e| e.contains("generated")));
+    assert!(report.exclude.project.iter().any(|e| e.contains("tmp")));
+    assert!(report
+        .exclude
+        .effective
+        .iter()
+        .any(|e| e.contains("node_modules")));
+    assert!(report.exclude.effective.iter().any(|e| e.contains("tmp")));
+    let dumped = serde_json::to_string(&report).unwrap();
+    assert!(!dumped.contains("api_key"), "{dumped}");
+    assert!(!dumped.contains("sk-"), "{dumped}");
+}
+
+fn fake_user_home(home: &Path) -> PathBuf {
+    let fake = home.join("uh");
+    fs::create_dir_all(&fake).unwrap();
+    fake
+}
+
+fn run_cli(home: &Path, cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    let output = Command::new(bin)
+        .args(["--home", home.to_str().expect("utf-8 home")])
+        .args(args)
+        .current_dir(cwd)
+        .env("VANE_HOME", home)
+        .env("HOME", fake_user_home(home))
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("run vane");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn inspect_cli_reads_test_config() {
+    let tmp = tempfile_dir();
+    let proj = tmp.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    let proj = proj.canonicalize().unwrap();
+    write(
+        &tmp.join("config/config.toml"),
+        &format!(
+            r#"
+[defaults.embed]
+provider = "ollama"
+model = "nomic-embed-text"
+base_url = "http://127.0.0.1:9"
+api_key = "sk-must-not-print"
+exclude = ["**/node_modules/**"]
+[[projects]]
+path = "{}"
+exclude = ["**/build/**"]
+"#,
+            proj.display()
+        ),
+    );
+    write(
+        &proj.join(".vane.toml"),
+        "exclude = [\"**/scratch/**\"]\n[chunk]\nmax_chars = 900\n",
+    );
+
+    let (code, stdout, stderr) =
+        run_cli(&tmp, &proj, &["inspect", "--root", proj.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("inspect JSON");
+    assert_eq!(PathBuf::from(v["root"].as_str().unwrap()), proj);
+    assert!(v["project_id"].as_str().is_some());
+    assert_eq!(v["source"]["chunk"], "vane.toml");
+    assert_eq!(v["source"]["exclude"], "vane.toml");
+    assert_eq!(v["chunk"]["max_chars"], 900);
+    assert!(v["embed"].get("api_key").is_none(), "{v}");
+    assert!(
+        !stdout.contains("api_key") && !stdout.contains("sk-must-not-print"),
+        "{stdout}"
+    );
+    let project_ex = v["exclude"]["project"].as_array().expect("exclude.project");
+    assert!(project_ex
+        .iter()
+        .any(|e| e.as_str().unwrap().contains("build")));
+    assert!(project_ex
+        .iter()
+        .any(|e| e.as_str().unwrap().contains("scratch")));
+
+    let (code, stdout, stderr) = run_cli(&tmp, &tmp, &["inspect", "--global"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let g: serde_json::Value = serde_json::from_str(&stdout).expect("global inspect JSON");
+    assert!(g["root"].is_null(), "{g}");
+    assert_eq!(g["source"]["embed"], "global");
+    assert_eq!(g["chunk"]["max_chars"], 1200);
+    assert!(g["exclude"]["project"].as_array().unwrap().is_empty());
+    assert!(!stdout.contains("api_key"));
 }
 
 #[test]

@@ -389,6 +389,33 @@ fn disk_stats_counts_cas_and_project_db() {
 }
 
 #[test]
+fn df_piped_json_lists_home_cas_and_project_db() {
+    let tmp = tempfile_dir("df");
+    assert_isolated(&tmp);
+    write_config(&tmp, &[]);
+    fs::create_dir_all(tmp.join("rag").join("cas")).unwrap();
+    fs::write(tmp.join("rag").join("cas").join("blob"), "12345").unwrap();
+    let db = tmp.join("rag").join("projects").join("abc123").join("db");
+    fs::create_dir_all(&db).unwrap();
+    fs::write(db.join("leaf"), "xyz").unwrap();
+
+    let (code, stdout, stderr) = run_cli(&tmp, &tmp, &["df"]);
+    assert_eq!(code, 0, "df should succeed, stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("df JSON");
+    assert_eq!(v["cas_bytes"], 5);
+    let projects = v["projects"].as_array().expect("projects");
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["project_id"], "abc123");
+    assert_eq!(projects[0]["db_bytes"], 3);
+    assert!(v["home_bytes"].as_u64().unwrap() >= 5 + 3);
+    assert_eq!(v["large"], false);
+    assert!(
+        !stdout.contains("api_key"),
+        "df must never print api_key: {stdout}"
+    );
+}
+
+#[test]
 fn status_redacts_last_error_secrets() {
     let tmp = tempfile_dir("vr");
     assert_isolated(&tmp);
