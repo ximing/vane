@@ -33,7 +33,7 @@ Tantivy 级别的文本检索、一体化混合排序，收在一个库里。
 - [安装](#安装)
   - [Node.js](#nodejs) · [Go](#go) · [浏览器](#浏览器) · [从源码构建](#从源码构建)
 - [本机侧车 CLI](#本机侧车-cli)
-  - [安装](#安装-cli) · [第一次跑](#第一次跑) · [MCP](#mcp) · [Agent skills](#agent-skills)
+  - [安装](#安装-cli) · [第一次跑](#第一次跑) · [诊断与维护](#诊断与维护) · [MCP](#mcp) · [Agent skills](#agent-skills)
 - [快速开始](#快速开始)
   - [Node.js](#快速开始nodejs) · [Go](#快速开始go) · [浏览器](#快速开始浏览器)
 - [API 参考](#api-参考)
@@ -193,13 +193,51 @@ ollama pull nomic-embed-text
 vane init                 # embedding、API key、向量维度、第一个目录、用户服务
 vane add ~/notes          # 再登记一个根
 vane start                # 若没装用户服务
-vane status
+vane status               # 终端仪表盘（管道输出为 JSON）
 vane query "鉴权怎么做"
 vane query "发版" --all
 ```
 
 家目录：`--home` > `VANE_HOME` > `~/.vane`。项目策略写在 `<root>/.vane.toml`（禁止放
 `api_key`）。相同文件字节在分支切换时复用提取/向量缓存。`vane gc` 永不删除用户源文件。
+
+`vane init` 会探测 embedder，**探测失败则中止**。终端里可以确认「仍继续」。脚本里设
+`VANE_ALLOW_EMBED_FAIL=1` 才会在探测失败时仍写出配置——在 provider 恢复前，检索只走
+BM25（命中带 `degraded`）。
+
+### 诊断与维护
+
+终端里 `vane status` 是一块仪表盘：守护进程是否在跑、脏队列、磁盘，以及每个根的
+live 文件数、模型和跳过数。管道输出是 JSON。
+
+检索为空或看起来过期时，按这个顺序看：
+
+```bash
+vane doctor                 # 配置、socket、守护进程、embedder、根目录、磁盘
+vane status
+vane query "鉴权"            # 空结果会打印 why（退出码 0）
+vane issues                 # 当前根里被跳过的文件
+vane issues --all
+vane logs                   # 最近 50 行已脱敏的守护进程日志
+vane logs --follow --lines 200
+vane inspect                # 解析后的 embed / chunk / exclude / types
+vane inspect --global
+vane inspect --root ~/notes
+vane df                     # $VANE_HOME、CAS、各项目 db
+vane gc --dry-run           # 只统计未引用缓存，不删除
+vane gc --all --dry-run
+```
+
+空的 `vane query` 仍会成功退出。CLI 会说明 **原因**（命中第一条即停）：尚未初始化、
+当前目录不是已登记根、仍在建索引、embedder 不可用、查询像被排除的路径、查错了根
+（试 `--all` / `--root`）、索引为空、或没有匹配的 chunk。接着跑 `vane doctor` /
+`vane issues` / `vane logs`。
+
+改 embedding 模型会重嵌 live 文件。终端会确认；非交互必须加 `--yes`（`-y`）：
+
+```bash
+vane model --model nomic-embed-text --yes
+```
 
 ### MCP
 
@@ -215,6 +253,15 @@ vane query "发版" --all
     }
   }
 }
+```
+
+也可以把 `mcpServers.vane` 合并进 `$HOME` 下 Claude / Cursor / Codex 的配置
+（默认：所有已知客户端）：
+
+```bash
+vane mcp install --dry-run              # 只打印将要写入的内容
+vane mcp install
+vane mcp install --client claude        # claude | cursor | codex
 ```
 
 Agent 应先 `list_roots`，再 `search` / `read`，不要自己扫盘。

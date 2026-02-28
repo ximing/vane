@@ -25,17 +25,28 @@ Unsupported arch: `cargo install --git https://github.com/ximing/vane.git --lock
 ## Daemon must be running
 
 ```bash
-vane status          # not initialized → vane init
+vane status          # TTY dashboard; not initialized → vane init
+vane doctor          # home, daemon, embedder, roots, disk
 vane start           # if the user service is not installed
 ```
 
-`vane init` wizard: embed provider (Ollama default `nomic-embed-text`, or `openai_compat`), first folder, excludes, optional user service (launchd / systemd --user).
+`vane init` wizard: embed provider (Ollama default `nomic-embed-text`, or `openai_compat`), first folder, excludes, optional user service (launchd / systemd --user). Embed probe **fails closed**; on a TTY you can continue anyway, otherwise set `VANE_ALLOW_EMBED_FAIL=1`.
 
 Home: `--home` > `VANE_HOME` > `~/.vane`. Never put `api_key` in `<root>/.vane.toml`.
 
 `vane mcp` is only a stdio bridge to `~/.vane/run/vane.sock`. It does not embed the index.
 
 ## MCP client config
+
+Prefer writing client configs with:
+
+```bash
+vane mcp install --dry-run
+vane mcp install                          # Claude, Cursor, existing Codex
+vane mcp install --client claude          # also: cursor | codex
+```
+
+Or merge by hand:
 
 ```json
 {
@@ -68,6 +79,22 @@ vane query "logo" --type image --top-k 8
 
 `vane query` without `--all` / `--root` uses the registered root that contains the current working directory.
 
+Empty hits still succeed. In a TTY the CLI prints a **why** line (not initialized, cwd not registered, still indexing, embedder down, excluded path, wrong root, empty index, or no matching chunks). Piped stdout stays an empty JSON array; the reason goes to stderr. Then run `vane doctor` / `vane issues` / `vane logs`.
+
+## Day-to-day CLI
+
+```bash
+vane status
+vane doctor
+vane issues                 # current root; or --root PATH / --all
+vane logs                   # last 50 redacted lines
+vane logs --follow --lines 200
+vane inspect                # current project; or --root PATH / --global
+vane df
+vane gc --dry-run           # count; does not delete
+vane model --model nomic-embed-text --yes   # --yes required when not a TTY
+```
+
 ## Common mistakes
 
 | Symptom | What to do |
@@ -75,7 +102,9 @@ vane query "logo" --type image --top-k 8
 | `vane: command not found` | Install the CLI; add `~/.local/bin` to `PATH` |
 | MCP: daemon is not running | `vane start` (or `vane init` first) |
 | `list_roots` empty / live files 0 | `vane add <folder>`; wait for first reconcile; `vane status` |
-| `search` returns `[]` | Confirm live files > 0. Embedder down still returns BM25 with `degraded` |
+| `search` / `vane query` returns `[]` | Read the why line. Confirm live files > 0. `vane doctor`; `vane issues`. Embedder down still returns BM25 with `degraded` when there are hits |
+| MCP client has no vane server | `vane mcp install --dry-run` then `vane mcp install` |
+| `vane model` refuses in a script | Pass `--yes` (`-y`) |
 | Agent globbed or grepped the repo | Stop. Call `search` then `read` |
 
-`vane gc` never deletes the user's source files — only data under `$VANE_HOME/rag`.
+`vane gc` never deletes the user's source files — only data under `$VANE_HOME/rag`. Preview with `vane gc --dry-run`.
