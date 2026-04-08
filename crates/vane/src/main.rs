@@ -1030,7 +1030,7 @@ fn run_model(
     let targets: Vec<PathBuf> = if global {
         roots
     } else if let Some(r) = root {
-        let expanded = expand_tilde(&r);
+        let expanded = vane::fsutil::expand_tilde(&r);
         vec![expanded.canonicalize().unwrap_or(expanded)]
     } else {
         let cwd = match std::env::current_dir() {
@@ -1362,7 +1362,7 @@ fn resolve_policy_root(
 }
 
 fn resolve_root_arg(path: &Path) -> Result<PathBuf, vane::error::VaneCliError> {
-    let expanded = expand_tilde(path);
+    let expanded = vane::fsutil::expand_tilde(path);
     let abs = if expanded.is_absolute() {
         expanded
     } else {
@@ -1389,21 +1389,4 @@ fn print_json(v: &serde_json::Value) -> ExitCode {
         Err(_) => println!("{v}"),
     }
     ExitCode::SUCCESS
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if s == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path.to_path_buf()
 }

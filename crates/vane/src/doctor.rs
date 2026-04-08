@@ -224,7 +224,7 @@ pub fn explain_empty_query(
         .map(|p| {
             p.path
                 .canonicalize()
-                .unwrap_or_else(|_| expand_tilde(&p.path))
+                .unwrap_or_else(|_| crate::fsutil::expand_tilde(&p.path))
         })
         .collect();
     let in_root = find_current_root(cwd, &registered);
@@ -448,7 +448,7 @@ fn check_roots(cfg: &Config, checks: &mut Vec<DoctorCheck>) {
         return;
     }
     for proj in &cfg.projects {
-        let stored = expand_tilde(&proj.path);
+        let stored = crate::fsutil::expand_tilde(&proj.path);
         let path = stored.canonicalize().unwrap_or_else(|_| stored.clone());
         let pid = project_id(&path);
         let id = format!("root:{pid}");
@@ -511,7 +511,7 @@ fn check_disk(home: &Path, checks: &mut Vec<DoctorCheck>) {
 fn root_status_object(home: &Path, stored: &Path, dirty: &DirtyQueue) -> Value {
     let for_id = stored
         .canonicalize()
-        .unwrap_or_else(|_| expand_tilde(stored));
+        .unwrap_or_else(|_| crate::fsutil::expand_tilde(stored));
     let pid = project_id(&for_id);
     let state = ProjectState::load(&state_path(home, &pid)).unwrap_or_default();
     let live = LiveSet::load_for_project(home, &pid).unwrap_or_default();
@@ -564,12 +564,12 @@ fn selected_roots(
             .map(|p| {
                 p.path
                     .canonicalize()
-                    .unwrap_or_else(|_| expand_tilde(&p.path))
+                    .unwrap_or_else(|_| crate::fsutil::expand_tilde(&p.path))
             })
             .collect();
     }
     if let Some(r) = user_root {
-        let expanded = expand_tilde(r);
+        let expanded = crate::fsutil::expand_tilde(r);
         return vec![expanded.canonicalize().unwrap_or(expanded)];
     }
     if let Some(r) = cwd_root {
@@ -580,7 +580,7 @@ fn selected_roots(
         .map(|p| {
             p.path
                 .canonicalize()
-                .unwrap_or_else(|_| expand_tilde(&p.path))
+                .unwrap_or_else(|_| crate::fsutil::expand_tilde(&p.path))
         })
         .collect()
 }
@@ -665,23 +665,6 @@ fn query_as_rel_path(query: &str, selected: &[PathBuf]) -> Option<String> {
     } else {
         None
     }
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if s == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path.to_path_buf()
 }
 
 fn redact_secrets(s: &str) -> String {

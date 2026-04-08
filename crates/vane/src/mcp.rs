@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -435,7 +435,7 @@ pub fn install_mcp(
                 if dry_run {
                     would_write.push(target);
                 } else {
-                    atomic_write(&job.path, &bytes, job.client)?;
+                    crate::fsutil::atomic_write(&job.path, &bytes, job.client)?;
                     written.push(target);
                 }
             }
@@ -676,36 +676,4 @@ fn encode_toml_pretty(value: &toml::Value, path: &Path) -> Result<Vec<u8>, VaneC
         body.push('\n');
     }
     Ok(body.into_bytes())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), VaneCliError> {
-    let dir = path.parent().ok_or_else(|| {
-        VaneCliError::new(format!("{label} path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(dir).map_err(|e| {
-        VaneCliError::new(format!("create {} parent {}: {e}", label, dir.display()))
-    })?;
-    let tmp = dir.join(format!(
-        "{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or(label)
-    ));
-    {
-        let mut f = File::create(&tmp).map_err(|e| {
-            VaneCliError::new(format!("create {} temp {}: {e}", label, tmp.display()))
-        })?;
-        f.write_all(bytes).map_err(|e| {
-            VaneCliError::new(format!("write {} temp {}: {e}", label, tmp.display()))
-        })?;
-        f.sync_all().map_err(|e| {
-            VaneCliError::new(format!("sync {} temp {}: {e}", label, tmp.display()))
-        })?;
-    }
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        VaneCliError::new(format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })
 }

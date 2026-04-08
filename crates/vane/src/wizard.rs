@@ -505,27 +505,10 @@ fn type_rule_value(t: crate::config::TypeRule) -> toml::Value {
 }
 
 fn normalize_root(path: &Path) -> Result<PathBuf, VaneCliError> {
-    let expanded = expand_tilde(path);
+    let expanded = crate::fsutil::expand_tilde(path);
     expanded
         .canonicalize()
         .map_err(|e| VaneCliError::new(format!("canonicalize {}: {e}", expanded.display())))
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if s == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path.to_path_buf()
 }
 
 fn load_existing_projects(home: &Path) -> Vec<toml::Value> {
