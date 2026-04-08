@@ -12,6 +12,8 @@ pub mod fsutil;
 pub mod gc;
 pub mod glob_match;
 pub mod home;
+pub mod humanize;
+pub mod i18n;
 pub mod index;
 pub mod ipc;
 pub mod live;
