@@ -8,6 +8,7 @@ use crate::config::InspectReport;
 use crate::doctor::{CheckLevel, DoctorReport};
 use crate::gc::GcReport;
 use crate::home::DiskStats;
+use crate::i18n::Lang;
 use crate::mcp::McpInstallReport;
 use crate::progress::IssuesReport;
 
@@ -85,40 +86,129 @@ pub fn spinner(message: &str) -> ProgressBar {
     pb
 }
 
-pub fn print_hits(hits: &[serde_json::Value]) {
+/// Fold a leading $HOME into `~` for display.
+pub fn collapse_home(path: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if path == home.as_ref() {
+            return "~".to_string();
+        }
+        if let Some(rest) = path.strip_prefix(format!("{home}/").as_str()) {
+            return format!("~/{rest}");
+        }
+    }
+    path.to_string()
+}
+
+/// The one-line scope header printed before TTY query hits (spec §2.1).
+pub fn format_scope_header(
+    root: Option<&str>,
+    roots: usize,
+    live: u64,
+    degraded: bool,
+    lang: Lang,
+    colors: bool,
+) -> String {
+    let mode = if degraded {
+        crate::i18n::tr(lang, "header.degraded").to_string()
+    } else {
+        crate::i18n::tr(lang, "header.hybrid").to_string()
+    };
+    let text = match root {
+        Some(r) => crate::i18n::tr(lang, "header.searching_one")
+            .replace("{root}", r)
+            .replace("{n}", &live.to_string())
+            .replace("{mode}", &mode),
+        None => crate::i18n::tr(lang, "header.searching_all")
+            .replace("{k}", &roots.to_string())
+            .replace("{n}", &live.to_string())
+            .replace("{mode}", &mode),
+    };
+    if colors && degraded {
+        // Approved simplification: only the degraded mode substring is colored.
+        text.replace(&mode, &style(&mode).yellow().to_string())
+    } else {
+        text
+    }
+}
+
+pub struct HitLineOpts {
+    pub all: bool,
+    pub verbose: bool,
+    pub header_degraded: bool,
+}
+
+/// Pure per-hit line assembly; `print_hits` is a thin shell over this.
+pub fn hit_lines(
+    hit: &serde_json::Value,
+    index: usize,
+    opts: &HitLineOpts,
+    colors: bool,
+) -> Vec<String> {
+    let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let path = hit.get("path").and_then(|v| v.as_str()).unwrap_or("-");
+    let root = hit.get("root").and_then(|v| v.as_str()).unwrap_or("");
+    let snippet = hit.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+    let degraded = hit
+        .get("degraded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let dim_if = |msg: &str| {
+        if colors {
+            style(msg).dim().to_string()
+        } else {
+            msg.to_string()
+        }
+    };
+    let n = index + 1;
+    let mut lines = Vec::new();
+    if colors {
+        lines.push(format!(
+            "{} {} {}",
+            style(format!("{n:>2}.")).cyan().bold(),
+            style(format!("{score:.3}")).magenta(),
+            style(path).green()
+        ));
+    } else {
+        lines.push(format!("{n:>2}. {score:.3}  {path}"));
+    }
+    if opts.all && !root.is_empty() {
+        lines.push(format!("    {}", dim_if(root)));
+    }
+    if !snippet.is_empty() {
+        lines.push(format!("    {snippet}"));
+    }
+    if degraded && !opts.header_degraded {
+        if colors {
+            lines.push(format!(
+                "    {} degraded (BM25 only; embedder unreachable)",
+                style("⚠").yellow().bold()
+            ));
+        } else {
+            lines.push("    warning: degraded (BM25 only; embedder unreachable)".to_string());
+        }
+    }
+    if opts.verbose && !id.is_empty() {
+        lines.push(format!("    {}", dim_if(&format!("id {id}"))));
+    }
+    lines
+}
+
+pub fn print_hits(hits: &[serde_json::Value], all: bool, verbose: bool, header_degraded: bool) {
     if hits.is_empty() {
         warn("no hits");
         return;
     }
+    let opts = HitLineOpts {
+        all,
+        verbose,
+        header_degraded,
+    };
+    let colors = colors_enabled();
     for (i, hit) in hits.iter().enumerate() {
-        let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let path = hit.get("path").and_then(|v| v.as_str()).unwrap_or("-");
-        let root = hit.get("root").and_then(|v| v.as_str()).unwrap_or("");
-        let snippet = hit.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
-        let degraded = hit
-            .get("degraded")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let n = i + 1;
-        if colors_enabled() {
-            print!("{} ", style(format!("{n:>2}.")).cyan().bold());
-            print!("{} ", style(format!("{score:.3}")).magenta());
-            println!("{}", style(path).green());
-        } else {
-            println!("{n:>2}. {score:.3}  {path}");
-        }
-        if !root.is_empty() {
-            println!("    {}", dim(root));
-        }
-        if !snippet.is_empty() {
-            println!("    {snippet}");
-        }
-        if degraded {
-            warn("    degraded (BM25 only; embedder unreachable)");
-        }
-        if !id.is_empty() {
-            println!("    {}", dim(&format!("id {id}")));
+        for line in hit_lines(hit, i, &opts, colors) {
+            println!("{line}");
         }
     }
 }

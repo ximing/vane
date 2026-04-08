@@ -86,8 +86,8 @@ enum Commands {
     Stop,
     /// Search the current project (or --all / --root)
     Query {
-        /// Query text
-        q: String,
+        /// Query text (omit on a TTY to be prompted)
+        q: Option<String>,
         /// Fuse hits across every registered project (RRF)
         #[arg(long)]
         all: bool,
@@ -103,6 +103,9 @@ enum Commands {
         /// Max hits (default 8, cap 50)
         #[arg(long, default_value_t = 8)]
         top_k: u32,
+        /// Also print internal hit ids
+        #[arg(long)]
+        verbose: bool,
     },
     /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
     Mcp {
@@ -237,7 +240,24 @@ fn main() -> ExitCode {
             root,
             extractor,
             top_k,
-        } => run_query(&home, q, all || global, root, extractor, top_k),
+            verbose,
+        } => match vane::dispatch::decide_query_arg(q, vane::ui::interactive()) {
+            vane::dispatch::QueryArg::Run(q) => {
+                run_query(&home, q, all || global, root, extractor, top_k, verbose)
+            }
+            vane::dispatch::QueryArg::Prompt => match prompt_query_text() {
+                Some(q) => run_query(&home, q, all || global, root, extractor, top_k, verbose),
+                None => ExitCode::SUCCESS, // empty input cancels (spec §2.3)
+            },
+            vane::dispatch::QueryArg::MissingError => {
+                vane::ui::error(vane::i18n::pick(
+                    vane::i18n::Lang::detect(),
+                    false,
+                    "query.missing_query",
+                ));
+                ExitCode::from(2)
+            }
+        },
         Commands::Model {
             global,
             root,
@@ -910,6 +930,24 @@ fn apply_glob_reset(
     }
 }
 
+fn prompt_query_text() -> Option<String> {
+    let lang = vane::i18n::Lang::detect();
+    let prompt = vane::i18n::tr(lang, "query.prompt");
+    let input: Result<String, _> = cliclack::input(prompt).interact();
+    match input {
+        Ok(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_query(
     home: &std::path::Path,
     q: String,
@@ -917,6 +955,7 @@ fn run_query(
     root: Option<PathBuf>,
     extractor: Option<String>,
     top_k: u32,
+    verbose: bool,
 ) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
@@ -932,10 +971,12 @@ fn run_query(
     if let Some(t) = extractor {
         params["type"] = json!(t);
     }
-    if all {
+    let resolved_root: Option<PathBuf> = if all {
         params["all"] = json!(true);
+        None
     } else if let Some(r) = root.as_ref() {
         params["root"] = json!(r.display().to_string());
+        Some(r.clone())
     } else {
         let cwd = match std::env::current_dir() {
             Ok(c) => c,
@@ -950,12 +991,26 @@ fn run_query(
             .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
             .collect();
         match resolve_query_scope(&cwd, &roots, false) {
-            QueryScope::All => params["all"] = json!(true),
-            QueryScope::Root(r) => params["root"] = json!(r.display().to_string()),
+            QueryScope::All => {
+                params["all"] = json!(true);
+                None
+            }
+            QueryScope::Root(r) => {
+                params["root"] = json!(r.display().to_string());
+                Some(r)
+            }
         }
-    }
+    };
     match vane::ipc::rpc_call(home, "search", params) {
-        Ok(v) => print_search_result(home, &v, &q, all, root.as_deref()),
+        Ok(v) => print_search_result(
+            home,
+            &v,
+            &q,
+            all,
+            root.as_deref(),
+            resolved_root.as_deref(),
+            verbose,
+        ),
         Err(e) => {
             vane::ui::error(&e.message);
             ExitCode::from(1)
@@ -963,12 +1018,44 @@ fn run_query(
     }
 }
 
+/// Header data for the resolved scope: (root label, root count, live files).
+fn header_scope(home: &Path, resolved_root: Option<&Path>) -> (Option<String>, usize, u64) {
+    match resolved_root {
+        Some(r) => {
+            let pid = project_id(r);
+            let live = LiveSet::load_for_project(home, &pid)
+                .map(|l| l.files.len() as u64)
+                .unwrap_or(0);
+            (
+                Some(vane::ui::collapse_home(&r.display().to_string())),
+                1,
+                live,
+            )
+        }
+        None => match load_config(home) {
+            Ok(cfg) => {
+                let roots: Vec<PathBuf> = cfg
+                    .projects
+                    .iter()
+                    .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
+                    .collect();
+                let live = count_live_files(home, &roots);
+                (None, roots.len(), live)
+            }
+            Err(_) => (None, 0, 0),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_search_result(
     home: &Path,
     v: &serde_json::Value,
     q: &str,
     all: bool,
     root: Option<&Path>,
+    resolved_root: Option<&Path>,
+    verbose: bool,
 ) -> ExitCode {
     let hits = v.as_array().cloned().unwrap_or_else(|| {
         v.get("hits")
@@ -976,10 +1063,30 @@ fn print_search_result(
             .cloned()
             .unwrap_or_default()
     });
+    let tty = vane::ui::stdout_tty();
+    let degraded = hits
+        .iter()
+        .any(|h| h.get("degraded").and_then(|x| x.as_bool()).unwrap_or(false));
+    if tty {
+        // Spec §2.1: the scope header prints even when the result is empty.
+        let (root_label, roots, live) = header_scope(home, resolved_root);
+        let lang = vane::i18n::Lang::detect();
+        println!(
+            "{}",
+            vane::ui::format_scope_header(
+                root_label.as_deref(),
+                roots,
+                live,
+                degraded,
+                lang,
+                vane::ui::colors_enabled(),
+            )
+        );
+    }
     if hits.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let why = vane::doctor::explain_empty_query(home, &cwd, q, all, root);
-        if vane::ui::stdout_tty() {
+        if tty {
             vane::ui::print_why(&why.message);
             return ExitCode::SUCCESS;
         }
@@ -987,8 +1094,8 @@ fn print_search_result(
         eprintln!("{}", why.message);
         return ExitCode::SUCCESS;
     }
-    if vane::ui::stdout_tty() {
-        vane::ui::print_hits(&hits);
+    if tty {
+        vane::ui::print_hits(&hits, resolved_root.is_none(), verbose, degraded);
         ExitCode::SUCCESS
     } else {
         print_json(v)

@@ -4,6 +4,7 @@ pub mod classify;
 pub mod config;
 pub mod daemon;
 pub mod dirty;
+pub mod dispatch;
 pub mod doctor;
 pub mod embed;
 pub mod error;
