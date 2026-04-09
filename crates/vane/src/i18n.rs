@@ -52,6 +52,24 @@ pub const EN_TABLE: &[(&str, &str)] = &[
     ),
     ("header.hybrid", "hybrid"),
     ("header.degraded", "BM25 (degraded: embedder unreachable)"),
+    ("read.no_cache", "no recent query — run vane query first"),
+    ("read.empty", "last query had no hits"),
+    (
+        "read.out_of_range",
+        "no hit {n} — last query has {k} hits (1..={k})",
+    ),
+    (
+        "read.stale",
+        "this hit is stale — the file changed since the last query; re-run vane query or use vane read {n} --file",
+    ),
+    (
+        "read.file_missing",
+        "source file no longer exists: {path}",
+    ),
+    (
+        "read.binary",
+        "{path} is not a text file (extractor {extractor}) — open it directly",
+    ),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -73,6 +91,21 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
     ),
     ("header.hybrid", "混合检索"),
     ("header.degraded", "BM25（降级：embedder 不可达）"),
+    ("read.no_cache", "还没有可查的结果 — 先运行 vane query"),
+    ("read.empty", "上次查询没有命中"),
+    (
+        "read.out_of_range",
+        "没有第 {n} 条 — 上次查询共 {k} 条（1..={k}）",
+    ),
+    (
+        "read.stale",
+        "该结果已过期 — 文件在上次查询后发生变化；请重新 vane query 或用 vane read {n} --file",
+    ),
+    ("read.file_missing", "源文件已不存在：{path}"),
+    (
+        "read.binary",
+        "{path} 不是文本文件（类型 {extractor}）— 请直接打开",
+    ),
 ];
 
 pub fn tr(lang: Lang, key: &str) -> &'static str {
