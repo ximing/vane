@@ -331,7 +331,7 @@ fn run_status(home: &Path) -> ExitCode {
         vane::doctor::status_from_disk(home, false)
     };
     if vane::ui::stdout_tty() {
-        vane::ui::print_status_dashboard(&v);
+        vane::ui::print_status_dashboard(home, &v);
         ExitCode::SUCCESS
     } else {
         print_json(&v)

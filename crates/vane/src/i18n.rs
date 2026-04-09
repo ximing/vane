@@ -70,6 +70,12 @@ pub const EN_TABLE: &[(&str, &str)] = &[
         "read.binary",
         "{path} is not a text file (extractor {extractor}) — open it directly",
     ),
+    ("status.watching", "watching"),
+    ("status.indexing", "indexing {scanned}/{total}"),
+    ("status.indexed_ago", "indexed {ago}"),
+    ("status.never_indexed", "never indexed"),
+    ("status.skipped_hint", "{n} skipped — run vane issues"),
+    ("status.pending_changes", "{n} pending changes"),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -106,6 +112,15 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
         "read.binary",
         "{path} 不是文本文件（类型 {extractor}）— 请直接打开",
     ),
+    ("status.watching", "正在监听"),
+    ("status.indexing", "索引中 {scanned}/{total}"),
+    ("status.indexed_ago", "{ago}完成索引"),
+    ("status.never_indexed", "从未索引"),
+    (
+        "status.skipped_hint",
+        "{n} 个文件被跳过 — 运行 vane issues 查看",
+    ),
+    ("status.pending_changes", "{n} 个待处理变更"),
 ];
 
 pub fn tr(lang: Lang, key: &str) -> &'static str {
