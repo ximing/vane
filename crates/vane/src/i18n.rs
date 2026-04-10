@@ -70,6 +70,11 @@ pub const EN_TABLE: &[(&str, &str)] = &[
         "read.binary",
         "{path} is not a text file (extractor {extractor}) — open it directly",
     ),
+    ("add.summary", "indexed {n} files"),
+    (
+        "add.summary_skipped",
+        "indexed {n} files, {skipped} skipped — run vane issues",
+    ),
     ("status.watching", "watching"),
     ("status.indexing", "indexing {scanned}/{total}"),
     ("status.indexed_ago", "indexed {ago}"),
@@ -111,6 +116,11 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
     (
         "read.binary",
         "{path} 不是文本文件（类型 {extractor}）— 请直接打开",
+    ),
+    ("add.summary", "已索引 {n} 个文件"),
+    (
+        "add.summary_skipped",
+        "已索引 {n} 个文件，跳过 {skipped} 个 — 运行 vane issues 查看",
     ),
     ("status.watching", "正在监听"),
     ("status.indexing", "索引中 {scanned}/{total}"),

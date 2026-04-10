@@ -411,3 +411,41 @@ mod status_tests {
         assert!(!lines.contains("watching"));
     }
 }
+
+mod add_summary_tests {
+    use vane::i18n::Lang;
+
+    #[test]
+    fn summary_with_and_without_skips() {
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 0, Lang::En),
+            "indexed 80 files"
+        );
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 3, Lang::En),
+            "indexed 80 files, 3 skipped — run vane issues"
+        );
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 0, Lang::Zh),
+            "已索引 80 个文件"
+        );
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 3, Lang::Zh),
+            "已索引 80 个文件，跳过 3 个 — 运行 vane issues 查看"
+        );
+    }
+
+    #[test]
+    fn progress_style_choice() {
+        assert_eq!(
+            vane::progress::choose_progress_style(0),
+            vane::progress::ProgressStyle::Spinner
+        );
+        assert_eq!(
+            vane::progress::choose_progress_style(120),
+            vane::progress::ProgressStyle::Bar(120)
+        );
+        assert_eq!(vane::progress::clamp_pos(34, 120), 34);
+        assert_eq!(vane::progress::clamp_pos(150, 120), 120); // spec 13b: pos 封顶
+    }
+}

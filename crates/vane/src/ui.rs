@@ -132,6 +132,20 @@ pub fn format_scope_header(
     }
 }
 
+/// One-line human summary after `vane add` (TTY only; the machine line stays).
+/// `added + unchanged` is the indexed work-set total.
+pub fn format_add_summary(added: u64, unchanged: u64, skipped: u64, lang: Lang) -> String {
+    let n = added + unchanged;
+    let key = if skipped == 0 {
+        "add.summary"
+    } else {
+        "add.summary_skipped"
+    };
+    crate::i18n::tr(lang, key)
+        .replace("{n}", &n.to_string())
+        .replace("{skipped}", &skipped.to_string())
+}
+
 pub struct HitLineOpts {
     pub all: bool,
     pub verbose: bool,
