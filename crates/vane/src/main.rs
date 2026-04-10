@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::json;
 use vane::config::{
     default_exclude, default_types, inspect_policy, load_config, resolve_policy, ProjectFile,
@@ -21,12 +21,13 @@ struct Cli {
     home: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Write global config (re-run to edit; empty answers keep current values)
+    #[command(next_help_heading = "Common")]
     Init,
     /// Register a project root and notify the daemon
     Add {
@@ -35,55 +36,6 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Unregister a project root (keeps CAS / project db until gc)
-    Rm { path: PathBuf },
-    /// Change the current project's include / types table
-    Include {
-        #[command(subcommand)]
-        action: GlobAction,
-    },
-    /// Change the current project's extra excludes
-    Exclude {
-        #[command(subcommand)]
-        action: GlobAction,
-    },
-    /// Print the resolved home directory and daemon status
-    Status,
-    /// Diagnose sidecar home, daemon, embedder, and registered roots
-    Doctor,
-    /// List skipped files (too large, invalid UTF-8, embed / extractor errors)
-    Issues {
-        /// Target a registered root
-        #[arg(long)]
-        root: Option<PathBuf>,
-        /// Every registered root
-        #[arg(long)]
-        all: bool,
-    },
-    /// Print recent daemon logs (redacted)
-    Logs {
-        /// Follow new lines (like tail -f)
-        #[arg(long)]
-        follow: bool,
-        /// How many existing lines to print (default 50)
-        #[arg(long, default_value_t = 50)]
-        lines: usize,
-    },
-    /// Print resolved embed / chunk / exclude / types policy
-    Inspect {
-        /// Target a registered root
-        #[arg(long)]
-        root: Option<PathBuf>,
-        /// Print global defaults only
-        #[arg(long)]
-        global: bool,
-    },
-    /// Run the sidecar daemon in the foreground
-    Daemon,
-    /// Start the daemon (user service if installed, else background process)
-    Start,
-    /// Stop the daemon
-    Stop,
     /// Search the current project (or --all / --root)
     Query {
         /// Query text (omit on a TTY to be prompted)
@@ -114,10 +66,49 @@ enum Commands {
         #[arg(long)]
         file: bool,
     },
-    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
-    Mcp {
+    /// Print the resolved home directory and daemon status
+    Status,
+    /// Diagnose sidecar home, daemon, embedder, and registered roots
+    Doctor,
+    /// Unregister a project root (keeps CAS / project db until gc)
+    #[command(next_help_heading = "Manage")]
+    Rm { path: PathBuf },
+    /// Change the current project's include / types table
+    Include {
         #[command(subcommand)]
-        cmd: Option<McpCmd>,
+        action: GlobAction,
+    },
+    /// Change the current project's extra excludes
+    Exclude {
+        #[command(subcommand)]
+        action: GlobAction,
+    },
+    /// List skipped files (too large, invalid UTF-8, embed / extractor errors)
+    Issues {
+        /// Target a registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Every registered root
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print recent daemon logs (redacted)
+    Logs {
+        /// Follow new lines (like tail -f)
+        #[arg(long)]
+        follow: bool,
+        /// How many existing lines to print (default 50)
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+    },
+    /// Print resolved embed / chunk / exclude / types policy
+    Inspect {
+        /// Target a registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Print global defaults only
+        #[arg(long)]
+        global: bool,
     },
     /// Change the embedding model and rebuild the project index
     Model {
@@ -143,6 +134,18 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
+    /// Run the sidecar daemon in the foreground
+    #[command(next_help_heading = "Ops")]
+    Daemon,
+    /// Start the daemon (user service if installed, else background process)
+    Start,
+    /// Stop the daemon
+    Stop,
     /// User service (launchd / systemd --user)
     Service {
         #[command(subcommand)]
@@ -212,11 +215,107 @@ fn resolved_home(cli_home: Option<&std::path::Path>) -> PathBuf {
     resolve_home(cli_home, env_home.as_deref(), &fallback)
 }
 
+/// Render top-level help with subcommands grouped by their
+/// `next_help_heading` markers (Common / Manage / Ops). clap only groups
+/// args by heading — subcommands always render under one "Commands:"
+/// section — so the grouping is rendered here instead (spec §4.2).
+fn grouped_help(cmd: &clap::Command) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if let Some(about) = cmd.get_about() {
+        let _ = writeln!(out, "{about}\n");
+    }
+    let _ = writeln!(out, "Usage: vane [OPTIONS] [COMMAND]\n");
+
+    let subs: Vec<&clap::Command> = cmd.get_subcommands().filter(|s| !s.is_hide_set()).collect();
+    let width = subs.iter().map(|s| s.get_name().len()).max().unwrap_or(2);
+    let mut groups: Vec<(&str, Vec<&clap::Command>)> = Vec::new();
+    for sub in subs {
+        if let Some(heading) = sub.get_next_help_heading() {
+            groups.push((heading, Vec::new()));
+        }
+        if groups.is_empty() {
+            groups.push(("Commands", Vec::new()));
+        }
+        if let Some((_, members)) = groups.last_mut() {
+            members.push(sub);
+        }
+    }
+    for (i, (heading, members)) in groups.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "{heading}:");
+        for sub in members {
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let _ = writeln!(out, "  {:width$}  {}", sub.get_name(), about, width = width);
+        }
+    }
+
+    let home_help = cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "home")
+        .and_then(|a| a.get_help())
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    let _ = writeln!(out, "\nOptions:");
+    let _ = writeln!(out, "      --home <HOME>  {home_help}");
+    let _ = writeln!(out, "  -h, --help         Print help");
+    let _ = writeln!(out, "  -V, --version      Print version");
+    out
+}
+
+/// Top-level command with the grouped help attached via `override_help`.
+fn build_cli() -> clap::Command {
+    let cmd = Cli::command();
+    let help = grouped_help(&cmd);
+    cmd.override_help(help)
+}
+
+fn parse_cli() -> Cli {
+    let matches = match build_cli().try_get_matches() {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(e.exit_code());
+        }
+    };
+    match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(e.exit_code());
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let home = resolved_home(cli.home.as_deref());
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        if !vane::ui::stdout_tty() {
+            let mut cmd = build_cli();
+            let _ = cmd.print_help();
+            println!();
+            return ExitCode::from(2);
+        }
+        let initialized = home.join("config").join("config.toml").is_file();
+        let running = vane::daemon::is_running(&home);
+        return match vane::dispatch::decide_bare(initialized, running) {
+            vane::dispatch::BareAction::InitHint => {
+                println!(
+                    "{}",
+                    vane::i18n::pick(vane::i18n::Lang::detect(), true, "bare.init_hint")
+                );
+                ExitCode::SUCCESS
+            }
+            vane::dispatch::BareAction::Doctor => run_doctor(&home),
+            vane::dispatch::BareAction::Status => run_status(&home),
+        };
+    };
+
+    match command {
         Commands::Init => run_init(&home),
         Commands::Add { path, yes } => run_add(&home, &path, yes),
         Commands::Rm { path } => run_rm(&home, &path),

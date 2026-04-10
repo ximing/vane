@@ -449,3 +449,31 @@ mod add_summary_tests {
         assert_eq!(vane::progress::clamp_pos(150, 120), 120); // spec 13b: pos 封顶
     }
 }
+
+mod bare_dispatch_tests {
+    use vane::dispatch::{decide_bare, BareAction};
+
+    #[test]
+    fn three_branches() {
+        assert_eq!(decide_bare(false, false), BareAction::InitHint);
+        assert_eq!(decide_bare(false, true), BareAction::InitHint); // 未初始化优先
+        assert_eq!(decide_bare(true, false), BareAction::Doctor);
+        assert_eq!(decide_bare(true, true), BareAction::Status);
+    }
+
+    #[test]
+    fn help_is_grouped() {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_vane"))
+            .arg("--help")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        for heading in ["Common:", "Manage:", "Ops:"] {
+            assert!(stdout.contains(heading), "missing {heading} in:\n{stdout}");
+        }
+        let common_pos = stdout.find("Common:").unwrap();
+        let query_pos = stdout.find("query").unwrap();
+        assert!(query_pos > common_pos);
+        assert!(query_pos < stdout.find("Manage:").unwrap());
+    }
+}
