@@ -477,3 +477,81 @@ mod bare_dispatch_tests {
         assert!(query_pos < stdout.find("Manage:").unwrap());
     }
 }
+
+mod mcp_skill_tests {
+    use std::path::Path;
+
+    fn fake_home() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vane-mcp-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn skill_lifecycle_and_report_kind() {
+        let home = fake_home();
+        // dry-run: would_write 含 skill 行
+        let report =
+            vane::mcp::install_mcp(Path::new(&home), true, Some(vane::mcp::McpClient::Claude))
+                .unwrap();
+        assert!(report
+            .would_write
+            .iter()
+            .any(|t| t.kind == "skill" && t.path.ends_with("skills/vane/SKILL.md")));
+        assert!(report
+            .would_write
+            .iter()
+            .all(|t| t.kind == "skill" || t.kind == "config"));
+        assert!(
+            !home.join(".claude/skills/vane/SKILL.md").exists(),
+            "dry-run must not write"
+        );
+        // 首装 wrote
+        let report =
+            vane::mcp::install_mcp(&home, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+        let skill = report.written.iter().find(|t| t.kind == "skill").unwrap();
+        assert_eq!(skill.action, "wrote");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude/skills/vane/SKILL.md")).unwrap(),
+            vane::mcp::SKILL_MD
+        );
+        // 二装 up-to-date
+        let report =
+            vane::mcp::install_mcp(&home, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+        assert!(report
+            .skipped
+            .iter()
+            .any(|s| s.kind == "skill" && s.reason == "up-to-date"));
+        // 内容被改 → updated
+        std::fs::write(home.join(".claude/skills/vane/SKILL.md"), "old").unwrap();
+        let report =
+            vane::mcp::install_mcp(&home, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+        assert!(report
+            .written
+            .iter()
+            .any(|t| t.kind == "skill" && t.action == "updated"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn default_all_without_claude_dir_skips_skill() {
+        let dir = std::env::temp_dir().join(format!("vane-mcp2-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = vane::mcp::install_mcp(&dir, false, None).unwrap();
+        assert!(!report.written.iter().any(|t| t.kind == "skill"));
+        assert!(
+            !dir.join(".claude").exists(),
+            "must not create ~/.claude for skill"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn closing_line_is_present() {
+        // print_mcp_install 是 TTY 打印；改为测纯函数
+        let line = vane::i18n::tr(vane::i18n::Lang::Zh, "mcp.done_new_session");
+        assert!(line.contains("新开一轮 Agent 会话"), "{line}");
+    }
+}

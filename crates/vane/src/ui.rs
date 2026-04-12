@@ -293,6 +293,10 @@ pub fn print_mcp_install(report: &McpInstallReport) {
             dim(&format!("{} ({})", skip.path, skip.reason))
         );
     }
+    println!(
+        "{}",
+        crate::i18n::tr(crate::i18n::Lang::detect(), "mcp.done_new_session")
+    );
 }
 
 pub fn print_why(reason: &str) {
