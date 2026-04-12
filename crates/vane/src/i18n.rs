@@ -89,6 +89,108 @@ pub const EN_TABLE: &[(&str, &str)] = &[
         "mcp.done_new_session",
         "done — start a new agent session (Claude / Cursor / Codex) for the vane tools to load",
     ),
+    // Empty-query why (spec §2.5): en copy mirrors doctor::explain_empty_query.
+    ("why.not_initialized", "not initialized — run `vane init`"),
+    (
+        "why.not_registered",
+        "cwd is not a registered root — run `vane add` or pass --root / --all",
+    ),
+    ("why.still_indexing", "still indexing — wait and retry"),
+    (
+        "why.embedder",
+        "embedder is down or degraded — check `vane doctor` and the embed provider",
+    ),
+    (
+        "why.excluded",
+        "query looks like an excluded or untyped path — adjust include/exclude or search another file",
+    ),
+    (
+        "why.wrong_root",
+        "no hits in this root — try `vane query --all` or pass --root",
+    ),
+    (
+        "why.empty_index",
+        "index is empty — run `vane add` and wait for reconcile",
+    ),
+    (
+        "why.no_match",
+        "no matching chunks — try different terms or `vane query --all`",
+    ),
+    // Init / add wizard prompts (wizard is interactive-only, so tr directly).
+    (
+        "wizard.already_initialized",
+        "already initialized — empty answers keep the current value",
+    ),
+    (
+        "wizard.provider",
+        "Embedding provider (ollama / openai_compat)",
+    ),
+    ("wizard.provider_short", "Embedding provider"),
+    ("wizard.model", "Model"),
+    ("wizard.base_url", "Base URL"),
+    ("wizard.api_key", "API key ({hint})"),
+    ("wizard.api_key_keep_openai", "empty keeps OPENAI_API_KEY"),
+    ("wizard.api_key_keep_vane", "empty keeps VANE_EMBED_API_KEY"),
+    (
+        "wizard.api_key_use_env",
+        "empty uses OPENAI_API_KEY / VANE_EMBED_API_KEY",
+    ),
+    (
+        "wizard.api_key_tty",
+        "API key (empty keeps env / stored key)",
+    ),
+    (
+        "wizard.dim",
+        "Vector dimension (empty to probe from the API)",
+    ),
+    ("wizard.dim_tty", "Vector dimension (empty to probe)"),
+    ("wizard.split", "Chunk split (markdown / plain)"),
+    ("wizard.split_tty", "Chunk split"),
+    ("wizard.max_chars", "Chunk max_chars"),
+    ("wizard.overlap", "Chunk overlap_chars"),
+    ("wizard.min_chars", "Chunk min_chars"),
+    (
+        "wizard.no_api_key",
+        "warning: no API key; probe will likely 401. Enter a key, or export OPENAI_API_KEY / VANE_EMBED_API_KEY",
+    ),
+    ("wizard.first_root", "First project root (empty to skip)"),
+    ("wizard.root_not_dir", "directory does not exist: {path}"),
+    ("wizard.exclude_defaults", "Default excludes:"),
+    (
+        "wizard.exclude_drop",
+        "Numbers to uncheck (comma-separated, empty to keep all)",
+    ),
+    (
+        "wizard.exclude_extra",
+        "Additional exclude glob or folder (empty to skip)",
+    ),
+    ("wizard.images", "Enable image types?"),
+    ("wizard.install_service", "Install user service?"),
+    (
+        "wizard.write_project_toml",
+        "Write .vane.toml in this repo (chunk / types)?",
+    ),
+    (
+        "wizard.write_project_toml_tty",
+        "Write .vane.toml in this repo?",
+    ),
+    ("wizard.intro", "Vane sidecar"),
+    ("wizard.add_project_intro", "Add project"),
+    ("wizard.hint_ollama", "local Ollama"),
+    ("wizard.hint_openai_compat", "OpenAI-compatible HTTP"),
+    ("wizard.hint_markdown", "split on ATX/Setext headings"),
+    ("wizard.hint_plain", "ignore headings"),
+    (
+        "wizard.using_global_defaults",
+        "using global chunk defaults",
+    ),
+    ("wizard.project_ready", "project policy ready"),
+    ("wizard.continue_anyway", "Continue anyway?"),
+    ("wizard.probe_ok", "probe ok, dim={dim}"),
+    (
+        "init.required",
+        "not initialized: missing {path}; run `vane init`",
+    ),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -147,6 +249,96 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
         "mcp.done_new_session",
         "完成 — 新开一轮 Agent 会话（Claude / Cursor / Codex）后 vane 工具才会加载",
     ),
+    // 空结果 why（spec §2.5）：id 与 doctor::explain_empty_query 一致。
+    ("why.not_initialized", "尚未初始化 — 运行 vane init"),
+    (
+        "why.not_registered",
+        "当前目录不是已注册的 root — 运行 vane add 或加 --root / --all",
+    ),
+    ("why.still_indexing", "仍在索引中 — 请稍后重试"),
+    (
+        "why.embedder",
+        "embedder 不可用或已降级 — 运行 vane doctor 并检查 embed provider",
+    ),
+    (
+        "why.excluded",
+        "查询词看起来像被排除或未启用类型的路径 — 调整 include/exclude 或换个文件试试",
+    ),
+    (
+        "why.wrong_root",
+        "该 root 下没有命中 — 试试 vane query --all 或加 --root",
+    ),
+    (
+        "why.empty_index",
+        "索引为空 — 运行 vane add 并等待 reconcile",
+    ),
+    (
+        "why.no_match",
+        "没有匹配的 chunk — 换个关键词或试试 vane query --all",
+    ),
+    // init / add 向导提示语（向导仅交互使用，直接 tr）。
+    ("wizard.already_initialized", "已初始化 — 留空则保留当前值"),
+    (
+        "wizard.provider",
+        "Embedding provider（ollama / openai_compat）",
+    ),
+    ("wizard.provider_short", "Embedding provider"),
+    ("wizard.model", "模型"),
+    ("wizard.base_url", "Base URL"),
+    ("wizard.api_key", "API key（{hint}）"),
+    ("wizard.api_key_keep_openai", "留空则沿用 OPENAI_API_KEY"),
+    ("wizard.api_key_keep_vane", "留空则沿用 VANE_EMBED_API_KEY"),
+    (
+        "wizard.api_key_use_env",
+        "留空则使用 OPENAI_API_KEY / VANE_EMBED_API_KEY",
+    ),
+    (
+        "wizard.api_key_tty",
+        "API key（留空则沿用环境变量 / 已存 key）",
+    ),
+    ("wizard.dim", "向量维度（留空则从 API 探测）"),
+    ("wizard.dim_tty", "向量维度（留空自动探测）"),
+    ("wizard.split", "Chunk 切分方式（markdown / plain）"),
+    ("wizard.split_tty", "Chunk 切分方式"),
+    ("wizard.max_chars", "Chunk max_chars"),
+    ("wizard.overlap", "Chunk overlap_chars"),
+    ("wizard.min_chars", "Chunk min_chars"),
+    (
+        "wizard.no_api_key",
+        "警告：未配置 API key；probe 很可能 401。请输入 key，或 export OPENAI_API_KEY / VANE_EMBED_API_KEY",
+    ),
+    ("wizard.first_root", "第一个项目目录（留空跳过）"),
+    ("wizard.root_not_dir", "目录不存在：{path}"),
+    ("wizard.exclude_defaults", "默认排除规则："),
+    (
+        "wizard.exclude_drop",
+        "要取消勾选的编号（逗号分隔，留空全部保留）",
+    ),
+    (
+        "wizard.exclude_extra",
+        "额外的排除 glob 或目录（留空跳过）",
+    ),
+    ("wizard.images", "启用图片类型？"),
+    ("wizard.install_service", "安装用户服务？"),
+    (
+        "wizard.write_project_toml",
+        "在该仓库写入 .vane.toml（chunk / types）？",
+    ),
+    (
+        "wizard.write_project_toml_tty",
+        "在该仓库写入 .vane.toml？",
+    ),
+    ("wizard.intro", "Vane sidecar"),
+    ("wizard.add_project_intro", "添加项目"),
+    ("wizard.hint_ollama", "本地 Ollama"),
+    ("wizard.hint_openai_compat", "OpenAI 兼容 HTTP"),
+    ("wizard.hint_markdown", "按 ATX/Setext 标题切分"),
+    ("wizard.hint_plain", "忽略标题"),
+    ("wizard.using_global_defaults", "使用全局 chunk 默认值"),
+    ("wizard.project_ready", "项目策略已就绪"),
+    ("wizard.continue_anyway", "仍要继续吗？"),
+    ("wizard.probe_ok", "探测成功，dim={dim}"),
+    ("init.required", "尚未初始化：缺少 {path}；请运行 vane init"),
 ];
 
 pub fn tr(lang: Lang, key: &str) -> &'static str {

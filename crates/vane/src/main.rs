@@ -385,14 +385,23 @@ fn main() -> ExitCode {
 fn require_init(home: &std::path::Path) -> Result<(), ExitCode> {
     let config = home.join("config").join("config.toml");
     if config.is_file() {
-        Ok(())
+        return Ok(());
+    }
+    // TTY renders in the detected language; non-TTY stderr stays English
+    // (spec §5.1 hard rule).
+    if vane::ui::stdout_tty() {
+        let lang = vane::i18n::Lang::detect();
+        eprintln!(
+            "{}",
+            vane::i18n::tr(lang, "init.required").replace("{path}", &config.display().to_string())
+        );
     } else {
         eprintln!(
             "not initialized: missing {}; run `vane init`",
             config.display()
         );
-        Err(ExitCode::from(1))
     }
+    Err(ExitCode::from(1))
 }
 
 fn run_init(home: &Path) -> ExitCode {
@@ -1354,7 +1363,7 @@ fn print_search_result(
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let why = vane::doctor::explain_empty_query(home, &cwd, q, all, root);
         if tty {
-            vane::ui::print_why(&why.message);
+            vane::ui::print_why(why.id, &why.message);
             return ExitCode::SUCCESS;
         }
         print_json(v);

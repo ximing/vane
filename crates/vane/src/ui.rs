@@ -299,7 +299,17 @@ pub fn print_mcp_install(report: &McpInstallReport) {
     );
 }
 
-pub fn print_why(reason: &str) {
+/// TTY-only: render the empty-query reason in the detected language, falling
+/// back to the (dynamic, English) message when the key is unknown.
+pub fn print_why(id: &str, fallback_en: &str) {
+    let lang = Lang::detect();
+    let key = format!("why.{id}");
+    let text = crate::i18n::tr(lang, &key);
+    let reason = if text == "missing-i18n-key" {
+        fallback_en
+    } else {
+        text
+    };
     if colors_enabled() {
         println!(
             "{} {}",
@@ -312,8 +322,14 @@ pub fn print_why(reason: &str) {
 }
 
 pub fn print_doctor(report: &DoctorReport) {
+    let lang = Lang::detect();
     for check in &report.checks {
-        print_doctor_check(check.level, &check.id, &check.message, &check.fix);
+        let (message, fix) = if lang == Lang::Zh && !check.message_zh.is_empty() {
+            (check.message_zh.as_str(), check.fix_zh.as_str())
+        } else {
+            (check.message.as_str(), check.fix.as_str())
+        };
+        print_doctor_check(check.level, &check.id, message, fix);
     }
 }
 

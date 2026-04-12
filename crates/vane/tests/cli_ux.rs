@@ -555,3 +555,91 @@ mod mcp_skill_tests {
         assert!(line.contains("新开一轮 Agent 会话"), "{line}");
     }
 }
+
+mod zh_copy_tests {
+    use vane::i18n::{tr, Lang};
+
+    #[test]
+    fn all_why_ids_have_zh_keys() {
+        for id in [
+            "not_initialized",
+            "not_registered",
+            "still_indexing",
+            "embedder",
+            "excluded",
+            "wrong_root",
+            "empty_index",
+            "no_match",
+        ] {
+            let key = format!("why.{id}");
+            assert_ne!(tr(Lang::Zh, &key), "missing-i18n-key", "missing {key}");
+            assert_ne!(tr(Lang::En, &key), "missing-i18n-key", "missing {key}");
+        }
+    }
+
+    #[test]
+    fn doctor_json_stays_english_tty_renders_zh() {
+        let check = vane::doctor::DoctorCheck::bi(
+            "daemon",
+            vane::doctor::CheckLevel::Red,
+            "daemon is not running",
+            "守护进程未运行",
+            "run `vane start`",
+            "运行 vane start",
+        );
+        let json = serde_json::to_value(&check).unwrap();
+        assert_eq!(json["message"], "daemon is not running");
+        assert!(
+            json.get("message_zh").is_none(),
+            "zh fields must not serialize"
+        );
+        assert!(json.get("fix_zh").is_none(), "zh fields must not serialize");
+    }
+
+    /// Spec test 14: pipe-driven init rejects a missing first_root directory,
+    /// re-prompts, and accepts "." (canonicalized); a later re-init accepts "~"
+    /// and stores the $HOME-expanded path.
+    #[test]
+    fn wizard_rejects_missing_dir_then_accepts_dot() {
+        let _g = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("vane-wiz-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap(); // 必须先建目录，否则 set_current_dir 静默失败
+        std::env::set_var("VANE_ALLOW_EMBED_FAIL", "1");
+        std::env::set_var("VANE_LANG", "en"); // 固定语言，避免 zh locale 机器上断言英文失败
+        let cwd_restore = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap(); // "." 解析到临时目录
+                                                  // 8 defaults (provider..min_chars) + first_root rejected "/no/such/dir"
+                                                  // + accepted "." + exclude_drop + exclude_extra + images + install_service=n
+        let answers_script = "\n\n\n\n\n\n\n\n/no/such/dir\n.\n\n\n\nn\n";
+        let mut out = Vec::new();
+        let result = vane::wizard::run_init(&dir, answers_script.as_bytes(), &mut out, None);
+        std::env::set_current_dir(cwd_restore).unwrap();
+        assert!(result.is_ok(), "run_init failed: {result:?}");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("directory does not exist"),
+            "expected re-prompt warning, got: {text}"
+        );
+        let cfg = std::fs::read_to_string(dir.join("config/config.toml")).unwrap();
+        let canon_dir = std::fs::canonicalize(&dir).unwrap();
+        assert!(
+            cfg.contains(&canon_dir.display().to_string()),
+            "first root '.' must register canonicalized cwd: {cfg}"
+        );
+
+        // `~` 展开用例并入：re-init（已存在 config），first_root 输入 "~"
+        let mut out2 = Vec::new();
+        let reinit_script = "\n\n\n\n\n\n\n\n~\n\n\n\n\n";
+        vane::wizard::run_init(&dir, reinit_script.as_bytes(), &mut out2, None)
+            .expect("re-init with ~ first root");
+        let cfg2 = std::fs::read_to_string(dir.join("config/config.toml")).unwrap();
+        let canon_home =
+            std::fs::canonicalize(std::env::var_os("HOME").expect("HOME set")).unwrap();
+        assert!(
+            cfg2.contains(&canon_home.display().to_string()),
+            "first root '~' must store $HOME-expanded path: {cfg2}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
