@@ -93,7 +93,11 @@ vane inspect                # current project; or --root PATH / --global
 vane df
 vane gc --dry-run           # count; does not delete
 vane model --model nomic-embed-text --yes   # --yes required when not a TTY
+vane read 2                 # open hit #2 from the last TTY vane query
+vane watch                  # live index changes; Ctrl-C to stop
 ```
+
+`vane read <n>` / `vane watch` are for **human acceptance**: `read` depends on the last TTY `vane query` cache, so agent scripts must not use it — keep preferring the stateless MCP `search` / `read` tools.
 
 ## Common mistakes
 

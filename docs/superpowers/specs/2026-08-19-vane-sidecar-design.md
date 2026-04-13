@@ -503,6 +503,8 @@ CLI 与 `vane mcp` 通过 `run/vane.sock` 说话。协议：**一行一条 JSON 
 | `vane query <q>` | 默认**当前项目**（§4.5）；`--all` 才跨项目 RRF；`--root` 指定项目 |
 | `vane mcp` | stdio MCP，连 `run/vane.sock` |
 
+> 2026-08-20 起补充：`read` / `watch` 子命令与 TTY 人性化渲染以 `docs/superpowers/specs/2026-08-20-cli-human-ux-spec.md` 为准。
+
 ### 10.1 `init` 四步
 
 1. Embedding：Ollama 或 OpenAI 兼容 → 探测连通，记录 provider / model / base_url / dim。
