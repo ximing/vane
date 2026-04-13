@@ -95,6 +95,17 @@ impl DirtyQueue {
             .count()
     }
 
+    /// Sorted queued paths for one project (read-only; used by `vane watch`).
+    /// BTreeMap key is `(project_id, path)` and iterates in sorted order, so the
+    /// result is deterministic across polling frames.
+    pub fn paths_for(&self, project_id: &str) -> Vec<String> {
+        self.items
+            .keys()
+            .filter(|(pid, _)| pid.as_str() == project_id)
+            .map(|(_, p)| p.clone())
+            .collect()
+    }
+
     pub fn load(path: &Path) -> Self {
         let Ok(bytes) = fs::read(path) else {
             return Self::new();

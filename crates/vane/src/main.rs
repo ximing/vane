@@ -139,6 +139,18 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<McpCmd>,
     },
+    /// Foreground-watch a root for index changes (client-side polling)
+    Watch {
+        /// Target a registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Watch every registered root
+        #[arg(long)]
+        all: bool,
+        /// Polling interval in milliseconds (100..=60000)
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+    },
     /// Run the sidecar daemon in the foreground
     #[command(next_help_heading = "Ops")]
     Daemon,
@@ -339,6 +351,11 @@ fn main() -> ExitCode {
             None => run_mcp(&home),
             Some(McpCmd::Install { dry_run, client }) => run_mcp_install(dry_run, client),
         },
+        Commands::Watch {
+            root,
+            all,
+            interval_ms,
+        } => run_watch(&home, root, all, interval_ms),
         Commands::Query {
             q,
             all,
@@ -820,6 +837,122 @@ fn current_issues_root(home: &Path) -> Result<PathBuf, vane::error::VaneCliError
     find_current_root(&cwd, &roots).ok_or_else(|| {
         vane::error::VaneCliError::new("cwd is not inside a registered root; pass --root or --all")
     })
+}
+
+/// `vane watch` (spec §6.2): foreground observer that polls live + dirty state
+/// per root and prints a diff stream. Pure client-side polling — no new IPC, no
+/// hard daemon dependency (if the daemon is down it shows the current snapshot
+/// only). TTY prints human `event_line`s; non-TTY prints one JSON object per
+/// event. Human meta (start header, daemon-down hint) goes to stderr so stdout
+/// stays a pure event stream in both modes.
+fn run_watch(home: &Path, root: Option<PathBuf>, all: bool, interval_ms: u64) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    let tty = vane::ui::stdout_tty();
+    let lang = vane::i18n::Lang::detect();
+    if !vane::watch_diff::valid_interval(interval_ms) {
+        vane::ui::error(vane::i18n::pick(lang, tty, "watch.bad_interval"));
+        return ExitCode::from(2);
+    }
+    let cfg = match load_config(home) {
+        Ok(c) => c,
+        Err(e) => {
+            vane::ui::error(&e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let registered: Vec<PathBuf> = cfg
+        .projects
+        .iter()
+        .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
+        .collect();
+    let selected: Vec<PathBuf> = if all {
+        registered
+    } else if let Some(r) = root {
+        match resolve_root_arg(&r) {
+            Ok(p) => {
+                if !registered.iter().any(|reg| reg == &p) {
+                    let msg = vane::i18n::pick(lang, tty, "watch.not_registered")
+                        .replace("{path}", &p.display().to_string());
+                    vane::ui::error(&msg);
+                    return ExitCode::from(1);
+                }
+                vec![p]
+            }
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        match current_issues_root(home) {
+            Ok(p) => vec![p],
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    };
+
+    // Daemon-down is a one-shot hint, not fatal: the user may still want the
+    // current snapshot. Route to stderr so stdout stays a pure event stream.
+    if !vane::daemon::is_running(home) {
+        let msg = vane::i18n::pick(lang, tty, "watch.daemon_down");
+        if tty {
+            eprintln!("{}", vane::ui::dim(msg));
+        } else {
+            eprintln!("{msg}");
+        }
+    }
+
+    // Start header — one line per root (multi-root → one line each).
+    for r in &selected {
+        let line =
+            vane::i18n::pick(lang, tty, "watch.start").replace("{root}", &r.display().to_string());
+        eprintln!("{line}");
+    }
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // Per-root previous frame: (live set, dirty paths). Seeded once so the first
+    // poll diffs against the initial snapshot instead of emitting everything.
+    let mut state: std::collections::HashMap<String, (LiveSet, Vec<String>)> =
+        std::collections::HashMap::new();
+    for r in &selected {
+        let pid = project_id(r);
+        let live = LiveSet::load_for_project(home, &pid).unwrap_or_default();
+        let dirty = vane::dirty::DirtyQueue::load(&vane::dirty::dirty_path(home)).paths_for(&pid);
+        state.insert(r.display().to_string(), (live, dirty));
+    }
+
+    loop {
+        std::thread::sleep(Duration::from_millis(interval_ms));
+        for r in &selected {
+            let key = r.display().to_string();
+            let pid = project_id(r);
+            let live = LiveSet::load_for_project(home, &pid).unwrap_or_default();
+            let dirty =
+                vane::dirty::DirtyQueue::load(&vane::dirty::dirty_path(home)).paths_for(&pid);
+            let events = match state.get(&key) {
+                Some((prev_live, prev_dirty)) => {
+                    let mut ev = vane::watch_diff::diff_live(prev_live, &live);
+                    ev.extend(vane::watch_diff::diff_queued(prev_dirty, &dirty));
+                    ev
+                }
+                None => Vec::new(),
+            };
+            state.insert(key.clone(), (live, dirty));
+            for ev in &events {
+                if tty {
+                    println!("{}", vane::watch_diff::event_line(ev, lang));
+                } else {
+                    let obj = vane::watch_diff::event_json(ev, &key, vane::progress::unix_now());
+                    println!("{obj}");
+                }
+            }
+        }
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
 }
 
 fn run_rm(home: &Path, path: &Path) -> ExitCode {
