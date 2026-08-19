@@ -17,13 +17,14 @@ use crate::config::{
 };
 use crate::embed::{embedder_from_config, serving_embed_config};
 use crate::error::VaneCliError;
+use crate::gc::{collect_live_keys, gc_all, gc_project, gc_ttl};
 use crate::index::{open_or_create_at, project_db_path, state_path, ProjectIndex, ProjectState};
 use crate::ipc::{
     encode_response, parse_request, RpcRequest, RpcResponse, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
 };
 use crate::live::LiveSet;
-use crate::log::{DailyLogger, Level};
+use crate::log::{DailyLogger, Level, NaiveDate};
 use crate::project::{project_id, reject_nested};
 use crate::search::{read_by_id, read_by_path, search_all, search_project, ProjectSearch};
 use crate::sync::rebuild_for_new_model;
@@ -49,6 +50,12 @@ enum WriterCmd {
         embed: EmbedConfig,
         resp: Sender<Result<Value, VaneCliError>>,
     },
+    Gc {
+        root: Option<PathBuf>,
+        all: bool,
+        resp: Sender<Result<Value, VaneCliError>>,
+    },
+    TtlGc,
     Shutdown,
 }
 
@@ -59,6 +66,7 @@ struct Shared {
     writer: Sender<WriterCmd>,
     watch_tx: Sender<Vec<WatchEvent>>,
     watch: Mutex<Option<WatchGuard>>,
+    last_ttl_date: Mutex<Option<NaiveDate>>,
 }
 
 pub fn socket_path(home: &Path) -> PathBuf {
@@ -176,6 +184,7 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
         writer: tx.clone(),
         watch_tx,
         watch: Mutex::new(None),
+        last_ttl_date: Mutex::new(None),
     });
     let writer_shared = Arc::clone(&shared);
     let writer_thread = thread::Builder::new()
@@ -196,6 +205,7 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
         .map_err(|e| VaneCliError::new(format!("spawn watch forwarder: {e}")))?;
 
     restart_watch(&shared);
+    let _ = tx.send(WriterCmd::TtlGc);
 
     let result = accept_loop(&listener, &shared);
     let _ = tx.send(WriterCmd::Shutdown);
@@ -296,6 +306,10 @@ fn dispatch(req: RpcRequest, shared: &Arc<Shared>) -> RpcResponse {
                 embed,
                 resp,
             }),
+            Err(e) => return RpcResponse::err(id, INVALID_PARAMS, e.message),
+        },
+        "gc" => match gc_params(&params) {
+            Ok((root, all)) => writer_call(shared, |resp| WriterCmd::Gc { root, all, resp }),
             Err(e) => return RpcResponse::err(id, INVALID_PARAMS, e.message),
         },
         other => {
@@ -557,6 +571,91 @@ fn param_path(params: &Value) -> Result<PathBuf, VaneCliError> {
     Ok(PathBuf::from(s))
 }
 
+fn gc_params(params: &Value) -> Result<(Option<PathBuf>, bool), VaneCliError> {
+    let all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let root = params
+        .get("root")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    if !all && root.is_none() {
+        return Err(VaneCliError::new("missing params.root or params.all"));
+    }
+    Ok((root, all))
+}
+
+fn do_gc(shared: &Shared, root: Option<&Path>, all: bool) -> Result<Value, VaneCliError> {
+    let cas = Cas::new(shared.home.join("rag").join("cas"));
+    let report = if all {
+        gc_all(&shared.home, &cas)
+    } else {
+        let root = root.ok_or_else(|| VaneCliError::new("missing params.root"))?;
+        let expanded = expand_tilde(root);
+        let canon = expanded.canonicalize().unwrap_or(expanded);
+        let live = collect_live_keys(&shared.home, &cas).unwrap_or_default();
+        gc_project(&shared.home, &canon, &live, &cas)
+    };
+    log_msg(
+        shared,
+        Level::Info,
+        &format!(
+            "gc extract={} embed={} db_prev={} projects={} compacted={}",
+            report.extract_deleted,
+            report.embed_deleted,
+            report.db_prev_removed,
+            report.projects_removed,
+            report.compacted
+        ),
+    );
+    serde_json::to_value(report).map_err(|e| VaneCliError::new(format!("encode gc report: {e}")))
+}
+
+fn maybe_run_ttl(shared: &Shared) {
+    let today = NaiveDate::today_local();
+    let due = match shared.last_ttl_date.lock() {
+        Ok(last) => *last != Some(today),
+        Err(_) => false,
+    };
+    if due {
+        run_ttl_gc(shared);
+    }
+}
+
+fn run_ttl_gc(shared: &Shared) {
+    let today = NaiveDate::today_local();
+    if let Ok(mut last) = shared.last_ttl_date.lock() {
+        *last = Some(today);
+    }
+    let retain = match lock_config(shared) {
+        Ok(cfg) => cfg.gc.cas_retain_days,
+        Err(e) => {
+            log_msg(shared, Level::Warn, &e.message);
+            return;
+        }
+    };
+    let cas = Cas::new(shared.home.join("rag").join("cas"));
+    let live = collect_live_keys(&shared.home, &cas).unwrap_or_default();
+    let now = unix_now();
+    let report = gc_ttl(&cas, &live, now, retain);
+    if report.extract_deleted > 0 || report.embed_deleted > 0 || report.errors > 0 {
+        log_msg(
+            shared,
+            Level::Info,
+            &format!(
+                "ttl gc extract={} embed={} errors={}",
+                report.extract_deleted, report.embed_deleted, report.errors
+            ),
+        );
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn rebuild_params(params: &Value) -> Result<(PathBuf, EmbedConfig), VaneCliError> {
     let root = params
         .get("root")
@@ -652,10 +751,13 @@ where
 
 fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
     while let Ok(cmd) = rx.recv() {
+        maybe_run_ttl(&shared);
         match cmd {
             WriterCmd::Shutdown => break,
             WriterCmd::Reload { resp } => {
-                let _ = resp.send(do_reload(&shared));
+                let result = do_reload(&shared);
+                run_ttl_gc(&shared);
+                let _ = resp.send(result);
             }
             WriterCmd::AddRoot { path, resp } => {
                 let _ = resp.send(do_add_root(&shared, &path));
@@ -668,6 +770,12 @@ fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
             }
             WriterCmd::Rebuild { root, embed, resp } => {
                 let _ = resp.send(do_rebuild(&shared, &root, &embed));
+            }
+            WriterCmd::Gc { root, all, resp } => {
+                let _ = resp.send(do_gc(&shared, root.as_deref(), all));
+            }
+            WriterCmd::TtlGc => {
+                // `maybe_run_ttl` above runs once per local calendar day.
             }
         }
     }
@@ -861,6 +969,18 @@ fn log_msg(shared: &Shared, level: Level, msg: &str) {
     match shared.logger.lock() {
         Ok(mut log) => log.write(level, msg),
         Err(_) => eprintln!("vane log lock poisoned: {msg}"),
+    }
+    schedule_ttl_if_date_changed(shared);
+}
+
+fn schedule_ttl_if_date_changed(shared: &Shared) {
+    let today = NaiveDate::today_local();
+    let due = match shared.last_ttl_date.lock() {
+        Ok(last) => *last != Some(today),
+        Err(_) => false,
+    };
+    if due {
+        let _ = shared.writer.send(WriterCmd::TtlGc);
     }
 }
 
