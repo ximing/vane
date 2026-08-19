@@ -9,6 +9,8 @@ set -euo pipefail
 #   字面提及造成假阳性；同理 `std::net::`。`mmap` 保持字面匹配。
 # - 仍保留对 vfs/std_fs.rs 的排除（生产代码但合法使用，cfg 隔离）。
 # - 生产 mod.rs 若出现 `std::fs::` 仍会命中失败。
+# - 只扫 vane-core + vane-wasm。crates/vane 是 native sidecar（CLI/daemon），
+#   允许 std::fs / std::net；不要把 grep 扩到整个 workspace 或 crates/vane。
 if grep -rn --include='*.rs' --exclude='tests.rs' 'std::fs::\|std::net::\|mmap' crates/vane-core/src/ \
     | grep -v 'crates/vane-core/src/vfs/std_fs.rs'; then
     echo "FAIL: forbidden IO usage outside vfs/std_fs.rs (tests.rs fixtures excluded)" >&2
