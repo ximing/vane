@@ -12,7 +12,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::cas::Cas;
-use crate::config::{load_config, resolve_policy, Config, ProjectFile, ResolvedPolicy};
+use crate::config::{
+    load_config, resolve_policy, Config, EmbedConfig, ProjectFile, ResolvedPolicy,
+};
 use crate::embed::embedder_from_config;
 use crate::error::VaneCliError;
 use crate::index::{project_db_path, state_path, ProjectIndex, ProjectState};
@@ -24,6 +26,7 @@ use crate::live::LiveSet;
 use crate::log::{DailyLogger, Level};
 use crate::project::{project_id, reject_nested};
 use crate::search::{read_by_id, read_by_path, search_all, search_project, ProjectSearch};
+use crate::sync::rebuild_for_new_model;
 use crate::watch::{watch_roots, WatchEvent, WatchGuard};
 
 enum WriterCmd {
@@ -40,6 +43,11 @@ enum WriterCmd {
     },
     WatchBatch {
         events: Vec<WatchEvent>,
+    },
+    Rebuild {
+        root: PathBuf,
+        embed: EmbedConfig,
+        resp: Sender<Result<Value, VaneCliError>>,
     },
     Shutdown,
 }
@@ -255,6 +263,14 @@ fn dispatch(req: RpcRequest, shared: &Arc<Shared>) -> RpcResponse {
                 writer_call(shared, |resp| WriterCmd::AddRoot { path, resp })
             }
             Ok(path) => writer_call(shared, |resp| WriterCmd::RemoveRoot { path, resp }),
+            Err(e) => return RpcResponse::err(id, INVALID_PARAMS, e.message),
+        },
+        "rebuild" | "set_model" => match rebuild_params(&params) {
+            Ok((path, embed)) => writer_call(shared, |resp| WriterCmd::Rebuild {
+                root: path,
+                embed,
+                resp,
+            }),
             Err(e) => return RpcResponse::err(id, INVALID_PARAMS, e.message),
         },
         other => {
@@ -495,6 +511,8 @@ fn handle_list_roots(shared: &Arc<Shared>) -> Result<Value, VaneCliError> {
             "live_files": live.files.len(),
             "last_reconcile": Value::Null,
             "rebuilding": state.rebuild.is_some(),
+            "rebuild": state.rebuild,
+            "reindex_error": state.reindex_error,
         }));
     }
     Ok(json!({ "roots": roots }))
@@ -509,6 +527,86 @@ fn param_path(params: &Value) -> Result<PathBuf, VaneCliError> {
         return Err(VaneCliError::new("missing params.path"));
     }
     Ok(PathBuf::from(s))
+}
+
+fn rebuild_params(params: &Value) -> Result<(PathBuf, EmbedConfig), VaneCliError> {
+    let root = params
+        .get("root")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| param_path(params).ok())
+        .ok_or_else(|| VaneCliError::new("missing params.root"))?;
+    let cfg = lock_config_from_params_embed(params, &root)?;
+    Ok((root, cfg))
+}
+
+fn lock_config_from_params_embed(
+    params: &Value,
+    _root: &Path,
+) -> Result<EmbedConfig, VaneCliError> {
+    Ok(EmbedConfig {
+        provider: params
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        model: params
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        base_url: params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        api_key: params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
+fn do_rebuild(
+    shared: &Shared,
+    root: &Path,
+    embed_over: &EmbedConfig,
+) -> Result<Value, VaneCliError> {
+    let cfg = load_config(&shared.home)?;
+    {
+        let mut slot = lock_config(shared)?;
+        *slot = cfg.clone();
+    }
+    let expanded = expand_tilde(root);
+    let canon = expanded.canonicalize().unwrap_or_else(|_| expanded.clone());
+    let pid = project_id(&canon);
+    let pf = read_project_file(&canon);
+    let mut policy = resolve_policy(&cfg, &canon, pf.as_ref())?;
+    if !embed_over.provider.is_empty() {
+        policy.embed.provider = embed_over.provider.clone();
+    }
+    if !embed_over.model.is_empty() {
+        policy.embed.model = embed_over.model.clone();
+    }
+    if !embed_over.base_url.is_empty() {
+        policy.embed.base_url = embed_over.base_url.clone();
+    }
+    if embed_over.api_key.is_some() {
+        policy.embed.api_key = embed_over.api_key.clone();
+    }
+    rebuild_for_new_model(&shared.home, &pid, &policy.embed)?;
+    log_msg(
+        shared,
+        Level::Info,
+        &format!("rebuilt {} with {}", pid, policy.embed.model),
+    );
+    Ok(json!({
+        "ok": true,
+        "project_id": pid,
+        "provider": policy.embed.provider,
+        "model": policy.embed.model,
+    }))
 }
 
 fn writer_call<F>(shared: &Arc<Shared>, make: F) -> Result<Value, VaneCliError>
@@ -539,6 +637,9 @@ fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
             }
             WriterCmd::WatchBatch { events } => {
                 handle_watch_batch(&shared, events);
+            }
+            WriterCmd::Rebuild { root, embed, resp } => {
+                let _ = resp.send(do_rebuild(&shared, &root, &embed));
             }
         }
     }
