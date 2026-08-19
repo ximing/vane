@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::config::{load_config, Config};
+use crate::config::{load_config, resolve_policy, Config, ProjectFile, ResolvedPolicy};
 use crate::error::VaneCliError;
 use crate::index::{state_path, ProjectState};
 use crate::ipc::{
@@ -21,6 +21,7 @@ use crate::ipc::{
 use crate::live::LiveSet;
 use crate::log::{DailyLogger, Level};
 use crate::project::{project_id, reject_nested};
+use crate::watch::{watch_roots, WatchEvent, WatchGuard};
 
 enum WriterCmd {
     Reload {
@@ -34,6 +35,9 @@ enum WriterCmd {
         path: PathBuf,
         resp: Sender<Result<Value, VaneCliError>>,
     },
+    WatchBatch {
+        events: Vec<WatchEvent>,
+    },
     Shutdown,
 }
 
@@ -42,6 +46,8 @@ struct Shared {
     config: Mutex<Config>,
     logger: Mutex<DailyLogger>,
     writer: Sender<WriterCmd>,
+    watch_tx: Sender<Vec<WatchEvent>>,
+    watch: Mutex<Option<WatchGuard>>,
 }
 
 pub fn socket_path(home: &Path) -> PathBuf {
@@ -126,11 +132,14 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
         .map_err(|e| VaneCliError::new(format!("chmod socket: {e}")))?;
 
     let (tx, rx) = mpsc::channel();
+    let (watch_tx, watch_rx) = mpsc::channel();
     let shared = Arc::new(Shared {
         home: home.clone(),
         config: Mutex::new(cfg),
         logger: Mutex::new(logger),
         writer: tx.clone(),
+        watch_tx,
+        watch: Mutex::new(None),
     });
     let writer_shared = Arc::clone(&shared);
     let writer_thread = thread::Builder::new()
@@ -138,9 +147,26 @@ pub fn serve_forever(home: PathBuf) -> Result<(), VaneCliError> {
         .spawn(move || writer_loop(writer_shared, rx))
         .map_err(|e| VaneCliError::new(format!("spawn writer: {e}")))?;
 
+    let fwd = tx.clone();
+    let _watch_fwd = thread::Builder::new()
+        .name("vane-watch-fwd".into())
+        .spawn(move || {
+            while let Ok(events) = watch_rx.recv() {
+                if fwd.send(WriterCmd::WatchBatch { events }).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| VaneCliError::new(format!("spawn watch forwarder: {e}")))?;
+
+    restart_watch(&shared);
+
     let result = accept_loop(&listener, &shared);
     let _ = tx.send(WriterCmd::Shutdown);
     let _ = writer_thread.join();
+    if let Ok(mut slot) = shared.watch.lock() {
+        *slot = None;
+    }
     let _ = fs::remove_file(&sock);
     result
 }
@@ -310,7 +336,27 @@ fn writer_loop(shared: Arc<Shared>, rx: Receiver<WriterCmd>) {
             WriterCmd::RemoveRoot { path, resp } => {
                 let _ = resp.send(do_remove_root(&shared, &path));
             }
+            WriterCmd::WatchBatch { events } => {
+                handle_watch_batch(&shared, events);
+            }
         }
+    }
+}
+
+fn handle_watch_batch(shared: &Shared, events: Vec<WatchEvent>) {
+    if events.is_empty() {
+        return;
+    }
+    let reload = events
+        .iter()
+        .any(|e| e.rel == ".vane.toml" || e.rel.ends_with("/.vane.toml"));
+    log_msg(
+        shared,
+        Level::Info,
+        &format!("watch batch {} path(s)", events.len()),
+    );
+    if reload {
+        let _ = do_reload(shared);
     }
 }
 
@@ -322,6 +368,7 @@ fn do_reload(shared: &Shared) -> Result<Value, VaneCliError> {
         *slot = cfg;
     }
     reopen_logger(shared, retain);
+    restart_watch(shared);
     log_msg(shared, Level::Info, "config reloaded");
     Ok(json!({ "ok": true }))
 }
@@ -342,6 +389,7 @@ fn do_add_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
         arr.push(toml::Value::Table(entry));
         Ok(())
     })?;
+    restart_watch(shared);
     log_msg(
         shared,
         Level::Info,
@@ -371,6 +419,7 @@ fn do_remove_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
         }
         Ok(())
     })?;
+    restart_watch(shared);
     log_msg(
         shared,
         Level::Info,
@@ -415,6 +464,49 @@ fn project_paths(arr: &[toml::Value]) -> Vec<PathBuf> {
             expanded.canonicalize().unwrap_or(expanded)
         })
         .collect()
+}
+
+fn restart_watch(shared: &Shared) {
+    let cfg = match lock_config(shared) {
+        Ok(g) => g.clone(),
+        Err(e) => {
+            log_msg(shared, Level::Warn, &e.message);
+            return;
+        }
+    };
+    let targets = collect_watch_targets(&cfg);
+    match watch_roots(targets, shared.watch_tx.clone()) {
+        Ok(guard) => match shared.watch.lock() {
+            Ok(mut slot) => *slot = Some(guard),
+            Err(_) => log_msg(shared, Level::Warn, "watch lock poisoned"),
+        },
+        Err(e) => log_msg(shared, Level::Warn, &format!("watch: {e}")),
+    }
+}
+
+fn collect_watch_targets(cfg: &Config) -> Vec<(PathBuf, ResolvedPolicy)> {
+    let mut out = Vec::new();
+    for proj in &cfg.projects {
+        let expanded = expand_tilde(&proj.path);
+        let Ok(root) = expanded.canonicalize() else {
+            continue;
+        };
+        if !root.is_dir() {
+            continue;
+        }
+        let pf = read_project_file(&root);
+        match resolve_policy(cfg, &root, pf.as_ref()) {
+            Ok(pol) => out.push((root, pol)),
+            Err(_) => continue,
+        }
+    }
+    out
+}
+
+fn read_project_file(root: &Path) -> Option<ProjectFile> {
+    let path = root.join(".vane.toml");
+    let text = fs::read_to_string(path).ok()?;
+    ProjectFile::parse_toml(&text).ok()
 }
 
 fn reopen_logger(shared: &Shared, retain_days: u32) {
