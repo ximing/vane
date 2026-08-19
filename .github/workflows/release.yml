@@ -164,6 +164,47 @@ jobs:
           name: vane-web
           path: bindings/web/dist/
 
+  build-cli:
+    # Native sidecar CLI (`crates/vane`). Unix sockets + launchd/systemd --user;
+    # first version is macOS + Linux only (no Windows service).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: vane-x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: vane-aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: vane-x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build vane CLI
+        run: cargo build --release -p vane --target ${{ matrix.target }} --locked
+      - name: Package tarball
+        run: |
+          BIN="target/${{ matrix.target }}/release/vane"
+          test -f "$BIN"
+          strip "$BIN" || true
+          chmod +x "$BIN"
+          mkdir -p dist
+          cp "$BIN" "dist/${{ matrix.artifact }}"
+          tar -C dist -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+          ls -lh "${{ matrix.artifact }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vane-cli-${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
   release:
     # 三端 prebuilt 聚合发布。Node 流水线遵循 napi-rs 官方发布流程
     # （napi.rs/docs/deep-dive/release），与 @napi-rs/cli 3.x 命令一致：
@@ -172,10 +213,10 @@ jobs:
     #   3. napi artifacts --output-dir . --npm-dir npm：从 cwd 收集 .node 拷贝到 npm/<platform>/ 与包根
     #   4. npm publish（主包）：prepublishOnly 脚本 `napi pre-publish -t npm` 自动发布
     #      4 个 optionalDeps 平台包 + 上传 .node 到 GitHub Release
-    # Go .a + WASM .wasm 由 softprops/action-gh-release 单独挂到同一 Release。
+    # Go .a + WASM .wasm + vane CLI tarball 由 softprops/action-gh-release 挂到同一 Release。
     # tag 触发：npm publish + GitHub Release。workflow_dispatch：仅构建 + create-npm-dirs +
     # artifacts 收集验证（publish/gh-release 通过 `if: startsWith(github.ref, 'refs/tags/')` 跳过）。
-    needs: [build, build-go, build-wasm, build-web]
+    needs: [build, build-go, build-wasm, build-web, build-cli]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -233,13 +274,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create GitHub Release + attach Go/WASM assets
+      - name: Create GitHub Release + attach Go/WASM/CLI assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/vane-go-*/libvane_ffi-*.a
             artifacts/vane-wasm/*.wasm
+            artifacts/vane-cli-*/*.tar.gz
       - name: Publish @vane-rs/dict-zh to npm
         # @vane-rs/dict-zh 纯数据包，非 napi，不需 build job。源目录 data/ + package.json + LICENSE
         # 已在仓库（package.json files：data/dict.bin + data/sha256_prefix.bin + LICENSE）。

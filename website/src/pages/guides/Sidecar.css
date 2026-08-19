@@ -1,0 +1,58 @@
+/* Local sidecar guide. Prefix: sc- */
+
+.sc-page h1 {
+  margin: 0 0 var(--space-3);
+}
+
+.sc-page h2 {
+  margin: var(--space-7) 0 var(--space-3);
+}
+
+.sc-page h3 {
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+.sc-page p {
+  line-height: var(--leading-normal);
+}
+
+.sc-lede {
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-5);
+}
+
+.sc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-4) 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.sc-table th,
+.sc-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.sc-table th {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.sc-table code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.sc-list {
+  margin: var(--space-3) 0 var(--space-5);
+  padding-left: var(--space-5);
+  line-height: var(--leading-normal);
+}
+
+.sc-list li {
+  margin-bottom: var(--space-2);
+}

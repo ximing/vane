@@ -379,6 +379,7 @@ export default function Home() {
               <span className="home__badge">Node.js</span>
               <span className="home__badge">Go</span>
               <span className="home__badge">Browser</span>
+              <span className="home__badge">CLI sidecar</span>
             </div>
             <div className="home__ctas">
               <Link to="/quickstart" className="home__btn home__btn--primary">
@@ -572,16 +573,23 @@ export default function Home() {
         </div>
       </section>
 
-      {/* 7. Won't-have statement */}
+      {/* 7. Won't-have statement + sidecar */}
       <section className="home__section home__section--alt">
         <div className="home__container">
           <blockquote className="home__quote">
             <p>
-              Vane does not generate embeddings, run models, or speak
-              SQL/distributed. It is a retrieval library — fast, embeddable, and
-              predictable.
+              The retrieval library does not generate embeddings, run models, or
+              speak SQL/distributed. It stores, indexes, and fuses the vectors
+              you give it.
             </p>
           </blockquote>
+          <p className="home__section-lede home__sidecar-lede">
+            For local folders and coding agents, the optional{' '}
+            <Link to="/guides/sidecar">vane sidecar CLI</Link> runs one daemon
+            that chunks registered directories, calls Ollama or an
+            OpenAI-compatible embed API, and serves hybrid search over MCP.
+            macOS and Linux only in v1.
+          </p>
         </div>
       </section>
 
