@@ -1,7 +1,9 @@
+pub mod cas;
 pub mod chunk;
 pub mod classify;
 pub mod config;
 pub mod error;
+pub mod extract;
 pub mod glob_match;
 pub mod home;
 pub mod project;
