@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vane::embed::{embed_model_id, Embedder, MockEmbedder};
 use vane::extract::CanonicalDoc;
 use vane::index::{
-    doc_id, index_doc, maybe_compact, open_or_create, project_db_path, should_compact, ProjectIndex,
+    doc_id, index_doc, maybe_compact, open_existing, open_or_create, project_db_path,
+    should_compact, ProjectIndex,
 };
 use vane::live::{live_path, LiveFile, LiveSet};
 use vane_core::api::{FusionSpec, SearchMode, SearchQuery};
@@ -174,19 +175,30 @@ fn add_flush_text_search_then_delete() {
         hits.iter().map(|h| &h.id).collect::<Vec<_>>()
     );
 
-    let gone_id = doc_id(project_id, "docs/auth.md", 0);
-    idx.delete_ids(std::slice::from_ref(&gone_id)).unwrap();
     idx.flush().unwrap();
-    let after = idx.search(&text_query("鉴权")).unwrap();
+    drop(idx);
+    let reopened = open_existing(&tmp, project_id, dim, &model_id, false)
+        .expect("reopen after drop must see flushed db");
+    let hits2 = reopened.search(&text_query("鉴权")).unwrap();
+    assert!(
+        hits2
+            .iter()
+            .any(|h| h.id == doc_id(project_id, "docs/auth.md", 0)),
+        "reopened db must still find the auth chunk"
+    );
+    let gone_id = doc_id(project_id, "docs/auth.md", 0);
+    reopened.delete_ids(std::slice::from_ref(&gone_id)).unwrap();
+    reopened.flush().unwrap();
+    let after = reopened.search(&text_query("鉴权")).unwrap();
     assert!(
         after.iter().all(|h| h.id != gone_id),
         "deleted id must not appear after flush, hits={:?}",
         after.iter().map(|h| &h.id).collect::<Vec<_>>()
     );
 
-    maybe_compact(&idx, 1, 1, 0).unwrap();
+    maybe_compact(&reopened, 1, 1, 0).unwrap();
 
-    drop(idx);
+    drop(reopened);
     let reopened = open_or_create(&tmp, project_id, dim, &model_id).unwrap();
     let intro = reopened.search(&text_query("欢迎")).unwrap();
     assert!(

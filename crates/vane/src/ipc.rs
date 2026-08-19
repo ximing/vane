@@ -66,13 +66,21 @@ pub fn encode_response(resp: &RpcResponse) -> Result<String, VaneCliError> {
     serde_json::to_string(resp).map_err(|e| VaneCliError::new(format!("encode rpc: {e}")))
 }
 
+fn rpc_timeout(method: &str) -> Duration {
+    match method {
+        "rebuild" | "set_model" | "gc" | "reload_config" | "add_root" => Duration::from_secs(600),
+        _ => Duration::from_secs(30),
+    }
+}
+
 pub fn rpc_call(home: &Path, method: &str, params: Value) -> Result<Value, VaneCliError> {
     let sock = crate::daemon::socket_path(home);
     let mut stream = UnixStream::connect(&sock).map_err(|_| {
         VaneCliError::new("daemon is not running; run `vane start` or check the user service")
     })?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let timeout = rpc_timeout(method);
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
     let req = RpcRequest {
         id: "1".into(),
         method: method.to_string(),

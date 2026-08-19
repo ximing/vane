@@ -220,6 +220,7 @@ fn setup_indexed(home: &Path) -> (PathBuf, String, u32, String) {
         index: &idx,
         embedder: &embedder,
         now: 1_700_000_000,
+        dirty: None,
     };
     let report = reconcile_project(&mut ctx, &root, &policy()).unwrap();
     assert_eq!(report.added, 2);
@@ -406,6 +407,7 @@ fn failed_rebuild_leaves_old_db_queryable() {
         index: &reopened,
         embedder: &embedder,
         now: 1_700_000_001,
+        dirty: None,
     };
     reconcile_project(&mut ctx, &root, &policy()).expect(
         "failed rebuild must not leave reconcile_project blocked with \"model rebuild required\"",
