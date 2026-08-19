@@ -587,13 +587,13 @@ fn gc_params(params: &Value) -> Result<(Option<PathBuf>, bool), VaneCliError> {
 fn do_gc(shared: &Shared, root: Option<&Path>, all: bool) -> Result<Value, VaneCliError> {
     let cas = Cas::new(shared.home.join("rag").join("cas"));
     let report = if all {
-        gc_all(&shared.home, &cas)
+        gc_all(&shared.home, &cas)?
     } else {
         let root = root.ok_or_else(|| VaneCliError::new("missing params.root"))?;
         let expanded = expand_tilde(root);
         let canon = expanded.canonicalize().unwrap_or(expanded);
-        let live = collect_live_keys(&shared.home, &cas).unwrap_or_default();
-        gc_project(&shared.home, &canon, &live, &cas)
+        let live = collect_live_keys(&shared.home, &cas)?;
+        gc_project(&shared.home, &canon, &live, &cas)?
     };
     log_msg(
         shared,
@@ -634,7 +634,13 @@ fn run_ttl_gc(shared: &Shared) {
         }
     };
     let cas = Cas::new(shared.home.join("rag").join("cas"));
-    let live = collect_live_keys(&shared.home, &cas).unwrap_or_default();
+    let live = match collect_live_keys(&shared.home, &cas) {
+        Ok(live) => live,
+        Err(e) => {
+            log_msg(shared, Level::Warn, &e.message);
+            return;
+        }
+    };
     let now = unix_now();
     let report = gc_ttl(&cas, &live, now, retain);
     if report.extract_deleted > 0 || report.embed_deleted > 0 || report.errors > 0 {
