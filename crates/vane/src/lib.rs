@@ -2,6 +2,8 @@ pub mod cas;
 pub mod chunk;
 pub mod classify;
 pub mod config;
+pub mod dirty;
+pub mod embed;
 pub mod error;
 pub mod extract;
 pub mod glob_match;
