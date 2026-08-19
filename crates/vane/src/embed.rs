@@ -45,6 +45,13 @@ pub fn embed_model_id(provider: &str, model: &str, dim: u32) -> String {
     format!("{provider}:{model}:{dim}")
 }
 
+pub fn embedder_from_config(cfg: &EmbedConfig) -> Box<dyn Embedder> {
+    match cfg.provider.as_str() {
+        "openai_compat" => Box::new(openai_embedder(cfg)),
+        _ => Box::new(ollama_embedder(cfg)),
+    }
+}
+
 pub struct OllamaEmbedder {
     agent: ureq::Agent,
     url: String,
