@@ -45,6 +45,31 @@ pub fn embed_model_id(provider: &str, model: &str, dim: u32) -> String {
     format!("{provider}:{model}:{dim}")
 }
 
+/// Parse `{provider}:{model}:{dim}` written by [`embed_model_id`].
+pub fn parse_embed_model_id(id: &str) -> Option<(&str, &str, u32)> {
+    let (rest, dim_s) = id.rsplit_once(':')?;
+    let dim = dim_s.parse().ok()?;
+    let (provider, model) = rest.split_once(':')?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider, model, dim))
+}
+
+/// Embed config for the collection currently serving `db/`.
+///
+/// `vane model` writes the new overlay before swap. Query embedding must
+/// follow `state.embed_model_id` (old model) until rebuild succeeds, or
+/// hybrid dim mismatch degrades to BM25 (§7.4).
+pub fn serving_embed_config(policy: &EmbedConfig, embed_model_id: &str) -> EmbedConfig {
+    let mut cfg = policy.clone();
+    if let Some((provider, model, _)) = parse_embed_model_id(embed_model_id) {
+        cfg.provider = provider.to_string();
+        cfg.model = model.to_string();
+    }
+    cfg
+}
+
 pub fn embedder_from_config(cfg: &EmbedConfig) -> Box<dyn Embedder> {
     match cfg.provider.as_str() {
         "openai_compat" => Box::new(openai_embedder(cfg)),
