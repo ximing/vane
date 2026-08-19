@@ -19,6 +19,10 @@ struct Cli {
 enum Commands {
     /// Print the resolved home directory and initialization status
     Status,
+    /// Run the sidecar daemon in the foreground
+    Daemon,
+    /// Start the daemon (prints a note until a user service is installed)
+    Start,
 }
 
 fn resolved_home(cli_home: Option<&std::path::Path>) -> PathBuf {
@@ -39,6 +43,20 @@ fn main() -> ExitCode {
                 eprintln!("not initialized");
                 return ExitCode::from(1);
             }
+            ExitCode::SUCCESS
+        }
+        Commands::Daemon => match vane::daemon::serve_forever(home) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::from(1)
+            }
+        },
+        Commands::Start => {
+            println!(
+                "user service not installed yet; run `vane daemon --home {}` in the foreground",
+                home.display()
+            );
             ExitCode::SUCCESS
         }
     }
