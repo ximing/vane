@@ -44,6 +44,8 @@ enum Commands {
         #[arg(long, default_value_t = 8)]
         top_k: u32,
     },
+    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon
+    Mcp,
     /// Change the embedding model and rebuild the project index
     Model {
         /// Write `[defaults.embed]` in the global config instead of `.vane.toml`
@@ -98,6 +100,7 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Commands::Mcp => run_mcp(&home),
         Commands::Query {
             q,
             all,
@@ -122,6 +125,19 @@ fn require_init(home: &std::path::Path) -> Result<(), ExitCode> {
     } else {
         eprintln!("not initialized");
         Err(ExitCode::from(1))
+    }
+}
+
+fn run_mcp(home: &std::path::Path) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    match vane::mcp::serve_stdio(home.to_path_buf()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
     }
 }
 
