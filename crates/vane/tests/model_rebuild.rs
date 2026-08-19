@@ -12,9 +12,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use vane::cas::Cas;
 use vane::config::{ChunkConfig, EmbedConfig, ResolvedPolicy, TypeRule};
-use vane::embed::{embed_model_id, Embedder, MockEmbedder};
+use vane::embed::{embed_model_id, serving_embed_config, Embedder, MockEmbedder};
 use vane::error::VaneCliError;
-use vane::index::{doc_id, open_or_create, project_db_path, state_path, ProjectState};
+use vane::index::{
+    doc_id, open_existing, open_or_create, project_db_path, project_db_prev_path, state_path,
+    swap_new_db, ProjectState,
+};
 use vane::ipc;
 use vane::live::LiveSet;
 use vane::project::project_id;
@@ -294,6 +297,7 @@ fn rebuild_switches_dim_and_reuses_extract_cas() {
         state.embed_model_id.as_deref(),
         Some(embed_model_id("mock", "test-8", 8).as_str())
     );
+    assert_eq!(state.embed_base_url.as_deref(), Some("http://127.0.0.1"));
     assert!(state.rebuild.is_none());
     assert!(state.reindex_error.is_none());
     assert!(!project_dir(&tmp, &pid).join("db.new").exists());
@@ -542,6 +546,13 @@ path = "{}"
     .unwrap();
 }
 
+fn write_serving_base_url(home: &Path, pid: &str, base_url: &str) {
+    let path = state_path(home, pid);
+    let mut state = ProjectState::load(&path).unwrap();
+    state.embed_base_url = Some(base_url.to_string());
+    state.save_atomic(&path).unwrap();
+}
+
 fn write_model_overlay(root: &Path, model: &str) {
     fs::write(
         root.join(".vane.toml"),
@@ -636,6 +647,7 @@ fn daemon_search_uses_old_model_while_rebuild_runs() {
     let (root, pid, _old_dim, _old_model) = setup_indexed(&tmp);
     let fake = FakeOllama::spawn();
     write_daemon_config(&tmp, &root, &fake.base_url);
+    write_serving_base_url(&tmp, &pid, &fake.base_url);
     // Same order as `vane model`: persist the new overlay before swap.
     write_model_overlay(&root, "test-8");
 
@@ -678,6 +690,7 @@ fn daemon_search_keeps_old_model_after_failed_rebuild() {
     let (root, pid, old_dim, old_model) = setup_indexed(&tmp);
     let fake = FakeOllama::spawn();
     write_daemon_config(&tmp, &root, &fake.base_url);
+    write_serving_base_url(&tmp, &pid, &fake.base_url);
     write_model_overlay(&root, "test-8");
 
     let embedder = FailAfterEmbeds {
@@ -718,5 +731,74 @@ fn daemon_search_keeps_old_model_after_failed_rebuild() {
     assert!(
         searched.iter().any(|m| m == "test") && searched.iter().all(|m| m != "test-8"),
         "daemon search after failed rebuild must embed with the old serving model, saw {searched:?}"
+    );
+}
+
+#[test]
+fn open_for_read_does_not_create_db_during_swap() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+
+    let (_root, pid, dim, model) = setup_indexed(&tmp);
+    let db = project_db_path(&tmp, &pid);
+    let prev = project_db_prev_path(&tmp, &pid);
+    assert!(db.is_dir(), "setup must leave a real db/");
+    fs::rename(&db, &prev).unwrap();
+    assert!(!db.exists(), "precondition: db/ renamed to db.prev");
+
+    let opened = open_existing(&tmp, &pid, dim, &model, false);
+    assert!(
+        !db.exists(),
+        "query/open-for-read must not create_dir_all db/ while it is renamed to db.prev"
+    );
+    let idx = opened.expect("mid-swap read must open db.prev, not invent an empty db/");
+    let hits = idx.search(&text_query("鉴权")).unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == doc_id(&pid, "docs/auth.md", 0)),
+        "search via db.prev must still return old hits, hits={:?}",
+        hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn swap_new_db_leaves_prev_until_state_is_updated() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+
+    let pid = "swap-order";
+    let db = project_db_path(&tmp, pid);
+    let new = project_dir(&tmp, pid).join("db.new");
+    let prev = project_db_prev_path(&tmp, pid);
+    fs::create_dir_all(db.join("old-marker")).unwrap();
+    fs::create_dir_all(new.join("new-marker")).unwrap();
+
+    swap_new_db(&tmp, pid).unwrap();
+
+    assert!(
+        db.join("new-marker").is_dir(),
+        "db.new/ must become db/ on swap"
+    );
+    assert!(
+        prev.join("old-marker").is_dir(),
+        "spec §7.4: keep db.prev until state.json records the new embed_model_id/dim"
+    );
+    assert!(!new.exists(), "db.new/ must be gone after rename onto db/");
+}
+
+#[test]
+fn serving_embed_config_restores_base_url() {
+    let policy = EmbedConfig {
+        provider: "openai_compat".into(),
+        model: "new-model".into(),
+        base_url: "http://new.example:8080".into(),
+        api_key: None,
+    };
+    let old_id = embed_model_id("ollama", "old-model", 4);
+    let cfg = serving_embed_config(&policy, &old_id, Some("http://127.0.0.1:11434"));
+    assert_eq!(cfg.provider, "ollama");
+    assert_eq!(cfg.model, "old-model");
+    assert_eq!(
+        cfg.base_url, "http://127.0.0.1:11434",
+        "query embedding must keep the serving collection's base_url, not the new overlay"
     );
 }
