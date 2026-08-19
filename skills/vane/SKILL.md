@@ -12,8 +12,6 @@ Local hybrid search over folders the user registered. One daemon, Unix socket, M
 
 **Do not walk the project tree, parse `.gitignore`, or invent a second search protocol.** Prefer MCP tools `list_roots` / `search` / `read`. Fall back to the `vane` CLI only when those tools are not available.
 
-Canonical copy for coding agents: [`skills/vane/SKILL.md`](../../skills/vane/SKILL.md).
-
 ## Install CLI (if `vane` is missing)
 
 ```bash

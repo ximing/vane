@@ -37,6 +37,7 @@ Tantivy-grade text search, and unified hybrid ranking in one library.
 - [Install](#install)
   - [Node.js](#nodejs) · [Go](#go) · [Browser](#browser) · [Build from source](#build-from-source)
 - [Local sidecar CLI](#local-sidecar-cli)
+  - [Install](#install-the-cli) · [First run](#first-run) · [MCP](#mcp) · [Agent skills](#agent-skills)
 - [Quick start](#quick-start)
   - [Node.js](#quick-start-nodejs) · [Go](#quick-start-go) · [Browser](#quick-start-browser)
 - [API reference](#api-reference)
@@ -183,14 +184,19 @@ and to agents via MCP.
 macOS and Linux only in v1 (Unix socket + launchd / systemd --user). Windows is not
 supported.
 
-**Install** (Linux x86_64, macOS arm64, macOS x86_64 from a `v*` GitHub Release):
+### Install the CLI
+
+Prebuilt binaries (Linux x86_64, macOS arm64, macOS x86_64) ship on `v*` GitHub
+Releases:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-cli.sh | sh
 # installs to ~/.local/bin/vane  (PREFIX=/usr/local to override)
+export PATH="$HOME/.local/bin:$PATH"
+vane --version
 ```
 
-From source:
+From source (any other arch, or until a matching tarball exists):
 
 ```bash
 cargo install --path crates/vane --locked --force
@@ -198,17 +204,32 @@ cargo install --path crates/vane --locked --force
 cargo install --git https://github.com/ximing/vane.git --locked --bin vane
 ```
 
-**Use:**
+Default embedder is Ollama (`nomic-embed-text`). Pull it once, or choose
+`openai_compat` during `vane init`:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+### First run
 
 ```bash
 vane init                 # embed provider, first folder, excludes, user service
 vane add ~/notes          # register another root
 vane start                # if the service is not installed
+vane status
 vane query "how does auth work"
 vane query "release" --all
 ```
 
-Point Claude Code / Cursor at the stdio MCP bridge (daemon must already be running):
+Home directory: `--home` > `VANE_HOME` > `~/.vane`. Project policy lives in
+`<root>/.vane.toml` (never put `api_key` there). Unchanged file bytes reuse extract
+and embed caches across git checkouts. `vane gc` never deletes your source files.
+
+### MCP
+
+Point Claude Code / Cursor / other MCP clients at the stdio bridge. The daemon
+must already be running (`vane mcp` does not start it):
 
 ```json
 {
@@ -221,12 +242,45 @@ Point Claude Code / Cursor at the stdio MCP bridge (daemon must already be runni
 }
 ```
 
-Copy [`crates/vane/SKILL.md`](crates/vane/SKILL.md) into the agent's skill directory.
 Agents should call `list_roots`, then `search`, then `read` — not walk the tree.
 
-Home directory: `--home` > `VANE_HOME` > `~/.vane`. Project policy lives in
-`<root>/.vane.toml` (never put `api_key` there). Unchanged file bytes reuse extract
-and embed caches across git checkouts. `vane gc` never deletes your source files.
+### Agent skills
+
+The same [`skills/vane`](skills/vane) document works across coding tools. It tells
+the agent to install/start the CLI if needed, then use MCP (`list_roots` →
+`search` → `read`) instead of scanning the filesystem.
+
+Install into every local agent runtime:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-skill.sh | sh
+```
+
+Or copy [`skills/vane`](skills/vane) by hand:
+
+| Runtime | Skill directory |
+|---|---|
+| Claude Code | `~/.claude/skills/vane/` |
+| Codex / Grok | `~/.agents/skills/vane/` |
+| Cursor | `~/.cursor/skills/vane/` |
+| Grok Build CLI | `~/.grok/skills/vane/` |
+
+Claude Code (this repo is a plugin marketplace):
+
+```text
+/plugin marketplace add ximing/vane
+/plugin install vane@vane
+```
+
+Codex:
+
+```bash
+codex plugin marketplace add ximing/vane
+codex plugin add vane@vane
+```
+
+Cursor: copy `skills/vane` into `~/.cursor/skills/` or the project's `.cursor/skills/`.
+Kimi Code: `/plugins install https://github.com/ximing/vane` then `/new`.
 
 Full walkthrough: [Local sidecar CLI](https://ximing.github.io/vane/guides/sidecar).
 
@@ -511,7 +565,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 
 ## Status
 
-**v0.2.0** — the core engine is feature-complete through milestones M0–M3:
+**v0.3.0** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI:
 
 - ✅ Core API, VFS, tokenizer (standard/cjk_bigram/jieba), BM25, segment HNSW, RRF fusion
 - ✅ Persistence (segments + manifest + WAL), tombstone delete, compaction, snapshot export

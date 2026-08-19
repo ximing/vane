@@ -7,7 +7,7 @@ import './Sidecar.css';
 const INSTALL_RELEASE = `# macOS (Apple Silicon / Intel) and Linux x86_64
 curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-cli.sh | sh
 # installs to ~/.local/bin/vane  (override with PREFIX=/usr/local)
-
+export PATH="$HOME/.local/bin:$PATH"
 vane --version`;
 
 const INSTALL_SOURCE = `git clone https://github.com/ximing/vane.git
@@ -15,6 +15,9 @@ cd vane
 cargo install --path crates/vane --locked --force
 # or, without cloning:
 cargo install --git https://github.com/ximing/vane.git --locked --bin vane`;
+
+const PREREQ = `# default embedder (skip if you choose openai_compat in vane init)
+ollama pull nomic-embed-text`;
 
 const INIT = `vane init
 # 1. Embedding provider: ollama (default) or openai_compat
@@ -57,9 +60,28 @@ max_chars = 800
 exclude = ["**/generated/**"]
 include = ["**/*.{md,rst}"]`;
 
-const SKILL_HINT = `Copy crates/vane/SKILL.md into the agent's skill directory, or point
-the agent at it. The skill says: call list_roots, then search, then
-read. Do not walk the filesystem.`;
+const SKILL_INSTALL = `# Claude / Codex / Cursor / Grok — same SKILL.md, one copy per runtime
+curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-skill.sh | sh
+
+# or by hand:
+#   mkdir -p ~/.claude/skills/vane ~/.agents/skills/vane ~/.cursor/skills/vane ~/.grok/skills/vane
+#   curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/skills/vane/SKILL.md \\
+#     | tee ~/.claude/skills/vane/SKILL.md \\
+#          ~/.agents/skills/vane/SKILL.md \\
+#          ~/.cursor/skills/vane/SKILL.md \\
+#          ~/.grok/skills/vane/SKILL.md >/dev/null`;
+
+const SKILL_PLUGINS = `# Claude Code (this repo is a plugin marketplace)
+/plugin marketplace add ximing/vane
+/plugin install vane@vane
+
+# Codex
+codex plugin marketplace add ximing/vane
+codex plugin add vane@vane
+
+# Kimi Code
+/plugins install https://github.com/ximing/vane
+# then /new so the plugin loads`;
 
 export default function Sidecar() {
   return (
@@ -85,14 +107,20 @@ export default function Sidecar() {
         <p>
           Tagged GitHub Releases attach prebuilt binaries for Linux x86_64,
           macOS arm64, and macOS x86_64. The install script picks the right
-          one:
+          one. Add <code>~/.local/bin</code> to <code>PATH</code> if{' '}
+          <code>vane</code> is not found afterwards.
         </p>
         <CodeBlock lang="bash" title="install from GitHub Release" code={INSTALL_RELEASE} />
         <p>
-          Until a release includes the CLI tarball, or on an unsupported
-          arch, build from source (needs a Rust toolchain):
+          On an unsupported arch, build from source (needs a Rust toolchain):
         </p>
         <CodeBlock lang="bash" title="install from source" code={INSTALL_SOURCE} />
+        <p>
+          The default embedder is a local Ollama model. Pull it once, or choose{' '}
+          <code>openai_compat</code> in the init wizard and set{' '}
+          <code>OPENAI_API_KEY</code> / <code>VANE_EMBED_API_KEY</code>.
+        </p>
+        <CodeBlock lang="bash" title="Ollama (default embedder)" code={PREREQ} />
 
         <h2 id="init">Initialize</h2>
         <p>
@@ -172,7 +200,16 @@ export default function Sidecar() {
             </tr>
           </tbody>
         </table>
-        <CodeBlock lang="text" title="crates/vane/SKILL.md" code={SKILL_HINT} />
+        <h3 id="agent-skills">Agent skills</h3>
+        <p>
+          The same <code>SKILL.md</code> works in Claude Code, Codex, Cursor,
+          Grok, and Kimi. It tells the agent to install or start the CLI if
+          needed, then call <code>list_roots</code> → <code>search</code> →{' '}
+          <code>read</code> instead of walking the filesystem. Canonical path:{' '}
+          <code>skills/vane/SKILL.md</code>.
+        </p>
+        <CodeBlock lang="bash" title="install skill into local agent runtimes" code={SKILL_INSTALL} />
+        <CodeBlock lang="text" title="plugin install (Claude / Codex / Kimi)" code={SKILL_PLUGINS} />
         <Callout type="warning" title="Local single-user trust">
           Anyone who can open the Unix socket (mode 0600, same uid) can
           search and read every indexed file. There is no token and no ACL in

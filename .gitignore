@@ -3,7 +3,12 @@
 node_modules/
 __pycache__/
 *.pyc
+.grok/
 .superpowers/
-.agents/
+# Personal agent files. Keep the Codex plugin marketplace committed.
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
 # M2-05：wasm 双变体产物（构建脚本产出，不入库）
 target/wasm-variants/

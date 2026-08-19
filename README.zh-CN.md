@@ -33,6 +33,7 @@ Tantivy 级别的文本检索、一体化混合排序，收在一个库里。
 - [安装](#安装)
   - [Node.js](#nodejs) · [Go](#go) · [浏览器](#浏览器) · [从源码构建](#从源码构建)
 - [本机侧车 CLI](#本机侧车-cli)
+  - [安装](#安装-cli) · [第一次跑](#第一次跑) · [MCP](#mcp) · [Agent skills](#agent-skills)
 - [快速开始](#快速开始)
   - [Node.js](#快速开始nodejs) · [Go](#快速开始go) · [浏览器](#快速开始浏览器)
 - [API 参考](#api-参考)
@@ -160,14 +161,18 @@ OpenAI 兼容 embedding 接口，人用 `vane query` 检索，Agent 走 MCP。
 
 第一版只支持 macOS 与 Linux（Unix socket + launchd / systemd --user），不做 Windows 服务。
 
-**安装**（`v*` GitHub Release 提供 Linux x86_64、macOS arm64、macOS x86_64 预编译）：
+### 安装 CLI
+
+`v*` GitHub Release 提供 Linux x86_64、macOS arm64、macOS x86_64 预编译：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-cli.sh | sh
 # 安装到 ~/.local/bin/vane（PREFIX=/usr/local 可改）
+export PATH="$HOME/.local/bin:$PATH"
+vane --version
 ```
 
-从源码：
+从源码（其他架构，或还没有对应 tarball 时）：
 
 ```bash
 cargo install --path crates/vane --locked --force
@@ -175,17 +180,31 @@ cargo install --path crates/vane --locked --force
 cargo install --git https://github.com/ximing/vane.git --locked --bin vane
 ```
 
-**使用：**
+默认 embedding 是 Ollama（`nomic-embed-text`）。先拉一次模型，或在 `vane init` 里选
+`openai_compat`：
+
+```bash
+ollama pull nomic-embed-text
+```
+
+### 第一次跑
 
 ```bash
 vane init                 # embedding、第一个目录、排除规则、用户服务
 vane add ~/notes          # 再登记一个根
 vane start                # 若没装用户服务
+vane status
 vane query "鉴权怎么做"
 vane query "发版" --all
 ```
 
-把 stdio MCP 桥交给 Claude Code / Cursor（守护进程必须已在跑）：
+家目录：`--home` > `VANE_HOME` > `~/.vane`。项目策略写在 `<root>/.vane.toml`（禁止放
+`api_key`）。相同文件字节在分支切换时复用提取/向量缓存。`vane gc` 永不删除用户源文件。
+
+### MCP
+
+把 stdio MCP 桥交给 Claude Code / Cursor / 其他 MCP 客户端。守护进程必须已经在跑
+（`vane mcp` 不会替你启动）：
 
 ```json
 {
@@ -198,11 +217,44 @@ vane query "发版" --all
 }
 ```
 
-把 [`crates/vane/SKILL.md`](crates/vane/SKILL.md) 拷进 Agent 的 skill 目录。Agent 应先
-`list_roots`，再 `search` / `read`，不要自己扫盘。
+Agent 应先 `list_roots`，再 `search` / `read`，不要自己扫盘。
 
-家目录：`--home` > `VANE_HOME` > `~/.vane`。项目策略写在 `<root>/.vane.toml`（禁止放
-`api_key`）。相同文件字节在分支切换时复用提取/向量缓存。`vane gc` 永不删除用户源文件。
+### Agent skills
+
+[`skills/vane`](skills/vane) 是一份给多个编程 Agent 用的 skill：CLI 不在就先装/启动，
+然后走 MCP（`list_roots` → `search` → `read`），不要扫文件系统。
+
+一次性装进本机常见 Agent 目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ximing/vane/main/scripts/install-vane-skill.sh | sh
+```
+
+或手动把 [`skills/vane`](skills/vane) 拷到：
+
+| 运行时 | Skill 目录 |
+|---|---|
+| Claude Code | `~/.claude/skills/vane/` |
+| Codex / Grok | `~/.agents/skills/vane/` |
+| Cursor | `~/.cursor/skills/vane/` |
+| Grok Build CLI | `~/.grok/skills/vane/` |
+
+Claude Code（本仓库就是插件市场）：
+
+```text
+/plugin marketplace add ximing/vane
+/plugin install vane@vane
+```
+
+Codex：
+
+```bash
+codex plugin marketplace add ximing/vane
+codex plugin add vane@vane
+```
+
+Cursor：把 `skills/vane` 拷到 `~/.cursor/skills/` 或项目 `.cursor/skills/`。
+Kimi Code：`/plugins install https://github.com/ximing/vane`，然后 `/new`。
 
 完整说明：[本机侧车 CLI](https://ximing.github.io/vane/guides/sidecar)。
 
@@ -442,7 +494,7 @@ native / Node，10 万文档 × 384 维：
 
 ## 状态
 
-**v0.1.0** —— 核心引擎按里程碑 M0–M2 功能完成：
+**v0.3.0** —— 核心引擎按里程碑 M0–M3 功能完成，并附带本机侧车 CLI：
 
 - ✅ 核心 API、VFS、分词器（standard/cjk_bigram/jieba）、BM25、分段 HNSW、RRF 融合
 - ✅ 持久化（段 + manifest + WAL）、tombstone 删除、合并、快照导出
