@@ -203,11 +203,11 @@ struct RawProjectFile {
     chunk: Option<ChunkOverlay>,
 }
 
-fn default_exclude() -> Vec<String> {
+pub fn default_exclude() -> Vec<String> {
     DEFAULT_EXCLUDE.iter().map(|s| (*s).to_string()).collect()
 }
 
-fn default_types() -> Vec<TypeRule> {
+pub fn default_types() -> Vec<TypeRule> {
     vec![
         TypeRule {
             glob: "**/*.{md,mdx,txt,rst,org,html}".into(),
@@ -222,7 +222,7 @@ fn default_types() -> Vec<TypeRule> {
     ]
 }
 
-fn default_embed() -> EmbedConfig {
+pub fn default_embed() -> EmbedConfig {
     EmbedConfig {
         provider: DEFAULT_EMBED_PROVIDER.into(),
         model: DEFAULT_EMBED_MODEL.into(),
