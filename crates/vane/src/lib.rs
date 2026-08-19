@@ -11,3 +11,4 @@ pub mod home;
 pub mod index;
 pub mod live;
 pub mod project;
+pub mod sync;
