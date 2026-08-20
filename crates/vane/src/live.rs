@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,7 @@ impl LiveSet {
     pub fn save_atomic(&self, path: &Path) -> Result<(), VaneCliError> {
         let payload = serde_json::to_vec(self)
             .map_err(|e| VaneCliError::new(format!("serialize live.json: {e}")))?;
-        atomic_write(path, &payload)
+        crate::fsutil::atomic_write(path, &payload, "live.json")
     }
 
     pub fn load_for_project(home: &Path, project_id: &str) -> Result<Self, VaneCliError> {
@@ -50,33 +49,6 @@ pub fn live_path(home: &Path, project_id: &str) -> PathBuf {
         .join("projects")
         .join(project_id)
         .join("live.json")
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), VaneCliError> {
-    let dir = path.parent().ok_or_else(|| {
-        VaneCliError::new(format!("live.json path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(dir).map_err(|e| io_err("create live.json parent", dir, e))?;
-    let tmp = dir.join(format!(
-        "{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("live.json")
-    ));
-    {
-        let mut f = File::create(&tmp).map_err(|e| io_err("create live.json temp", &tmp, e))?;
-        f.write_all(bytes)
-            .map_err(|e| io_err("write live.json temp", &tmp, e))?;
-        f.sync_all()
-            .map_err(|e| io_err("sync live.json temp", &tmp, e))?;
-    }
-    fs::rename(&tmp, path).map_err(|e| {
-        VaneCliError::new(format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })
 }
 
 fn io_err(op: &str, path: &Path, err: std::io::Error) -> VaneCliError {

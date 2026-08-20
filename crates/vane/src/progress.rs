@@ -1,5 +1,4 @@
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -152,7 +151,7 @@ pub fn save_progress(home: &Path, progress: &Progress) -> Result<(), VaneCliErro
     let path = progress_path(home);
     let payload = serde_json::to_vec_pretty(progress)
         .map_err(|e| VaneCliError::new(format!("serialize progress.json: {e}")))?;
-    atomic_write(&path, &payload, "progress.json")
+    crate::fsutil::atomic_write(&path, &payload, "progress.json")
 }
 
 pub fn load_skips(home: &Path, project_id: &str) -> SkipLog {
@@ -201,7 +200,7 @@ pub fn persist_skips(
     }
     let payload = serde_json::to_vec_pretty(&log)
         .map_err(|e| VaneCliError::new(format!("serialize skips.json: {e}")))?;
-    atomic_write(&path, &payload, "skips.json")
+    crate::fsutil::atomic_write(&path, &payload, "skips.json")
 }
 
 pub fn skip_file(
@@ -283,35 +282,4 @@ fn sanitize_detail(s: &str) -> String {
 fn secret_token_len(s: &str) -> usize {
     s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .unwrap_or(s.len())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), VaneCliError> {
-    let dir = path.parent().ok_or_else(|| {
-        VaneCliError::new(format!("{label} path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(dir).map_err(|e| {
-        VaneCliError::new(format!("create {} parent {}: {e}", label, dir.display()))
-    })?;
-    let tmp = dir.join(format!(
-        "{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or(label)
-    ));
-    {
-        let mut f = File::create(&tmp).map_err(|e| {
-            VaneCliError::new(format!("create {} temp {}: {e}", label, tmp.display()))
-        })?;
-        f.write_all(bytes).map_err(|e| {
-            VaneCliError::new(format!("write {} temp {}: {e}", label, tmp.display()))
-        })?;
-        f.sync_all().map_err(|e| {
-            VaneCliError::new(format!("sync {} temp {}: {e}", label, tmp.display()))
-        })?;
-    }
-    fs::rename(&tmp, path).map_err(|e| {
-        VaneCliError::new(format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })
 }

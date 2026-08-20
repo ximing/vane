@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod embed;
 pub mod error;
 pub mod extract;
+pub mod fsutil;
 pub mod gc;
 pub mod glob_match;
 pub mod home;
