@@ -1,3 +1,45 @@
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct TempHome {
+    path: std::path::PathBuf,
+}
+
+fn temp_home(tag: &str) -> TempHome {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path =
+        std::env::temp_dir().join(format!("vane-ux-{tag}-{}-{nanos}-{n}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    TempHome { path }
+}
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        let tmp = std::env::temp_dir();
+        if self.path.starts_with(&tmp) && self.path != tmp {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Call only while holding ENV_LOCK: sets VANE_ALLOW_EMBED_FAIL so the embed
+/// probe fails closed and init continues without a live embedder.
+fn init_home() -> TempHome {
+    let dir = temp_home("init");
+    let answers = vane::wizard::InitAnswers {
+        install_service: false,
+        ..Default::default()
+    };
+    std::env::set_var("VANE_ALLOW_EMBED_FAIL", "1");
+    vane::wizard::run_init(&dir.path, std::io::empty(), std::io::sink(), Some(answers)).unwrap();
+    dir
+}
+
 mod fsutil_tests {
     use std::path::{Path, PathBuf};
 
@@ -104,5 +146,119 @@ mod humanize_tests {
     fn abs_date_known_epoch() {
         assert_eq!(abs_date(0), "1970-01-01");
         assert_eq!(abs_date(1_755_700_000), "2025-08-20");
+    }
+}
+
+mod query_display_tests {
+    use vane::i18n::Lang;
+
+    #[test]
+    fn collapse_home_folds_home_prefix() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(vane::ui::collapse_home(&format!("{home}/notes")), "~/notes");
+        assert_eq!(vane::ui::collapse_home("/var/tmp"), "/var/tmp");
+    }
+
+    #[test]
+    fn scope_header_single_root_and_all() {
+        let one = vane::ui::format_scope_header(Some("~/notes"), 1, 12, false, Lang::En, false);
+        assert_eq!(one, "searching ~/notes · 12 live files · hybrid");
+        let all = vane::ui::format_scope_header(None, 3, 42, false, Lang::En, false);
+        assert_eq!(all, "searching 3 roots · 42 live files · hybrid");
+        let deg = vane::ui::format_scope_header(Some("~/notes"), 1, 12, true, Lang::Zh, false);
+        assert!(deg.contains("BM25（降级：embedder 不可达）"));
+    }
+
+    #[test]
+    fn hit_lines_omit_root_single_scope_and_id_unless_verbose() {
+        let hit = serde_json::json!({
+            "id": "p1:notes/a.md#0", "path": "notes/a.md", "root": "/abs/notes",
+            "snippet": "hello", "score": 0.42, "degraded": false
+        });
+        let single = vane::ui::hit_lines(
+            &hit,
+            0,
+            &vane::ui::HitLineOpts {
+                all: false,
+                verbose: false,
+                header_degraded: true,
+            },
+            false,
+        );
+        assert!(
+            !single.iter().any(|l| l.contains("/abs/notes")),
+            "single scope must not repeat root"
+        );
+        assert!(
+            !single.iter().any(|l| l.contains("p1:notes/a.md#0")),
+            "id hidden by default"
+        );
+        let all = vane::ui::hit_lines(
+            &hit,
+            0,
+            &vane::ui::HitLineOpts {
+                all: true,
+                verbose: true,
+                header_degraded: true,
+            },
+            false,
+        );
+        assert!(all.iter().any(|l| l.contains("/abs/notes")));
+        assert!(all.iter().any(|l| l.contains("p1:notes/a.md#0")));
+        let deg = serde_json::json!({"id":"p:x#0","path":"x","root":"/r","snippet":"","score":0.1,"degraded":true});
+        let lines = vane::ui::hit_lines(
+            &deg,
+            0,
+            &vane::ui::HitLineOpts {
+                all: false,
+                verbose: false,
+                header_degraded: true,
+            },
+            false,
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("degraded")),
+            "header already aggregated it"
+        );
+    }
+}
+
+mod dispatch_tests {
+    use vane::dispatch::{decide_query_arg, QueryArg};
+
+    #[test]
+    fn query_arg_branches() {
+        assert_eq!(
+            decide_query_arg(Some("foo".into()), true),
+            QueryArg::Run("foo".into())
+        );
+        assert_eq!(decide_query_arg(None, true), QueryArg::Prompt);
+        assert_eq!(decide_query_arg(None, false), QueryArg::MissingError);
+    }
+}
+
+mod subprocess_tests {
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn query_without_arg_non_tty_is_single_line_exit_2() {
+        let _g = crate::ENV_LOCK.lock().unwrap();
+        let home = crate::init_home();
+        let out = Command::new(env!("CARGO_BIN_EXE_vane"))
+            .args(["--home", &home.path.display().to_string(), "query"])
+            .env("VANE_LANG", "en")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("missing query"), "got: {stderr}");
+        assert!(
+            !stderr.contains("Usage:"),
+            "must not dump clap help: {stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1);
     }
 }

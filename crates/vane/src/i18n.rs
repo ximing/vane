@@ -37,6 +37,21 @@ pub const EN_TABLE: &[(&str, &str)] = &[
     ("time.hours_ago", "{n} hours ago"),
     ("time.days_ago", "{n} days ago"),
     ("time.never", "never"),
+    (
+        "query.missing_query",
+        "missing query — usage: vane query <text>",
+    ),
+    ("query.prompt", "Search query"),
+    (
+        "header.searching_one",
+        "searching {root} · {n} live files · {mode}",
+    ),
+    (
+        "header.searching_all",
+        "searching {k} roots · {n} live files · {mode}",
+    ),
+    ("header.hybrid", "hybrid"),
+    ("header.degraded", "BM25 (degraded: embedder unreachable)"),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -46,6 +61,18 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
     ("time.hours_ago", "{n} 小时前"),
     ("time.days_ago", "{n} 天前"),
     ("time.never", "从未"),
+    (
+        "query.missing_query",
+        "缺少查询词 — 用法：vane query <文本>",
+    ),
+    ("query.prompt", "搜索关键词"),
+    ("header.searching_one", "搜索 {root} · {n} 个文件 · {mode}"),
+    (
+        "header.searching_all",
+        "搜索 {k} 个目录 · {n} 个文件 · {mode}",
+    ),
+    ("header.hybrid", "混合检索"),
+    ("header.degraded", "BM25（降级：embedder 不可达）"),
 ];
 
 pub fn tr(lang: Lang, key: &str) -> &'static str {
