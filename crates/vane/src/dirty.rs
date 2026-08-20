@@ -80,6 +80,21 @@ impl DirtyQueue {
             .remove(&(project_id.to_string(), path.to_string()));
     }
 
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn len_for(&self, project_id: &str) -> usize {
+        self.items
+            .keys()
+            .filter(|(pid, _)| pid == project_id)
+            .count()
+    }
+
     pub fn load(path: &Path) -> Self {
         let Ok(bytes) = fs::read(path) else {
             return Self::new();

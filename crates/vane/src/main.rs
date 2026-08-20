@@ -46,6 +46,8 @@ enum Commands {
     },
     /// Print the resolved home directory and daemon status
     Status,
+    /// Diagnose sidecar home, daemon, embedder, and registered roots
+    Doctor,
     /// Run the sidecar daemon in the foreground
     Daemon,
     /// Start the daemon (user service if installed, else background process)
@@ -157,6 +159,7 @@ fn main() -> ExitCode {
         Commands::Include { action } => run_glob_policy(&home, PolicyKind::Include, action),
         Commands::Exclude { action } => run_glob_policy(&home, PolicyKind::Exclude, action),
         Commands::Status => run_status(&home),
+        Commands::Doctor => run_doctor(&home),
         Commands::Daemon => match vane::daemon::serve_forever(home) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -222,49 +225,45 @@ fn run_init(home: &Path) -> ExitCode {
 }
 
 fn run_status(home: &Path) -> ExitCode {
-    println!("{}", home.display());
     if require_init(home).is_err() {
         return ExitCode::from(1);
     }
-    match vane::ipc::rpc_call(home, "status", json!({})) {
-        Ok(v) => {
-            if vane::ui::interactive() {
-                print_status_pretty(home, &v);
-                ExitCode::SUCCESS
-            } else {
-                print_json(&v)
-            }
+    let running = vane::daemon::is_running(home);
+    let v = if running {
+        match vane::ipc::rpc_call(home, "status", json!({})) {
+            Ok(v) => v,
+            Err(_) => vane::doctor::status_from_disk(home, vane::daemon::is_running(home)),
         }
-        Err(e) => {
-            vane::ui::error(&e.message);
-            ExitCode::from(1)
-        }
+    } else {
+        vane::doctor::status_from_disk(home, false)
+    };
+    if vane::ui::stdout_tty() {
+        vane::ui::print_status_dashboard(&v);
+        ExitCode::SUCCESS
+    } else {
+        print_json(&v)
     }
 }
 
-fn print_status_pretty(home: &Path, v: &serde_json::Value) {
-    println!("{} {}", vane::ui::dim("home"), vane::ui::path_display(home));
-    let running = v.get("running").and_then(|x| x.as_bool()).unwrap_or(true);
-    if running {
-        vane::ui::success("daemon running");
+fn run_doctor(home: &Path) -> ExitCode {
+    let report = vane::doctor::run(home);
+    if vane::ui::stdout_tty() {
+        vane::ui::print_doctor(&report);
     } else {
-        vane::ui::warn("daemon not running — vane start");
-    }
-    if let Some(projects) = v.get("projects").and_then(|p| p.as_array()) {
-        for p in projects {
-            let path = p.get("path").and_then(|x| x.as_str()).unwrap_or("?");
-            let live = p.get("live_files").and_then(|x| x.as_u64()).unwrap_or(0);
-            let model = p.get("model").and_then(|x| x.as_str()).unwrap_or("-");
-            println!(
-                "  {}  {} live={} model={}",
-                vane::ui::accent("root"),
-                path,
-                vane::ui::accent(&live.to_string()),
-                vane::ui::dim(model)
-            );
+        match serde_json::to_value(&report) {
+            Ok(v) => {
+                print_json(&v);
+            }
+            Err(e) => {
+                vane::ui::error(&format!("encode doctor report: {e}"));
+                return ExitCode::from(1);
+            }
         }
+    }
+    if report.ok {
+        ExitCode::SUCCESS
     } else {
-        println!("{v}");
+        ExitCode::from(1)
     }
 }
 
@@ -591,7 +590,7 @@ fn run_query(
     }
     if all {
         params["all"] = json!(true);
-    } else if let Some(r) = root {
+    } else if let Some(r) = root.as_ref() {
         params["root"] = json!(r.display().to_string());
     } else {
         let cwd = match std::env::current_dir() {
@@ -612,7 +611,7 @@ fn run_query(
         }
     }
     match vane::ipc::rpc_call(home, "search", params) {
-        Ok(v) => print_search_result(&v),
+        Ok(v) => print_search_result(home, &v, &q, all, root.as_deref()),
         Err(e) => {
             vane::ui::error(&e.message);
             ExitCode::from(1)
@@ -620,14 +619,31 @@ fn run_query(
     }
 }
 
-fn print_search_result(v: &serde_json::Value) -> ExitCode {
-    if vane::ui::interactive() {
-        let hits = v.as_array().cloned().unwrap_or_else(|| {
-            v.get("hits")
-                .and_then(|h| h.as_array())
-                .cloned()
-                .unwrap_or_default()
-        });
+fn print_search_result(
+    home: &Path,
+    v: &serde_json::Value,
+    q: &str,
+    all: bool,
+    root: Option<&Path>,
+) -> ExitCode {
+    let hits = v.as_array().cloned().unwrap_or_else(|| {
+        v.get("hits")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default()
+    });
+    if hits.is_empty() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let why = vane::doctor::explain_empty_query(home, &cwd, q, all, root);
+        if vane::ui::stdout_tty() {
+            vane::ui::print_why(&why.message);
+            return ExitCode::SUCCESS;
+        }
+        print_json(v);
+        eprintln!("{}", why.message);
+        return ExitCode::SUCCESS;
+    }
+    if vane::ui::stdout_tty() {
         vane::ui::print_hits(&hits);
         ExitCode::SUCCESS
     } else {

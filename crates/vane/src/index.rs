@@ -65,6 +65,9 @@ pub struct ProjectState {
     pub rebuild: Option<RebuildProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reindex_error: Option<String>,
+    /// Last per-root error (embed/reconcile). Distinct from `reindex_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
