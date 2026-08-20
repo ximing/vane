@@ -56,8 +56,31 @@ pub fn should_watch_dir(rel_dir: &str, policy: &ResolvedPolicy) -> bool {
         .any(|pattern| dir_fully_excluded(&dir, pattern))
 }
 
-fn extractor_supported(name: &str) -> bool {
+pub fn extractor_supported(name: &str) -> bool {
     FIRST_PARTY_EXTRACTORS.contains(&name)
+}
+
+/// Enabled type rule whose extractor is reserved / unknown (`pdf`, `docx`, …).
+pub fn unsupported_extractor<'a>(rel_path: &str, policy: &'a ResolvedPolicy) -> Option<&'a str> {
+    let path = normalize_rel(rel_path);
+    for pattern in &policy.exclude {
+        if glob_match(pattern, &path) {
+            return None;
+        }
+    }
+    for rule in &policy.types {
+        if !glob_match(&rule.glob, &path) {
+            continue;
+        }
+        if !rule.enabled {
+            continue;
+        }
+        if !extractor_supported(&rule.extractor) {
+            return Some(rule.extractor.as_str());
+        }
+        return None;
+    }
+    None
 }
 
 fn dir_fully_excluded(rel_dir: &str, pattern: &str) -> bool {

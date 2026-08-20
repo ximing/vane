@@ -5,6 +5,7 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::doctor::{CheckLevel, DoctorReport};
+use crate::progress::IssuesReport;
 
 pub fn colors_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
@@ -107,6 +108,32 @@ pub fn print_hits(hits: &[serde_json::Value]) {
         }
         if !id.is_empty() {
             println!("    {}", dim(&format!("id {id}")));
+        }
+    }
+}
+
+pub fn print_issues(report: &IssuesReport) {
+    if report.roots.is_empty() {
+        println!("{}", dim("no registered roots"));
+        return;
+    }
+    if report.roots.iter().all(|r| r.files.is_empty()) {
+        success("no skipped files");
+        return;
+    }
+    for root in &report.roots {
+        println!("{} {}", accent("root"), root.path);
+        if root.files.is_empty() {
+            println!("  {}", dim("no skipped files"));
+            continue;
+        }
+        for file in &root.files {
+            println!(
+                "  {}  {}  {}",
+                accent(&file.path),
+                dim(file.reason.as_str()),
+                file.detail
+            );
         }
     }
 }

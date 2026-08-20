@@ -29,6 +29,7 @@ use crate::ipc::{
 };
 use crate::live::LiveSet;
 use crate::log::{DailyLogger, Level, NaiveDate};
+use crate::progress::{Progress, ProgressPhase};
 use crate::project::{project_id, reject_nested};
 use crate::search::{read_by_id, read_by_path, search_all, search_project, ProjectSearch};
 use crate::sync::{rebuild_for_new_model, reconcile_project, SyncCtx, SyncReport};
@@ -940,6 +941,7 @@ fn do_add_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
         "unchanged": report.unchanged,
         "embedded": report.embedded,
         "cas_hits": report.cas_hits,
+        "skipped": report.skipped,
     }))
 }
 
@@ -1167,6 +1169,8 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
         }
     };
     let now = unix_now();
+    let mut progress = Progress::new(&pid, canon.display().to_string(), ProgressPhase::Scan);
+    let _ = progress.save(&shared.home);
     let result = {
         let mut dirty = shared
             .dirty
@@ -1189,8 +1193,8 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
                 shared,
                 Level::Info,
                 &format!(
-                    "reconcile {pid} scanned={} added={} deleted={} unchanged={} embedded={}",
-                    report.scanned, report.added, report.deleted, report.unchanged, report.embedded
+                    "reconcile {pid} scanned={} added={} deleted={} unchanged={} embedded={} skipped={}",
+                    report.scanned, report.added, report.deleted, report.unchanged, report.embedded, report.skipped
                 ),
             );
             report
@@ -1200,6 +1204,14 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
             SyncReport::default()
         }
     };
+    progress.phase = ProgressPhase::Idle;
+    progress.scanned = report.scanned;
+    progress.total_estimate = report.scanned;
+    progress.added = report.added;
+    progress.embedded = report.embedded;
+    progress.skipped = report.skipped;
+    progress.touch();
+    let _ = progress.save(&shared.home);
     if let Ok(mut serving) = shared.serving.lock() {
         serving.insert(pid, idx);
     }

@@ -139,6 +139,23 @@ fn handle_ollama(stream: &mut TcpStream, dim: usize) {
 
 const DOC: &str = "# 鉴权\n\n如何做登录鉴权，这是一段足够长的说明文字以便通过最小切片长度。\n";
 
+fn write_embed_config(home: &Path, base_url: &str) {
+    let cfg = home.join("config").join("config.toml");
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[defaults.embed]
+provider = "ollama"
+model = "nomic-embed-text"
+base_url = "{base_url}"
+"#
+        ),
+    )
+    .unwrap();
+}
+
 fn write_config(home: &Path, project: &Path, base_url: &str) {
     let cfg = home.join("config").join("config.toml");
     fs::create_dir_all(cfg.parent().unwrap()).unwrap();
@@ -214,6 +231,32 @@ fn search_hits(home: &Path, query: &str) -> Vec<Value> {
         "search error: {v}"
     );
     v["result"].as_array().cloned().unwrap_or_default()
+}
+
+fn run_cli(home: &Path, cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    let output = Command::new(bin)
+        .args(["--home", home.to_str().expect("utf-8 home")])
+        .args(args)
+        .current_dir(cwd)
+        .env("VANE_HOME", home)
+        .env("HOME", fake_user_home(home))
+        .output()
+        .expect("run vane");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn first_json_object(stdout: &str) -> Value {
+    let start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("expected JSON object in stdout: {stdout:?}"));
+    serde_json::from_str(stdout[start..].trim()).unwrap_or_else(|e| {
+        panic!("parse JSON object from stdout: {e}; stdout={stdout:?}");
+    })
 }
 
 fn wait_hits(home: &Path, query: &str, timeout: Duration) -> Vec<Value> {
@@ -297,5 +340,139 @@ fn daemon_skips_project_file_that_contains_api_key() {
     assert!(
         hits.is_empty(),
         "secret-bearing .vane.toml must not be loaded as global overlay; got {hits:?}"
+    );
+}
+
+#[test]
+fn add_root_json_records_skip_and_progress_under_test_home() {
+    let _serial = serial_lock();
+    let tmp = tempfile_dir();
+    assert!(tmp.starts_with(std::env::temp_dir()));
+    let real_vane = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".vane");
+    assert!(!tmp.starts_with(&real_vane));
+
+    let project = tmp.join("proj");
+    fs::create_dir_all(project.join("docs")).unwrap();
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(project.join("docs/auth.md"), DOC).unwrap();
+    fs::write(project.join("docs/bad.txt"), [0xff, 0xfe, 0x00]).unwrap();
+    fs::write(project.join("spec.pdf"), b"%PDF-1.4\n").unwrap();
+    fs::write(
+        project.join("node_modules/pkg/index.js"),
+        b"module.exports=1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join(".vane.toml"),
+        r#"
+[[types]]
+glob = "**/*.{md,mdx,txt,rst,org,html}"
+extractor = "text"
+enabled = true
+
+[[types]]
+glob = "**/*.pdf"
+extractor = "pdf"
+enabled = true
+"#,
+    )
+    .unwrap();
+    let base = spawn_ollama(4);
+    write_embed_config(&tmp, &base);
+    let _daemon = spawn_daemon(&tmp);
+
+    let (code, stdout, stderr) = run_cli(&tmp, &tmp, &["add", "-y", project.to_str().unwrap()]);
+    assert_eq!(code, 0, "vane add should succeed, stderr={stderr}");
+    let v = first_json_object(&stdout);
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(
+        v["scanned"].as_u64().unwrap_or(0) >= 1,
+        "add_root JSON needs scanned: {v}"
+    );
+    assert!(
+        v["embedded"].as_u64().unwrap_or(0) >= 1,
+        "add_root JSON needs embedded: {v}"
+    );
+    assert!(
+        v["skipped"].as_u64().unwrap_or(0) >= 2,
+        "add_root JSON needs skipped for utf-8 + pdf: {v}"
+    );
+    let dumped = stdout.to_ascii_lowercase();
+    assert!(
+        !dumped.contains("api_key"),
+        "add must never print api_key: {stdout}"
+    );
+
+    let progress_path = tmp.join("run").join("progress.json");
+    assert!(
+        progress_path.is_file(),
+        "progress.json must exist under the test home {}",
+        tmp.display()
+    );
+    assert!(progress_path.starts_with(&*tmp));
+    assert!(!progress_path.starts_with(&real_vane));
+    let progress: Value =
+        serde_json::from_slice(&fs::read(&progress_path).unwrap()).expect("progress json");
+    assert_eq!(progress["phase"], "idle");
+    assert!(
+        progress["skipped"].as_u64().unwrap_or(0) >= 2,
+        "idle progress should keep skip count: {progress}"
+    );
+
+    let project = project.canonicalize().unwrap();
+    let pid = vane::project::project_id(&project);
+    let skips_path = tmp
+        .join("rag")
+        .join("projects")
+        .join(&pid)
+        .join("skips.json");
+    assert!(
+        skips_path.is_file(),
+        "skips.json missing at {}",
+        skips_path.display()
+    );
+    let skips: Value = serde_json::from_slice(&fs::read(&skips_path).unwrap()).expect("skips json");
+    let files = skips["files"].as_array().expect("skips.files");
+    assert!(
+        files
+            .iter()
+            .any(|f| f["path"] == "docs/bad.txt" && f["reason"] == "invalid_utf8"),
+        "skips.json should record invalid utf-8: {skips}"
+    );
+    assert!(
+        files
+            .iter()
+            .any(|f| f["path"] == "spec.pdf" && f["reason"] == "extractor_unsupported"),
+        "skips.json should record unsupported pdf: {skips}"
+    );
+    assert!(
+        files
+            .iter()
+            .all(|f| !f["path"].as_str().unwrap_or("").contains("node_modules")),
+        "excluded node_modules must not appear in skips: {skips}"
+    );
+    assert!(project.join("docs/bad.txt").is_file());
+    assert!(project.join("spec.pdf").is_file());
+
+    let (icode, iout, ierr) = run_cli(
+        &tmp,
+        &project,
+        &["issues", "--root", project.to_str().unwrap()],
+    );
+    assert_eq!(icode, 0, "vane issues should succeed, stderr={ierr}");
+    let issues: Value = serde_json::from_str(iout.trim()).expect("issues stdout JSON");
+    let issue_files = issues["roots"][0]["files"]
+        .as_array()
+        .expect("issues.roots[0].files");
+    assert!(
+        issue_files.iter().any(|f| f["reason"] == "invalid_utf8"),
+        "issues must surface skips: {issues}"
+    );
+    assert!(
+        !iout.to_ascii_lowercase().contains("api_key"),
+        "issues must never print api_key: {iout}"
     );
 }

@@ -16,6 +16,7 @@ pub mod ipc;
 pub mod live;
 pub mod log;
 pub mod mcp;
+pub mod progress;
 pub mod project;
 pub mod rrf;
 pub mod search;

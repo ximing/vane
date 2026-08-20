@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use vane::cas::Cas;
+use vane::config::{ChunkConfig, EmbedConfig, ResolvedPolicy, TypeRule};
 use vane::embed::{embed_model_id, Embedder, MockEmbedder};
 use vane::extract::CanonicalDoc;
 use vane::index::{
@@ -11,6 +13,9 @@ use vane::index::{
     should_compact, ProjectIndex,
 };
 use vane::live::{live_path, LiveFile, LiveSet};
+use vane::progress::{load_progress, load_skips, ProgressPhase, SkipFileReason};
+use vane::project::project_id;
+use vane::sync::{reconcile_project, SyncCtx};
 use vane_core::api::{FusionSpec, SearchMode, SearchQuery};
 
 struct TempHome {
@@ -213,6 +218,123 @@ fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn mixed_policy() -> ResolvedPolicy {
+    ResolvedPolicy {
+        embed: EmbedConfig {
+            provider: "mock".into(),
+            model: "test".into(),
+            base_url: "http://127.0.0.1".into(),
+            api_key: None,
+            dim: None,
+        },
+        chunk: ChunkConfig {
+            split: "markdown".into(),
+            max_chars: 1200,
+            overlap_chars: 200,
+            min_chars: 50,
+        },
+        exclude: vec!["**/node_modules/**".into()],
+        types: vec![
+            TypeRule {
+                glob: "**/*.{md,mdx,txt,rst,org,html}".into(),
+                extractor: "text".into(),
+                enabled: true,
+            },
+            TypeRule {
+                glob: "**/*.pdf".into(),
+                extractor: "pdf".into(),
+                enabled: true,
+            },
+        ],
+    }
+}
+
+#[test]
+fn mixed_tree_records_skip_and_progress() {
+    let tmp = tempfile_dir();
+    assert!(tmp.starts_with(std::env::temp_dir()));
+    assert!(!tmp.starts_with(dirs_home().join(".vane")));
+
+    let root = tmp.join("proj");
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    let body = "# 鉴权\n\n如何做登录鉴权，这是一段足够长的说明文字以便通过最小切片长度。\n";
+    fs::write(root.join("docs/auth.md"), body).unwrap();
+    fs::write(root.join("docs/bad.txt"), [0xff, 0xfe, 0x00]).unwrap();
+    fs::write(root.join("spec.pdf"), b"%PDF-1.4\n").unwrap();
+    fs::write(
+        root.join("node_modules/pkg/index.js"),
+        b"module.exports=1;\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let pid = project_id(&root);
+    let dim = 4;
+    let model = embed_model_id("mock", "test", dim);
+    let cas = Cas::new(tmp.join("rag").join("cas"));
+    let idx = open_or_create(&tmp, &pid, dim, &model).unwrap();
+    let embedder = mock_embedder(dim);
+    let mut ctx = SyncCtx {
+        home: &tmp,
+        project_id: &pid,
+        cas: &cas,
+        index: &idx,
+        embedder: &embedder,
+        now: 1_700_000_000,
+        dirty: None,
+    };
+
+    let report = reconcile_project(&mut ctx, &root, &mixed_policy()).unwrap();
+    assert!(
+        report.scanned >= 1,
+        "mixed tree should scan markdown: {report:?}"
+    );
+    assert_eq!(report.added, 1, "only auth.md should be added: {report:?}");
+    assert!(
+        report.skipped >= 2,
+        "utf-8 + unsupported pdf must be skipped: {report:?}"
+    );
+    assert!(report.embedded >= 1, "auth.md should embed: {report:?}");
+
+    assert!(root.join("docs/auth.md").is_file());
+    assert!(root.join("docs/bad.txt").is_file());
+    assert!(root.join("spec.pdf").is_file());
+    assert!(root.join("node_modules/pkg/index.js").is_file());
+
+    let progress_path = tmp.join("run").join("progress.json");
+    assert!(
+        progress_path.is_file(),
+        "progress.json must be written under the test home"
+    );
+    assert!(progress_path.starts_with(&*tmp));
+    assert!(!progress_path.starts_with(dirs_home().join(".vane")));
+    let progress = load_progress(&tmp).expect("parse progress.json");
+    assert_eq!(progress.phase, ProgressPhase::Idle);
+    assert_eq!(progress.project_id, pid);
+    assert!(progress.skipped >= 2);
+
+    let log = load_skips(&tmp, &pid);
+    assert!(
+        log.files
+            .iter()
+            .any(|f| f.path == "docs/bad.txt" && f.reason == SkipFileReason::InvalidUtf8),
+        "invalid utf-8 must be recorded: {:?}",
+        log.files
+    );
+    assert!(
+        log.files
+            .iter()
+            .any(|f| { f.path == "spec.pdf" && f.reason == SkipFileReason::ExtractorUnsupported }),
+        "unsupported pdf must be recorded: {:?}",
+        log.files
+    );
+    assert!(
+        log.files.iter().all(|f| !f.path.contains("node_modules")),
+        "excluded trees must not be dumped: {:?}",
+        log.files
+    );
 }
 
 // Touch ProjectIndex in the import so a missing type fails at compile time.
