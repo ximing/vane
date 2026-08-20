@@ -866,6 +866,24 @@ fn clack_u32(label: &str, default: u32) -> Result<u32, VaneCliError> {
         .map_err(|_| VaneCliError::new(format!("invalid {label}: {raw:?}")))
 }
 
+/// Plain-text next-steps card after a successful TTY `init` / `add`.
+pub fn next_steps_card(daemon_running: bool) -> String {
+    let daemon = if daemon_running {
+        "daemon running"
+    } else {
+        "daemon not running — vane start"
+    };
+    [
+        "Next steps",
+        daemon,
+        "vane start",
+        "vane query",
+        "vane mcp",
+        "vane mcp install",
+    ]
+    .join("\n")
+}
+
 fn clack_err(e: impl std::fmt::Display) -> VaneCliError {
     VaneCliError::new(format!("{e}"))
 }

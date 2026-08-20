@@ -1,6 +1,8 @@
+use std::fs::{self, File};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::VaneCliError;
@@ -363,4 +365,347 @@ fn is_stdio_eof(err: &VaneCliError) -> bool {
     err.message == "eof"
         || err.message.starts_with("read mcp header:")
         || err.message.starts_with("read mcp body:")
+}
+
+/// MCP client whose config `vane mcp install` knows how to merge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpClient {
+    Claude,
+    Cursor,
+    Codex,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpInstallTarget {
+    pub path: String,
+    pub client: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpInstallSkip {
+    pub path: String,
+    pub client: String,
+    pub reason: String,
+}
+
+/// TTY / piped report for `vane mcp install`. `--dry-run` fills `would_write` only.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpInstallReport {
+    pub ok: bool,
+    pub dry_run: bool,
+    pub would_write: Vec<McpInstallTarget>,
+    pub written: Vec<McpInstallTarget>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<McpInstallSkip>,
+}
+
+/// Merge `mcpServers.vane` / `[mcp_servers.vane]` into client configs under `user_home`.
+///
+/// `user_home` is `$HOME` from the environment (tests pass a fake home). Never creates
+/// Claude Desktop dirs. Creates missing Claude/Cursor files; Codex/Grok only if present.
+pub fn install_mcp(
+    user_home: &Path,
+    dry_run: bool,
+    client: Option<McpClient>,
+) -> Result<McpInstallReport, VaneCliError> {
+    if user_home.as_os_str().is_empty() {
+        return Err(VaneCliError::new("HOME is empty"));
+    }
+    let jobs = install_jobs(user_home, client);
+    let mut would_write = Vec::new();
+    let mut written = Vec::new();
+    let mut skipped = Vec::new();
+
+    for job in &jobs {
+        match prepare_job(job)? {
+            PreparedJob::Skip { reason } => {
+                skipped.push(McpInstallSkip {
+                    path: job.path.display().to_string(),
+                    client: job.client.to_string(),
+                    reason,
+                });
+            }
+            PreparedJob::Write { action, bytes } => {
+                let target = McpInstallTarget {
+                    path: job.path.display().to_string(),
+                    client: job.client.to_string(),
+                    action: action.to_string(),
+                };
+                if dry_run {
+                    would_write.push(target);
+                } else {
+                    atomic_write(&job.path, &bytes, job.client)?;
+                    written.push(target);
+                }
+            }
+        }
+    }
+
+    if matches!(client, Some(McpClient::Codex))
+        && would_write.is_empty()
+        && written.is_empty()
+        && skipped.is_empty()
+    {
+        skipped.push(McpInstallSkip {
+            path: user_home.join(".codex").display().to_string(),
+            client: "codex".into(),
+            reason: "no existing Codex MCP config (will not create)".into(),
+        });
+    }
+
+    Ok(McpInstallReport {
+        ok: true,
+        dry_run,
+        would_write,
+        written,
+        skipped,
+    })
+}
+
+struct InstallJob {
+    client: &'static str,
+    path: PathBuf,
+    format: ConfigFormat,
+    create: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ConfigFormat {
+    Json,
+    Toml,
+}
+
+enum PreparedJob {
+    Skip {
+        reason: String,
+    },
+    Write {
+        action: &'static str,
+        bytes: Vec<u8>,
+    },
+}
+
+fn install_jobs(user_home: &Path, client: Option<McpClient>) -> Vec<InstallJob> {
+    let all = client.is_none();
+    let mut jobs = Vec::new();
+    if all || client == Some(McpClient::Claude) {
+        jobs.push(InstallJob {
+            client: "claude",
+            path: user_home.join(".claude.json"),
+            format: ConfigFormat::Json,
+            create: true,
+        });
+    }
+    if all || client == Some(McpClient::Cursor) {
+        jobs.push(InstallJob {
+            client: "cursor",
+            path: user_home.join(".cursor").join("mcp.json"),
+            format: ConfigFormat::Json,
+            create: true,
+        });
+    }
+    if all || client == Some(McpClient::Codex) {
+        for name in ["mcp.json", "config.json"] {
+            let path = user_home.join(".codex").join(name);
+            if path.is_file() {
+                jobs.push(InstallJob {
+                    client: "codex",
+                    path,
+                    format: ConfigFormat::Json,
+                    create: false,
+                });
+            }
+        }
+        let toml_path = user_home.join(".codex").join("config.toml");
+        if toml_path.is_file() {
+            jobs.push(InstallJob {
+                client: "codex",
+                path: toml_path,
+                format: ConfigFormat::Toml,
+                create: false,
+            });
+        }
+    }
+    if all {
+        let grok = user_home.join(".grok").join("config.toml");
+        if grok.is_file() {
+            jobs.push(InstallJob {
+                client: "grok",
+                path: grok,
+                format: ConfigFormat::Toml,
+                create: false,
+            });
+        }
+    }
+    jobs
+}
+
+fn prepare_job(job: &InstallJob) -> Result<PreparedJob, VaneCliError> {
+    let exists = job.path.is_file();
+    if !exists && !job.create {
+        return Ok(PreparedJob::Skip {
+            reason: "not present".into(),
+        });
+    }
+    let action = if exists { "merge" } else { "create" };
+    let bytes = match job.format {
+        ConfigFormat::Json => {
+            let root = if exists {
+                load_json_object(&job.path)?
+            } else {
+                json!({})
+            };
+            let merged = merge_vane_into_json(root, &job.path)?;
+            encode_json_pretty(&merged, &job.path)?
+        }
+        ConfigFormat::Toml => {
+            let root = if exists {
+                load_toml_table(&job.path)?
+            } else {
+                toml::Value::Table(toml::map::Map::new())
+            };
+            let merged = merge_vane_into_toml(root, &job.path)?;
+            encode_toml_pretty(&merged, &job.path)?
+        }
+    };
+    Ok(PreparedJob::Write { action, bytes })
+}
+
+fn load_json_object(path: &Path) -> Result<Value, VaneCliError> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| VaneCliError::new(format!("read {}: {e}", path.display())))?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(json!({}));
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|e| VaneCliError::new(format!("parse {}: {e}", path.display())))?;
+    if !value.is_object() {
+        return Err(VaneCliError::new(format!(
+            "{} root must be a JSON object",
+            path.display()
+        )));
+    }
+    Ok(value)
+}
+
+fn load_toml_table(path: &Path) -> Result<toml::Value, VaneCliError> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| VaneCliError::new(format!("read {}: {e}", path.display())))?;
+    if text.trim().is_empty() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    let value: toml::Value = text
+        .parse()
+        .map_err(|e| VaneCliError::new(format!("parse {}: {e}", path.display())))?;
+    if !value.is_table() {
+        return Err(VaneCliError::new(format!(
+            "{} root must be a TOML table",
+            path.display()
+        )));
+    }
+    Ok(value)
+}
+
+fn merge_vane_into_json(mut root: Value, path: &Path) -> Result<Value, VaneCliError> {
+    let obj = root.as_object_mut().ok_or_else(|| {
+        VaneCliError::new(format!("{} root must be a JSON object", path.display()))
+    })?;
+    let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
+    let servers_obj = servers.as_object_mut().ok_or_else(|| {
+        VaneCliError::new(format!(
+            "mcpServers in {} must be a JSON object",
+            path.display()
+        ))
+    })?;
+    let mut vane = servers_obj
+        .get("vane")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    vane.insert("command".into(), json!("vane"));
+    vane.insert("args".into(), json!(["mcp"]));
+    servers_obj.insert("vane".into(), Value::Object(vane));
+    Ok(root)
+}
+
+fn merge_vane_into_toml(mut root: toml::Value, path: &Path) -> Result<toml::Value, VaneCliError> {
+    let table = root.as_table_mut().ok_or_else(|| {
+        VaneCliError::new(format!("{} root must be a TOML table", path.display()))
+    })?;
+    let servers = table
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let servers_tbl = servers.as_table_mut().ok_or_else(|| {
+        VaneCliError::new(format!("mcp_servers in {} must be a table", path.display()))
+    })?;
+    if !servers_tbl.get("vane").is_some_and(toml::Value::is_table) {
+        servers_tbl.insert("vane".into(), toml::Value::Table(toml::map::Map::new()));
+    }
+    let vane = servers_tbl
+        .get_mut("vane")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| {
+            VaneCliError::new(format!(
+                "mcp_servers.vane in {} must be a table",
+                path.display()
+            ))
+        })?;
+    vane.insert("command".into(), toml::Value::String("vane".into()));
+    vane.insert(
+        "args".into(),
+        toml::Value::Array(vec![toml::Value::String("mcp".into())]),
+    );
+    Ok(root)
+}
+
+fn encode_json_pretty(value: &Value, path: &Path) -> Result<Vec<u8>, VaneCliError> {
+    let mut body = serde_json::to_vec_pretty(value)
+        .map_err(|e| VaneCliError::new(format!("encode {}: {e}", path.display())))?;
+    if !body.ends_with(b"\n") {
+        body.push(b'\n');
+    }
+    Ok(body)
+}
+
+fn encode_toml_pretty(value: &toml::Value, path: &Path) -> Result<Vec<u8>, VaneCliError> {
+    let mut body = toml::to_string_pretty(value)
+        .map_err(|e| VaneCliError::new(format!("encode {}: {e}", path.display())))?;
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    Ok(body.into_bytes())
+}
+
+fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), VaneCliError> {
+    let dir = path.parent().ok_or_else(|| {
+        VaneCliError::new(format!("{label} path has no parent: {}", path.display()))
+    })?;
+    fs::create_dir_all(dir).map_err(|e| {
+        VaneCliError::new(format!("create {} parent {}: {e}", label, dir.display()))
+    })?;
+    let tmp = dir.join(format!(
+        "{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or(label)
+    ));
+    {
+        let mut f = File::create(&tmp).map_err(|e| {
+            VaneCliError::new(format!("create {} temp {}: {e}", label, tmp.display()))
+        })?;
+        f.write_all(bytes).map_err(|e| {
+            VaneCliError::new(format!("write {} temp {}: {e}", label, tmp.display()))
+        })?;
+        f.sync_all().map_err(|e| {
+            VaneCliError::new(format!("sync {} temp {}: {e}", label, tmp.display()))
+        })?;
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        VaneCliError::new(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })
 }

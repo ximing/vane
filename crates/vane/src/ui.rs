@@ -5,6 +5,7 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::doctor::{CheckLevel, DoctorReport};
+use crate::mcp::McpInstallReport;
 use crate::progress::IssuesReport;
 
 pub fn colors_enabled() -> bool {
@@ -135,6 +136,48 @@ pub fn print_issues(report: &IssuesReport) {
                 file.detail
             );
         }
+    }
+}
+
+pub fn print_next_steps(home: &std::path::Path) {
+    let running = crate::daemon::is_running(home);
+    let card = crate::wizard::next_steps_card(running);
+    println!();
+    for (i, line) in card.lines().enumerate() {
+        if i == 0 {
+            println!("{}", accent(line));
+        } else if colors_enabled() {
+            println!("  {}", dim(line));
+        } else {
+            println!("  {line}");
+        }
+    }
+}
+
+pub fn print_mcp_install(report: &McpInstallReport) {
+    let rows = if report.dry_run {
+        report.would_write.as_slice()
+    } else {
+        report.written.as_slice()
+    };
+    if rows.is_empty() && report.skipped.is_empty() {
+        println!("{}", dim("no MCP client configs to write"));
+        return;
+    }
+    for row in rows {
+        let verb = if report.dry_run {
+            "would write"
+        } else {
+            "wrote"
+        };
+        success(&format!("{verb} {} ({})", row.path, row.action));
+    }
+    for skip in &report.skipped {
+        println!(
+            "  {} {}",
+            dim("skip"),
+            dim(&format!("{} ({})", skip.path, skip.reason))
+        );
     }
 }
 

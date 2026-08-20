@@ -356,3 +356,32 @@ fn install_writes_unit_under_fake_user_home() {
     assert!(!paths.unit_path.exists());
     vane::service::uninstall_user_service_at(&paths).expect("uninstall again");
 }
+
+#[test]
+fn init_success_next_steps_card_lists_query_start_and_mcp() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    let answers = InitAnswers {
+        provider: "ollama".into(),
+        model: "nomic-embed-text".into(),
+        base_url: "http://127.0.0.1:11434".into(),
+        install_service: false,
+        ..InitAnswers::default()
+    };
+    run_init(&tmp, Cursor::new(""), &mut Vec::new(), Some(answers)).expect("init success");
+    assert!(tmp.join("config").join("config.toml").is_file());
+
+    let down = vane::wizard::next_steps_card(false);
+    assert!(down.contains("Next steps"), "{down}");
+    assert!(down.contains("vane start"), "{down}");
+    assert!(down.contains("vane query"), "{down}");
+    assert!(down.contains("vane mcp"), "{down}");
+    assert!(down.contains("mcp install"), "{down}");
+    assert!(down.contains("not running"), "{down}");
+
+    let up = vane::wizard::next_steps_card(true);
+    assert!(up.contains("daemon running"), "{up}");
+    assert!(up.contains("vane query"), "{up}");
+    assert!(up.contains("vane mcp"), "{up}");
+    assert!(up.contains("mcp install"), "{up}");
+}
