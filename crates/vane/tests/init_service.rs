@@ -69,6 +69,7 @@ fn assume_writes_config_toml_with_chosen_exclude() {
         model: "nomic-embed-text".into(),
         base_url: "http://127.0.0.1:11434".into(),
         api_key: None,
+        dim: None,
         first_root: None,
         exclude: vec!["**/node_modules/**".into(), "**/secret/**".into()],
         images: false,
@@ -116,6 +117,7 @@ fn assume_openai_compat_writes_api_key_to_global_config() {
         model: "qwen3.7-text-embedding".into(),
         base_url: "https://example.invalid/compatible-mode/v1".into(),
         api_key: Some("sk-test-from-init".into()),
+        dim: Some(1024),
         first_root: None,
         exclude: vec!["**/.git/**".into()],
         images: false,
@@ -130,11 +132,16 @@ fn assume_openai_compat_writes_api_key_to_global_config() {
         cfg.defaults.embed.api_key.as_deref(),
         Some("sk-test-from-init")
     );
+    assert_eq!(cfg.defaults.embed.dim, Some(1024));
     let path = tmp.join("config").join("config.toml");
     let raw = fs::read_to_string(&path).expect("read config");
     assert!(
         raw.contains("api_key"),
         "global config should persist api_key, got {raw}"
+    );
+    assert!(
+        raw.contains("dim = 1024"),
+        "global config should persist dim, got {raw}"
     );
     #[cfg(unix)]
     {
@@ -161,6 +168,7 @@ fn interactive_openai_compat_asks_for_api_key() {
         "qwen3.7-text-embedding",
         "http://127.0.0.1:1/compatible-mode/v1",
         "sk-typed-in-wizard",
+        "1024",
         "",
         "",
         "",
@@ -180,6 +188,11 @@ fn interactive_openai_compat_asks_for_api_key() {
     assert_eq!(
         cfg.defaults.embed.api_key.as_deref(),
         Some("sk-typed-in-wizard")
+    );
+    assert_eq!(cfg.defaults.embed.dim, Some(1024));
+    assert!(
+        printed.contains("Vector dimension"),
+        "wizard must prompt for vector dimension, got {printed}"
     );
 }
 

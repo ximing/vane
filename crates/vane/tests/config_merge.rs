@@ -198,12 +198,30 @@ max_chars = 800
     )
     .unwrap();
     let pol = resolve_policy(&cfg, Path::new("/proj"), Some(&pf)).unwrap();
+    assert_eq!(pol.embed.dim, None);
     assert_eq!(pol.embed.provider, "openai_compat");
     assert_eq!(pol.embed.model, "text-embedding-3-small");
     assert_eq!(pol.embed.base_url, "http://127.0.0.1:11434");
     assert_eq!(pol.chunk.max_chars, 800);
     assert_eq!(pol.chunk.overlap_chars, 200);
     assert_eq!(pol.chunk.split, "markdown");
+}
+
+#[test]
+fn embed_dim_loads_from_global_config() {
+    let tmp = tempfile_dir();
+    write(
+        &tmp.join("config/config.toml"),
+        r#"
+[defaults.embed]
+provider = "openai_compat"
+model = "qwen3.7-text-embedding"
+base_url = "https://example.invalid/v1"
+dim = 1024
+"#,
+    );
+    let cfg = load_config(&tmp).unwrap();
+    assert_eq!(cfg.defaults.embed.dim, Some(1024));
 }
 
 #[test]

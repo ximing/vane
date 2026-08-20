@@ -214,7 +214,7 @@ ollama pull nomic-embed-text
 ### First run
 
 ```bash
-vane init                 # embed provider, API key if openai_compat, first folder, service
+vane init                 # embed provider, API key, vector dim, first folder, service
 vane add ~/notes          # register another root
 vane start                # if the service is not installed
 vane status

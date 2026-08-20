@@ -83,6 +83,9 @@ enum Commands {
         /// Provider base URL
         #[arg(long = "base-url")]
         base_url: Option<String>,
+        /// Vector dimension (openai_compat sends this as `dimensions`)
+        #[arg(long)]
+        dim: Option<u32>,
     },
     /// User service (launchd / systemd --user)
     Service {
@@ -169,7 +172,8 @@ fn main() -> ExitCode {
             provider,
             model,
             base_url,
-        } => run_model(&home, global, root, provider, model, base_url),
+            dim,
+        } => run_model(&home, global, root, provider, model, base_url, dim),
         Commands::Service {
             action: ServiceCmd::Uninstall,
         } => run_service_uninstall(&home),
@@ -512,6 +516,7 @@ fn run_model(
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
+    dim: Option<u32>,
 ) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
@@ -523,8 +528,8 @@ fn run_model(
             return ExitCode::from(1);
         }
     };
-    if provider.is_none() && model.is_none() && base_url.is_none() {
-        eprintln!("vane model: pass --provider, --model, and/or --base-url");
+    if provider.is_none() && model.is_none() && base_url.is_none() && dim.is_none() {
+        eprintln!("vane model: pass --provider, --model, --base-url, and/or --dim");
         return ExitCode::from(1);
     }
 
@@ -558,7 +563,7 @@ fn run_model(
         }
     };
 
-    if let Err(e) = write_embed_overlay(home, global, &targets, &provider, &model, &base_url) {
+    if let Err(e) = write_embed_overlay(home, global, &targets, &provider, &model, &base_url, dim) {
         eprintln!("{e}");
         return ExitCode::from(1);
     }
@@ -574,6 +579,9 @@ fn run_model(
         }
         if let Some(u) = &base_url {
             params["base_url"] = json!(u);
+        }
+        if let Some(d) = dim {
+            params["dim"] = json!(d);
         }
         match vane::ipc::rpc_call(home, "rebuild", params) {
             Ok(v) => match serde_json::to_string_pretty(&v) {
@@ -618,14 +626,22 @@ fn write_embed_overlay(
     provider: &Option<String>,
     model: &Option<String>,
     base_url: &Option<String>,
+    dim: Option<u32>,
 ) -> Result<(), vane::error::VaneCliError> {
     if global {
         let path = home.join("config").join("config.toml");
-        patch_embed_toml(&path, &["defaults", "embed"], provider, model, base_url)
+        patch_embed_toml(
+            &path,
+            &["defaults", "embed"],
+            provider,
+            model,
+            base_url,
+            dim,
+        )
     } else {
         for root in targets {
             let path = root.join(".vane.toml");
-            patch_embed_toml(&path, &["embed"], provider, model, base_url)?;
+            patch_embed_toml(&path, &["embed"], provider, model, base_url, dim)?;
         }
         Ok(())
     }
@@ -637,6 +653,7 @@ fn patch_embed_toml(
     provider: &Option<String>,
     model: &Option<String>,
     base_url: &Option<String>,
+    dim: Option<u32>,
 ) -> Result<(), vane::error::VaneCliError> {
     let mut value = load_toml(path)?;
     let mut cur = value.as_table_mut().ok_or_else(|| {
@@ -658,6 +675,9 @@ fn patch_embed_toml(
     }
     if let Some(u) = base_url {
         cur.insert("base_url".into(), toml::Value::String(u.clone()));
+    }
+    if let Some(d) = dim {
+        cur.insert("dim".into(), toml::Value::Integer(i64::from(d)));
     }
     save_toml(path, &value)
 }

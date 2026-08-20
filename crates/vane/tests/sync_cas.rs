@@ -60,6 +60,7 @@ fn policy() -> ResolvedPolicy {
             model: "test".into(),
             base_url: "http://127.0.0.1".into(),
             api_key: None,
+            dim: None,
         },
         chunk: ChunkConfig {
             split: "markdown".into(),

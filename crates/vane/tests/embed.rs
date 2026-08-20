@@ -143,8 +143,19 @@ fn openai_payload(body: &[u8]) -> String {
     // Response shape from the plan; repeat one vector per input so a 65-text
     // batch can succeed while still counting HTTP calls.
     let n = parse_openai_input_len(body).unwrap_or(1);
-    let items = vec![r#"{"embedding":[1.0,0.0,0.0]}"#; n].join(",");
+    let dim = parse_openai_dimensions(body).unwrap_or(3);
+    let embedding = (0..dim)
+        .map(|i| if i == 0 { "1.0" } else { "0.0" })
+        .collect::<Vec<_>>()
+        .join(",");
+    let item = format!(r#"{{"embedding":[{embedding}]}}"#);
+    let items = vec![item; n].join(",");
     format!(r#"{{"data":[{items}]}}"#)
+}
+
+fn parse_openai_dimensions(body: &[u8]) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.get("dimensions")?.as_u64().map(|n| n as usize)
 }
 
 fn parse_openai_input_len(body: &[u8]) -> Option<usize> {
@@ -179,6 +190,7 @@ fn ollama_probe_dim_from_fake_http() {
         model: "nomic-embed-text".into(),
         base_url: server.base_url.clone(),
         api_key: None,
+        dim: None,
     };
     let emb = ollama_embedder(&cfg);
     assert_eq!(emb.probe_dim().unwrap(), 2);
@@ -195,6 +207,7 @@ fn openai_compat_batches_65_texts_into_two_http_calls() {
         model: "text-embedding-3-small".into(),
         base_url: server.base_url.clone(),
         api_key: None,
+        dim: None,
     };
     let emb = openai_embedder(&cfg);
     assert_eq!(emb.probe_dim().unwrap(), 3);
@@ -204,6 +217,23 @@ fn openai_compat_batches_65_texts_into_two_http_calls() {
     assert_eq!(vecs.len(), 65);
     assert_eq!(vecs[0], vec![1.0, 0.0, 0.0]);
     assert_eq!(server.hits() - probe_hits, 2);
+}
+
+#[test]
+fn openai_compat_sends_configured_dimensions() {
+    let _tmp = tempfile_dir();
+    let server = FakeServer::spawn(FakeKind::OpenAi);
+    let cfg = EmbedConfig {
+        provider: "openai_compat".into(),
+        model: "qwen3.7-text-embedding".into(),
+        base_url: server.base_url.clone(),
+        api_key: None,
+        dim: Some(2),
+    };
+    let emb = openai_embedder(&cfg);
+    assert_eq!(emb.probe_dim().unwrap(), 2);
+    let vecs = emb.embed(&[String::from("hi")]).unwrap();
+    assert_eq!(vecs[0].len(), 2);
 }
 
 #[test]
