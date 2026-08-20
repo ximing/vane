@@ -7,7 +7,7 @@ use vane::config::{
     default_exclude, default_types, load_config, resolve_policy, ProjectFile, TypeRule,
 };
 use vane::home::{default_fallback, resolve_home};
-use vane::project::{find_current_root, project_id};
+use vane::project::{find_current_root, project_id, resolve_query_scope, QueryScope};
 use vane::sync::rebuild_for_new_model;
 
 #[derive(Parser, Debug)]
@@ -23,10 +23,15 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Write global config (interactive unless used from tests via assume)
+    /// Write global config (re-run to edit; empty answers keep current values)
     Init,
     /// Register a project root and notify the daemon
-    Add { path: PathBuf },
+    Add {
+        path: PathBuf,
+        /// Skip the project-config wizard and do not write `.vane.toml`
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Unregister a project root (keeps CAS / project db until gc)
     Rm { path: PathBuf },
     /// Change the current project's include / types table
@@ -54,6 +59,9 @@ enum Commands {
         /// Fuse hits across every registered project (RRF)
         #[arg(long)]
         all: bool,
+        /// Force global scope (same as --all); ignore `.vane.toml` walk-up
+        #[arg(long)]
+        global: bool,
         /// Search a single registered root
         #[arg(long)]
         root: Option<PathBuf>,
@@ -144,7 +152,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Commands::Init => run_init(&home),
-        Commands::Add { path } => run_add(&home, &path),
+        Commands::Add { path, yes } => run_add(&home, &path, yes),
         Commands::Rm { path } => run_rm(&home, &path),
         Commands::Include { action } => run_glob_policy(&home, PolicyKind::Include, action),
         Commands::Exclude { action } => run_glob_policy(&home, PolicyKind::Exclude, action),
@@ -162,10 +170,11 @@ fn main() -> ExitCode {
         Commands::Query {
             q,
             all,
+            global,
             root,
             extractor,
             top_k,
-        } => run_query(&home, q, all, root, extractor, top_k),
+        } => run_query(&home, q, all || global, root, extractor, top_k),
         Commands::Model {
             global,
             root,
@@ -195,10 +204,18 @@ fn require_init(home: &std::path::Path) -> Result<(), ExitCode> {
 }
 
 fn run_init(home: &Path) -> ExitCode {
-    match vane::wizard::run_init(home, std::io::stdin(), std::io::stdout(), None) {
-        Ok(()) => ExitCode::SUCCESS,
+    let result = if vane::ui::interactive() {
+        vane::wizard::run_init_tty(home)
+    } else {
+        vane::wizard::run_init(home, std::io::stdin(), std::io::stdout(), None)
+    };
+    match result {
+        Ok(()) => {
+            vane::ui::success("initialized");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
-            eprintln!("{e}");
+            vane::ui::error(&e.message);
             ExitCode::from(1)
         }
     }
@@ -210,11 +227,44 @@ fn run_status(home: &Path) -> ExitCode {
         return ExitCode::from(1);
     }
     match vane::ipc::rpc_call(home, "status", json!({})) {
-        Ok(v) => print_json(&v),
+        Ok(v) => {
+            if vane::ui::interactive() {
+                print_status_pretty(home, &v);
+                ExitCode::SUCCESS
+            } else {
+                print_json(&v)
+            }
+        }
         Err(e) => {
-            eprintln!("{e}");
+            vane::ui::error(&e.message);
             ExitCode::from(1)
         }
+    }
+}
+
+fn print_status_pretty(home: &Path, v: &serde_json::Value) {
+    println!("{} {}", vane::ui::dim("home"), vane::ui::path_display(home));
+    let running = v.get("running").and_then(|x| x.as_bool()).unwrap_or(true);
+    if running {
+        vane::ui::success("daemon running");
+    } else {
+        vane::ui::warn("daemon not running — vane start");
+    }
+    if let Some(projects) = v.get("projects").and_then(|p| p.as_array()) {
+        for p in projects {
+            let path = p.get("path").and_then(|x| x.as_str()).unwrap_or("?");
+            let live = p.get("live_files").and_then(|x| x.as_u64()).unwrap_or(0);
+            let model = p.get("model").and_then(|x| x.as_str()).unwrap_or("-");
+            println!(
+                "  {}  {} live={} model={}",
+                vane::ui::accent("root"),
+                path,
+                vane::ui::accent(&live.to_string()),
+                vane::ui::dim(model)
+            );
+        }
+    } else {
+        println!("{v}");
     }
 }
 
@@ -318,22 +368,82 @@ fn run_mcp(home: &std::path::Path) -> ExitCode {
     }
 }
 
-fn run_add(home: &Path, path: &Path) -> ExitCode {
+fn run_add(home: &Path, path: &Path, yes: bool) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
     }
     let resolved = match resolve_root_arg(path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{e}");
+            vane::ui::error(&e.message);
             return ExitCode::from(1);
         }
     };
-    rpc_print(
+    if !yes && vane::ui::interactive() {
+        let cfg = match load_config(home) {
+            Ok(c) => c,
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        };
+        let setup = if vane::ui::interactive() {
+            vane::wizard::prompt_project_setup_tty(&cfg.defaults.chunk)
+        } else {
+            vane::wizard::prompt_project_setup(
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+                &cfg.defaults.chunk,
+            )
+        };
+        match setup {
+            Ok(s) if s.write_file => {
+                match vane::wizard::write_project_toml(&resolved, &s.chunk, s.images) {
+                    Ok(p) => vane::ui::success(&format!("wrote {}", p.display())),
+                    Err(e) => {
+                        vane::ui::error(&e.message);
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let spin = vane::ui::spinner(&format!("indexing {}", resolved.display()));
+    let result = vane::ipc::rpc_call(
         home,
         "add_root",
         json!({ "path": resolved.display().to_string() }),
-    )
+    );
+    spin.finish_and_clear();
+    match result {
+        Ok(v) => {
+            print_add_report(&resolved, &v);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            vane::ui::error(&e.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn print_add_report(root: &Path, v: &serde_json::Value) {
+    let scanned = v.get("scanned").and_then(|x| x.as_u64()).unwrap_or(0);
+    let added = v.get("added").and_then(|x| x.as_u64()).unwrap_or(0);
+    let embedded = v.get("embedded").and_then(|x| x.as_u64()).unwrap_or(0);
+    let unchanged = v.get("unchanged").and_then(|x| x.as_u64()).unwrap_or(0);
+    vane::ui::success(&format!(
+        "added {}  scanned {scanned}  new {added}  embedded {embedded}  unchanged {unchanged}",
+        root.display()
+    ));
+    if !vane::ui::interactive() {
+        print_json(v);
+    }
 }
 
 fn run_rm(home: &Path, path: &Path) -> ExitCode {
@@ -471,7 +581,7 @@ fn run_query(
     let cfg = match load_config(home) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{e}");
+            vane::ui::error(&e.message);
             return ExitCode::from(1);
         }
     };
@@ -487,7 +597,7 @@ fn run_query(
         let cwd = match std::env::current_dir() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("cannot read cwd: {e}");
+                vane::ui::error(&format!("cannot read cwd: {e}"));
                 return ExitCode::from(1);
             }
         };
@@ -496,17 +606,33 @@ fn run_query(
             .iter()
             .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
             .collect();
-        match find_current_root(&cwd, &roots) {
-            Some(r) => params["root"] = json!(r.display().to_string()),
-            None => {
-                eprintln!(
-                    "cwd is not inside a registered root; run `vane add` or pass --all / --root"
-                );
-                return ExitCode::from(1);
-            }
+        match resolve_query_scope(&cwd, &roots, false) {
+            QueryScope::All => params["all"] = json!(true),
+            QueryScope::Root(r) => params["root"] = json!(r.display().to_string()),
         }
     }
-    rpc_print(home, "search", params)
+    match vane::ipc::rpc_call(home, "search", params) {
+        Ok(v) => print_search_result(&v),
+        Err(e) => {
+            vane::ui::error(&e.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn print_search_result(v: &serde_json::Value) -> ExitCode {
+    if vane::ui::interactive() {
+        let hits = v.as_array().cloned().unwrap_or_else(|| {
+            v.get("hits")
+                .and_then(|h| h.as_array())
+                .cloned()
+                .unwrap_or_default()
+        });
+        vane::ui::print_hits(&hits);
+        ExitCode::SUCCESS
+    } else {
+        print_json(v)
+    }
 }
 
 fn run_model(

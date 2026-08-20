@@ -16,6 +16,44 @@ pub fn project_id(canonical_root: &Path) -> String {
     out
 }
 
+/// Walk `start` and its parents looking for `.vane.toml`.
+pub fn find_vane_toml_dir(start: &Path) -> Option<PathBuf> {
+    let mut cur = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+    loop {
+        if cur.join(".vane.toml").is_file() {
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// Where `vane query` should search when the user does not pass `--root`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryScope {
+    All,
+    Root(PathBuf),
+}
+
+/// `.vane.toml` walking up from cwd, else the longest registered prefix, else all roots.
+pub fn resolve_query_scope(cwd: &Path, registered: &[PathBuf], force_global: bool) -> QueryScope {
+    if force_global {
+        return QueryScope::All;
+    }
+    if let Some(dir) = find_vane_toml_dir(cwd) {
+        return QueryScope::Root(dir);
+    }
+    match find_current_root(cwd, registered) {
+        Some(root) => QueryScope::Root(root),
+        None => QueryScope::All,
+    }
+}
+
 /// Longest registered root that is a path prefix of `cwd`.
 pub fn find_current_root(cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
     roots

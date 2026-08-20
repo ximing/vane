@@ -20,5 +20,6 @@ pub mod rrf;
 pub mod search;
 pub mod service;
 pub mod sync;
+pub mod ui;
 pub mod watch;
 pub mod wizard;
