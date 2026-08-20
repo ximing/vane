@@ -19,6 +19,13 @@ pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
+pub fn confirm(prompt: &str, initial: bool) -> Result<bool, crate::error::VaneCliError> {
+    cliclack::confirm(prompt)
+        .initial_value(initial)
+        .interact()
+        .map_err(|e| crate::error::VaneCliError::new(format!("{e}")))
+}
+
 /// Structured command output: TTY is human; piped is JSON.
 pub fn stdout_tty() -> bool {
     std::io::stdout().is_terminal()

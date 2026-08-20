@@ -66,6 +66,7 @@ where
         }
     };
     validate_provider(&answers.provider)?;
+    probe_or_fail_closed(home, &answers, &mut stdout, false)?;
     write_config_from_answers(home, &answers)?;
     let _ = writeln!(stdout, "wrote {}", cfg_path.display());
 
@@ -154,26 +155,11 @@ where
     )?;
     let min_chars = prompt_u32(stdin, stdout, "Chunk min_chars", chunk_def.min_chars)?;
 
-    let embed = EmbedConfig {
-        provider: provider.clone(),
-        model: model.clone(),
-        base_url: base_url.clone(),
-        api_key: api_key.clone(),
-        dim,
-    };
-    if provider == "openai_compat" && embed.api_key.is_none() && !env_embed_api_key_set() {
+    if provider == "openai_compat" && api_key.is_none() && !env_embed_api_key_set() {
         let _ = writeln!(
             stdout,
             "warning: no API key; probe will likely 401. Enter a key, or export OPENAI_API_KEY / VANE_EMBED_API_KEY"
         );
-    }
-    match crate::embed::embedder_from_config(&embed).probe_dim() {
-        Ok(dim) => {
-            let _ = writeln!(stdout, "probe ok, dim={dim}");
-        }
-        Err(e) => {
-            let _ = writeln!(stdout, "warning: embed probe failed ({e}); continuing");
-        }
     }
 
     let root_s = prompt(stdin, stdout, "First project root (empty to skip)", "")?;
@@ -653,6 +639,7 @@ pub fn run_init_tty(home: &Path) -> Result<(), VaneCliError> {
     let existing = crate::config::load_config(home).ok();
     let answers = prompt_answers_tty(existing.as_ref())?;
     validate_provider(&answers.provider)?;
+    probe_or_fail_closed(home, &answers, &mut std::io::sink(), true)?;
     write_config_from_answers(home, &answers)?;
     cliclack::outro(format!(
         "wrote {}",
@@ -755,23 +742,6 @@ fn prompt_answers_tty(existing: Option<&Config>) -> Result<InitAnswers, VaneCliE
     let max_chars = clack_u32("Chunk max_chars", chunk_def.max_chars)?;
     let overlap_chars = clack_u32("Chunk overlap_chars", chunk_def.overlap_chars)?;
     let min_chars = clack_u32("Chunk min_chars", chunk_def.min_chars)?;
-
-    let embed = EmbedConfig {
-        provider: provider.clone(),
-        model: model.clone(),
-        base_url: base_url.clone(),
-        api_key: api_key.clone(),
-        dim,
-    };
-    match crate::embed::embedder_from_config(&embed).probe_dim() {
-        Ok(d) => {
-            cliclack::log::success(format!("probe ok, dim={d}")).map_err(clack_err)?;
-        }
-        Err(e) => {
-            cliclack::log::warning(format!("embed probe failed ({e}); continuing"))
-                .map_err(clack_err)?;
-        }
-    }
 
     let root_s: String = cliclack::input("First project root (empty to skip)")
         .required(false)
@@ -882,6 +852,67 @@ pub fn next_steps_card(daemon_running: bool) -> String {
         "vane mcp install",
     ]
     .join("\n")
+}
+
+fn embed_from_answers(answers: &InitAnswers) -> EmbedConfig {
+    EmbedConfig {
+        provider: answers.provider.clone(),
+        model: answers.model.clone(),
+        base_url: answers.base_url.clone(),
+        api_key: answers.api_key.clone(),
+        dim: answers.dim,
+    }
+}
+
+fn embed_fail_allowed() -> bool {
+    matches!(std::env::var("VANE_ALLOW_EMBED_FAIL"), Ok(v) if v.trim() == "1")
+}
+
+/// Probe after answers (including assume). TTY may confirm; else exit unless env=1.
+fn probe_or_fail_closed<W: Write>(
+    home: &Path,
+    answers: &InitAnswers,
+    stdout: &mut W,
+    tty: bool,
+) -> Result<(), VaneCliError> {
+    match crate::embed::live_probe(&embed_from_answers(answers)) {
+        Ok(dim) => {
+            if tty {
+                cliclack::log::success(format!("probe ok, dim={dim}")).map_err(clack_err)?;
+            } else {
+                let _ = writeln!(stdout, "probe ok, dim={dim}");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("embed probe failed: {e}");
+            let _ = crate::doctor::write_last_error(
+                home,
+                &msg,
+                None,
+                Some(crate::embed::probe_error_code(&e.message)),
+            );
+            if embed_fail_allowed() {
+                if tty {
+                    cliclack::log::warning(format!("{msg}; continuing (VANE_ALLOW_EMBED_FAIL=1)"))
+                        .map_err(clack_err)?;
+                } else {
+                    let _ = writeln!(
+                        stdout,
+                        "warning: {msg}; continuing (VANE_ALLOW_EMBED_FAIL=1)"
+                    );
+                }
+                return Ok(());
+            }
+            if tty && crate::ui::interactive() {
+                cliclack::log::warning(&msg).map_err(clack_err)?;
+                if crate::ui::confirm("Continue anyway?", false)? {
+                    return Ok(());
+                }
+            }
+            Err(VaneCliError::new(msg))
+        }
+    }
 }
 
 fn clack_err(e: impl std::fmt::Display) -> VaneCliError {

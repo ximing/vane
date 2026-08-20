@@ -944,13 +944,7 @@ fn do_add_root(shared: &Shared, path: &Path) -> Result<Value, VaneCliError> {
         Ok(())
     })?;
     restart_watch(shared);
-    let report = match reconcile_root(shared, &canon) {
-        Ok(r) => r,
-        Err(e) => {
-            log_msg(shared, Level::Warn, &e.message);
-            SyncReport::default()
-        }
-    };
+    let report = reconcile_root(shared, &canon)?;
     log_msg(
         shared,
         Level::Info,
@@ -1172,16 +1166,9 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
         }
     }
     let embedder = embedder_from_config(&policy.embed);
-    let dim = match embedder.probe_dim() {
+    let dim = match crate::embed::live_probe_with(embedder.as_ref(), policy.embed.dim) {
         Ok(d) => d,
-        Err(e) => {
-            log_msg(
-                shared,
-                Level::Warn,
-                &format!("embed probe {}: {e}", canon.display()),
-            );
-            return Ok(SyncReport::default());
-        }
+        Err(e) => return Err(abort_embed_down(shared, &pid, &canon, &e)),
     };
     let model_id = embed_model_id(&policy.embed.provider, &policy.embed.model, dim);
     let cas = Cas::new(shared.home.join("rag").join("cas"));
@@ -1189,7 +1176,8 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
         Ok(i) => i,
         Err(e) => {
             log_msg(shared, Level::Warn, &format!("open index {pid}: {e}"));
-            return Ok(SyncReport::default());
+            let _ = crate::doctor::write_last_error(&shared.home, &e.message, Some(&pid), None);
+            return Err(e);
         }
     };
     let now = unix_now();
@@ -1213,6 +1201,7 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
     };
     let report = match result {
         Ok(report) => {
+            crate::doctor::clear_project_last_error(&shared.home, &pid);
             log_msg(
                 shared,
                 Level::Info,
@@ -1225,7 +1214,11 @@ fn reconcile_root(shared: &Shared, root: &Path) -> Result<SyncReport, VaneCliErr
         }
         Err(e) => {
             log_msg(shared, Level::Warn, &format!("reconcile {pid}: {e}"));
-            SyncReport::default()
+            let _ = crate::doctor::write_last_error(&shared.home, &e.message, Some(&pid), None);
+            progress.phase = ProgressPhase::Idle;
+            progress.touch();
+            let _ = progress.save(&shared.home);
+            return Err(e);
         }
     };
     progress.phase = ProgressPhase::Idle;
@@ -1287,6 +1280,22 @@ fn schedule_ttl_if_date_changed(shared: &Shared) {
     if due {
         let _ = shared.writer.send(WriterCmd::TtlGc);
     }
+}
+
+fn abort_embed_down(shared: &Shared, pid: &str, root: &Path, err: &VaneCliError) -> VaneCliError {
+    let msg = format!(
+        "embedder down for {}: {} — aborting reconcile",
+        root.display(),
+        err.message
+    );
+    log_msg(shared, Level::Error, &msg);
+    let _ = crate::doctor::write_last_error(
+        &shared.home,
+        &msg,
+        Some(pid),
+        Some(crate::embed::probe_error_code(&err.message)),
+    );
+    VaneCliError::new(msg)
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {
