@@ -27,10 +27,12 @@ const INIT = `vane init
 # 5. First project root (can skip)
 # 6. Exclude globs (defaults include .git, node_modules, target, *.log, .env, …)
 # 7. Enable image types? (default no)  /  Install user service? (default yes)
+# Embed probe fails closed. TTY can confirm; scripts:
+#   VANE_ALLOW_EMBED_FAIL=1 vane init
 
 vane add ~/notes          # if you skipped the first root
 vane start                # if the user service is not installed
-vane status`;
+vane status               # TTY dashboard (JSON if piped)`;
 
 const QUERY = `# Search the current project (cwd must sit inside a registered root)
 vane query "how does auth work" --top-k 8
@@ -40,7 +42,9 @@ vane query "release checklist" --root ~/notes
 vane query "release checklist" --all
 
 # Filter by extractor name (not file suffix)
-vane query "logo" --type image`;
+vane query "logo" --type image
+
+# Empty hits still exit 0 and print a why line in a TTY`;
 
 const MCP = `{
   "mcpServers": {
@@ -50,6 +54,26 @@ const MCP = `{
     }
   }
 }`;
+
+const MCP_INSTALL = `vane mcp install --dry-run              # print what would be written
+vane mcp install                        # Claude, Cursor, existing Codex
+vane mcp install --client claude        # claude | cursor | codex`;
+
+const DIAGNOSE = `vane status                 # TTY dashboard (JSON if piped)
+vane doctor                 # config, socket, daemon, embedder, roots, disk
+vane issues                 # skipped files in the current root
+vane issues --all
+vane logs                   # last 50 redacted daemon lines
+vane logs --follow --lines 200
+vane inspect                # resolved embed / chunk / exclude / types
+vane inspect --global
+vane inspect --root ~/notes
+vane df                     # $VANE_HOME, CAS, per-project dbs
+vane gc --dry-run           # count unreferenced cache; does not delete
+vane gc --all --dry-run`;
+
+const MODEL = `vane model --model nomic-embed-text --yes
+# --yes skips the rebuild prompt (required when not a TTY)`;
 
 const PROJECT_TOML = `# <root>/.vane.toml  — checked into the repo, never put api_key here
 [embed]
@@ -139,7 +163,12 @@ export default function Sidecar() {
           <code>nomic-embed-text</code> by default) or an OpenAI-compatible
           endpoint. API keys belong in the global config or in{' '}
           <code>OPENAI_API_KEY</code> / <code>VANE_EMBED_API_KEY</code> — a
-          key in a project <code>.vane.toml</code> is rejected.
+          key in a project <code>.vane.toml</code> is rejected. The wizard
+          probes the embedder and <strong>fails closed</strong> if the probe
+          fails. In a terminal you can confirm "Continue anyway?"; in scripts
+          set <code>VANE_ALLOW_EMBED_FAIL=1</code> to write config anyway.
+          Search stays BM25-only (<code>degraded</code>) until the provider is
+          up.
         </p>
 
         <h2 id="search">Search from the CLI</h2>
@@ -152,15 +181,48 @@ export default function Sidecar() {
         <p>
           If the embedding provider is down, search falls back to BM25 and
           marks hits <code>degraded</code>. Already-indexed vectors stay on
-          disk.
+          disk. Empty hits still succeed: in a terminal the CLI prints a{' '}
+          <strong>why</strong> line (not initialized, cwd not a registered
+          root, still indexing, embedder down, excluded path, wrong root, empty
+          index, or no matching chunks). Piped stdout stays JSON; the reason
+          goes to stderr.
         </p>
+
+        <h2 id="diagnose">Diagnose and maintain</h2>
+        <p>
+          In a terminal, <code>vane status</code> is a dashboard: daemon
+          up/down, dirty queue, disk, and each root&apos;s live files, model,
+          and skip count. Piped stdout is JSON. When search looks empty or
+          stale, start with <code>vane doctor</code>, then skipped files, logs,
+          and resolved policy.
+        </p>
+        <CodeBlock lang="bash" title="doctor, issues, logs, inspect, df, gc" code={DIAGNOSE} />
+        <p>
+          <code>vane issues</code> lists files skipped as too large, invalid
+          UTF-8, or embed / extractor errors. <code>vane logs</code> prints
+          redacted daemon lines (<code>--lines</code> defaults to 50;{' '}
+          <code>--follow</code> tails new ones). <code>vane inspect</code>{' '}
+          shows the resolved embed / chunk / exclude / types policy for the
+          current project, <code>--root</code>, or <code>--global</code>{' '}
+          defaults. <code>vane gc --dry-run</code> counts unreferenced CAS
+          without deleting anything.
+        </p>
+        <p>
+          Changing the embedding model re-embeds live files. Confirm in a TTY,
+          or pass <code>--yes</code> (<code>-y</code>) when stdin is not a
+          terminal — required in scripts.
+        </p>
+        <CodeBlock lang="bash" title="vane model --yes" code={MODEL} />
 
         <h2 id="mcp">MCP and agent skill</h2>
         <p>
           <code>vane mcp</code> is a stdio JSON-RPC 2.0 bridge to{' '}
           <code>~/.vane/run/vane.sock</code>. It does not embed the index
-          engine. Add this to Claude Code / Cursor / other MCP clients:
+          engine. Merge <code>mcpServers.vane</code> into Claude / Cursor /
+          Codex configs under <code>$HOME</code> (default: all known clients),
+          or add this by hand:
         </p>
+        <CodeBlock lang="bash" title="vane mcp install" code={MCP_INSTALL} />
         <CodeBlock lang="json" title="mcpServers" code={MCP} />
         <p>Three tools:</p>
         <table className="sc-table">
@@ -243,9 +305,9 @@ export default function Sidecar() {
         </ul>
         <p>
           Day-to-day: <code>vane include add</code>,{' '}
-          <code>vane exclude add</code>, <code>vane model</code>. Pass{' '}
+          <code>vane exclude add</code>, <code>vane model --yes</code>. Pass{' '}
           <code>--global</code> to edit defaults instead of the current
-          project.
+          project. Preview resolved policy with <code>vane inspect</code>.
         </p>
 
         <h2 id="watch-cas">Watch, git checkouts, and cache</h2>
@@ -256,8 +318,10 @@ export default function Sidecar() {
           rename: the same bytes hash to the same extract and embed cache
           keys, so switching branches does not re-embed unchanged files.
           Unreferenced cache entries stay until <code>vane gc</code> or the
-          TTL (default 365 days). GC never deletes your source files — only
-          data under <code>$VANE_HOME/rag</code>.
+          TTL (default 365 days). Preview with <code>vane gc --dry-run</code>.
+          GC never deletes your source files — only data under{' '}
+          <code>$VANE_HOME/rag</code>. <code>vane df</code> shows home, CAS,
+          and per-project db sizes.
         </p>
 
         <h2 id="commands">Command map</h2>
@@ -292,29 +356,86 @@ export default function Sidecar() {
             </tr>
             <tr>
               <td>
+                <code>vane status</code>
+              </td>
+              <td>
+                TTY dashboard (daemon, roots, live files, skips). JSON if piped
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane doctor</code>
+              </td>
+              <td>Diagnose home, daemon, embedder, roots, and disk</td>
+            </tr>
+            <tr>
+              <td>
                 <code>vane query</code>
               </td>
-              <td>CLI search of the current project, <code>--root</code>, or <code>--all</code></td>
+              <td>
+                CLI search of the current project, <code>--root</code>, or{' '}
+                <code>--all</code>. Empty hits print a why line
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane issues</code>
+              </td>
+              <td>
+                Skipped files. <code>--root</code> or <code>--all</code>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane logs</code>
+              </td>
+              <td>
+                Redacted daemon logs. <code>--follow</code>,{' '}
+                <code>--lines</code> (default 50)
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane inspect</code>
+              </td>
+              <td>
+                Resolved embed / chunk / exclude / types.{' '}
+                <code>--root</code> or <code>--global</code>
+              </td>
             </tr>
             <tr>
               <td>
                 <code>vane mcp</code>
               </td>
-              <td>stdio MCP bridge to the running daemon</td>
+              <td>
+                stdio MCP bridge. <code>vane mcp install [--dry-run]
+                [--client claude|cursor|codex]</code>
+              </td>
             </tr>
             <tr>
               <td>
                 <code>vane model</code>
               </td>
-              <td>Change embed provider / model / dim and rebuild</td>
+              <td>
+                Change embed provider / model / dim and rebuild.{' '}
+                <code>--yes</code> skips the confirm (required if not a TTY)
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane df</code>
+              </td>
+              <td>
+                Disk usage for <code>$VANE_HOME</code>, CAS, and per-project dbs
+              </td>
             </tr>
             <tr>
               <td>
                 <code>vane gc</code>
               </td>
               <td>
-                Compact and drop unreferenced CAS. <code>--all</code> for every
-                project
+                Compact and drop unreferenced CAS. <code>--dry-run</code> counts
+                only. <code>--all</code> for every project
               </td>
             </tr>
             <tr>

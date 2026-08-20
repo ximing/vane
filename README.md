@@ -37,7 +37,7 @@ Tantivy-grade text search, and unified hybrid ranking in one library.
 - [Install](#install)
   - [Node.js](#nodejs) · [Go](#go) · [Browser](#browser) · [Build from source](#build-from-source)
 - [Local sidecar CLI](#local-sidecar-cli)
-  - [Install](#install-the-cli) · [First run](#first-run) · [MCP](#mcp) · [Agent skills](#agent-skills)
+  - [Install](#install-the-cli) · [First run](#first-run) · [Diagnose and maintain](#diagnose-and-maintain) · [MCP](#mcp) · [Agent skills](#agent-skills)
 - [Quick start](#quick-start)
   - [Node.js](#quick-start-nodejs) · [Go](#quick-start-go) · [Browser](#quick-start-browser)
 - [API reference](#api-reference)
@@ -217,7 +217,7 @@ ollama pull nomic-embed-text
 vane init                 # embed provider, API key, vector dim, first folder, service
 vane add ~/notes          # register another root
 vane start                # if the service is not installed
-vane status
+vane status               # TTY dashboard (JSON if piped)
 vane query "how does auth work"
 vane query "release" --all
 ```
@@ -225,6 +225,46 @@ vane query "release" --all
 Home directory: `--home` > `VANE_HOME` > `~/.vane`. Project policy lives in
 `<root>/.vane.toml` (never put `api_key` there). Unchanged file bytes reuse extract
 and embed caches across git checkouts. `vane gc` never deletes your source files.
+
+`vane init` probes the embedder and **fails closed** if the probe fails. In a
+terminal you can confirm "Continue anyway?". In scripts set
+`VANE_ALLOW_EMBED_FAIL=1` to write config anyway — search stays BM25-only
+(`degraded`) until the provider is up.
+
+### Diagnose and maintain
+
+In a terminal, `vane status` is a dashboard: daemon up/down, dirty queue, disk,
+and each root's live files, model, and skip count. Piped stdout is JSON.
+
+When search looks empty or stale, work top to bottom:
+
+```bash
+vane doctor                 # config, socket, daemon, embedder, roots, disk
+vane status
+vane query "auth"           # empty hits print a why line (exit 0)
+vane issues                 # skipped files in the current root
+vane issues --all
+vane logs                   # last 50 redacted daemon lines
+vane logs --follow --lines 200
+vane inspect                # resolved embed / chunk / exclude / types
+vane inspect --global
+vane inspect --root ~/notes
+vane df                     # $VANE_HOME, CAS, per-project dbs
+vane gc --dry-run           # count unreferenced cache; does not delete
+vane gc --all --dry-run
+```
+
+Empty `vane query` still succeeds. The CLI explains **why** (first match): not
+initialized, cwd is not a registered root, still indexing, embedder down, the
+query looks like an excluded path, wrong root (try `--all` / `--root`), empty
+index, or no matching chunks. Then `vane doctor` / `vane issues` / `vane logs`.
+
+Changing the embedding model re-embeds live files. Confirm in a TTY, or pass
+`--yes` (`-y`) when stdin is not a terminal:
+
+```bash
+vane model --model nomic-embed-text --yes
+```
 
 ### MCP
 
@@ -240,6 +280,15 @@ must already be running (`vane mcp` does not start it):
     }
   }
 }
+```
+
+Or merge `mcpServers.vane` into Claude / Cursor / Codex configs under `$HOME`
+(default: all known clients):
+
+```bash
+vane mcp install --dry-run              # print what would be written
+vane mcp install
+vane mcp install --client claude        # claude | cursor | codex
 ```
 
 Agents should call `list_roots`, then `search`, then `read` — not walk the tree.
