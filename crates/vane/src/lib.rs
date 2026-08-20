@@ -17,6 +17,7 @@ pub mod humanize;
 pub mod i18n;
 pub mod index;
 pub mod ipc;
+pub mod last_query;
 pub mod live;
 pub mod log;
 pub mod mcp;

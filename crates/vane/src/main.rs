@@ -107,6 +107,13 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Read the n-th hit of the last TTY query (chunk text; --file for the source file)
+    Read {
+        n: usize,
+        /// Print the whole source file from disk instead of the chunk
+        #[arg(long)]
+        file: bool,
+    },
     /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
     Mcp {
         #[command(subcommand)]
@@ -258,6 +265,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Commands::Read { n, file } => run_read(&home, n, file),
         Commands::Model {
             global,
             root,
@@ -1002,20 +1010,144 @@ fn run_query(
         }
     };
     match vane::ipc::rpc_call(home, "search", params) {
-        Ok(v) => print_search_result(
-            home,
-            &v,
-            &q,
-            all,
-            root.as_deref(),
-            resolved_root.as_deref(),
-            verbose,
-        ),
+        Ok(v) => {
+            // TTY only (spec §2.4): cache the last query — including the empty
+            // result — so `vane read <n>` can resolve it. A pipe must not
+            // clobber the human's cache.
+            if vane::ui::stdout_tty() {
+                save_query_cache(home, &q, &v, resolved_root.as_deref());
+            }
+            print_search_result(
+                home,
+                &v,
+                &q,
+                all,
+                root.as_deref(),
+                resolved_root.as_deref(),
+                verbose,
+            )
+        }
         Err(e) => {
             vane::ui::error(&e.message);
             ExitCode::from(1)
         }
     }
+}
+
+/// Best-effort cache write for `vane read <n>`; failures never fail the query.
+fn save_query_cache(home: &Path, q: &str, v: &serde_json::Value, scope_root: Option<&Path>) {
+    let hits = v.as_array().cloned().unwrap_or_else(|| {
+        v.get("hits")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default()
+    });
+    let cached: Vec<vane::last_query::CachedHit> = hits
+        .iter()
+        .filter_map(|h| {
+            Some(vane::last_query::CachedHit {
+                id: h.get("id")?.as_str()?.to_string(),
+                path: h.get("path")?.as_str()?.to_string(),
+                root: h.get("root")?.as_str()?.to_string(),
+                score: h.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0),
+            })
+        })
+        .collect();
+    let last = vane::last_query::LastQuery {
+        query: q.to_string(),
+        at: vane::progress::unix_now(),
+        scope_root: scope_root.map(|r| r.display().to_string()),
+        hits: cached,
+    };
+    let _ = vane::last_query::save_last_query(home, &last);
+}
+
+fn run_read(home: &Path, n: usize, file: bool) -> ExitCode {
+    let lang = vane::i18n::Lang::detect();
+    let tty = vane::ui::stdout_tty();
+    let Some(q) = vane::last_query::load_last_query(home) else {
+        vane::ui::error(vane::i18n::pick(lang, tty, "read.no_cache"));
+        return ExitCode::from(1);
+    };
+    if file {
+        return run_read_file(&q, n, lang, tty);
+    }
+    match vane::last_query::read_outcome(home, &q, n) {
+        Ok(out) => {
+            if tty {
+                let meta = match &q.scope_root {
+                    Some(_) => format!(
+                        "{} · score {:.3} · chunk {}",
+                        out.hit.path, out.hit.score, out.chunk_index
+                    ),
+                    None => format!(
+                        "{} :: {} · score {:.3} · chunk {}",
+                        out.hit.root, out.hit.path, out.hit.score, out.chunk_index
+                    ),
+                };
+                println!("{}\n", vane::ui::dim(&meta));
+            }
+            println!("{}", out.text);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            vane::ui::error(&read_error_message(&e, lang, tty));
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn read_error_message(
+    e: &vane::last_query::ReadError,
+    lang: vane::i18n::Lang,
+    tty: bool,
+) -> String {
+    use vane::last_query::ReadError;
+    match e {
+        ReadError::Empty => vane::i18n::pick(lang, tty, "read.empty").to_string(),
+        ReadError::OutOfRange { n, k } => vane::i18n::pick(lang, tty, "read.out_of_range")
+            .replace("{n}", &n.to_string())
+            .replace("{k}", &k.to_string()),
+        ReadError::Stale { n } => {
+            vane::i18n::pick(lang, tty, "read.stale").replace("{n}", &n.to_string())
+        }
+    }
+}
+
+/// `--file`: print the whole source file from disk (unaffected by staleness).
+fn run_read_file(
+    q: &vane::last_query::LastQuery,
+    n: usize,
+    lang: vane::i18n::Lang,
+    tty: bool,
+) -> ExitCode {
+    let hit = match vane::last_query::hit_at(q, n) {
+        Ok(h) => h,
+        Err(e) => {
+            vane::ui::error(&read_error_message(&e, lang, tty));
+            return ExitCode::from(1);
+        }
+    };
+    let path = Path::new(&hit.root).join(&hit.path);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            let msg = vane::i18n::pick(lang, tty, "read.file_missing")
+                .replace("{path}", &path.display().to_string());
+            vane::ui::error(&msg);
+            return ExitCode::from(1);
+        }
+    };
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        let msg = vane::i18n::pick(lang, tty, "read.binary")
+            .replace("{path}", &path.display().to_string())
+            .replace("{extractor}", "binary");
+        vane::ui::error(&msg);
+        return ExitCode::from(1);
+    }
+    // Body only, even on a TTY: pipe-friendly (spec §2.4).
+    print!("{}", String::from_utf8_lossy(&bytes));
+    ExitCode::SUCCESS
 }
 
 /// Header data for the resolved scope: (root label, root count, live files).

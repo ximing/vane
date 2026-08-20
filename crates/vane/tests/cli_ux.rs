@@ -262,3 +262,92 @@ mod subprocess_tests {
         assert_eq!(stderr.lines().count(), 1);
     }
 }
+
+mod last_query_tests {
+    use vane::last_query::*;
+
+    fn sample() -> LastQuery {
+        LastQuery {
+            query: "foo".into(),
+            at: 1_755_700_000,
+            scope_root: Some("/abs/notes".into()),
+            hits: vec![CachedHit {
+                id: "p1:notes/a.md#0".into(),
+                path: "notes/a.md".into(),
+                root: "/abs/notes".into(),
+                score: 0.42,
+            }],
+        }
+    }
+
+    #[test]
+    fn roundtrip_and_corrupt_cache() {
+        let dir = crate::temp_home("lq-roundtrip");
+        save_last_query(&dir.path, &sample()).unwrap();
+        assert_eq!(load_last_query(&dir.path).unwrap(), sample());
+        std::fs::write(last_query_path(&dir.path), b"not json").unwrap();
+        assert!(
+            load_last_query(&dir.path).is_none(),
+            "corrupt cache must be None"
+        );
+    }
+
+    #[test]
+    fn read_outcome_errors() {
+        let dir = crate::temp_home("lq-errors");
+        let q = sample();
+        // no live set / CAS → stale (chunk not found)
+        assert!(matches!(
+            read_outcome(&dir.path, &q, 1),
+            Err(ReadError::Stale { n: 1 })
+        ));
+        assert!(matches!(
+            read_outcome(&dir.path, &q, 5),
+            Err(ReadError::OutOfRange { n: 5, k: 1 })
+        ));
+        let empty = LastQuery {
+            hits: vec![],
+            ..sample()
+        };
+        assert!(matches!(
+            read_outcome(&dir.path, &empty, 1),
+            Err(ReadError::Empty)
+        ));
+    }
+
+    #[test]
+    fn read_outcome_reads_chunk_from_cas() {
+        // Minimal live set + CAS: one file, one chunk.
+        let dir = crate::temp_home("lq-cas");
+        let home = dir.path.as_path();
+        let pid = "p1";
+        let mut live = vane::live::LiveSet::default();
+        live.files.insert(
+            "notes/a.md".into(),
+            vane::live::LiveFile {
+                content_sha256: "x".into(),
+                extract_key: "k1".into(),
+                chunk_count: 1,
+            },
+        );
+        live.save_for_project(home, pid).unwrap();
+        let cas = vane::cas::Cas::new(home.join("rag").join("cas"));
+        cas.put_extract(
+            "k1",
+            &[vane::extract::CanonicalDoc {
+                text: "hello world chunk".into(),
+                headings: vec![],
+                path: "notes/a.md".into(),
+                chunk_index: 0,
+                start_byte: 0,
+                end_byte: 17,
+                modality: "text".into(),
+                extractor: "text".into(),
+            }],
+        )
+        .unwrap();
+        let out = read_outcome(home, &sample(), 1).unwrap();
+        assert_eq!(out.text, "hello world chunk");
+        assert_eq!(out.chunk_index, 0);
+    }
+}
