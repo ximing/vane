@@ -3,10 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use vane::cas::Cas;
 use vane::config::load_config;
 use vane::extract::CanonicalDoc;
-use vane::gc::{gc_all, gc_project, gc_ttl, LiveKeySet};
+
+use vane::gc::{gc_all, gc_all_with, gc_project, gc_project_with, gc_ttl, LiveKeySet};
 use vane::index::{project_db_prev_path, project_dir, state_path, ProjectState};
 use vane::live::{live_path, LiveFile, LiveSet};
 use vane::project::project_id;
@@ -390,4 +393,210 @@ fn gc_project_fail_closed_when_config_unreadable() {
     );
     assert!(cas.get_embed(embed).is_some());
     assert!(root.join("notes.md").is_file());
+}
+
+#[test]
+fn gc_dry_run_counts_without_deleting() {
+    let home = tempfile_dir();
+    let root = make_root(&home, "a");
+    write_config(&home, &[&root]);
+    let pid = project_id(&root);
+    write_state(&home, &pid, &root);
+
+    let cas = Cas::new(home.join("rag").join("cas"));
+    let k = "orphan-extract-k";
+    let embed = "orphan-embed-k";
+    seed_cas(&cas, k, embed, 1_700_000_000);
+    write_live(&home, &pid, None);
+
+    let prev = project_db_prev_path(&home, &pid);
+    fs::create_dir_all(&prev).unwrap();
+    fs::write(prev.join("stale"), b"old").unwrap();
+
+    let leftover = project_dir(&home, "leftover-unregistered");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("marker"), b"keep").unwrap();
+
+    let report = gc_all_with(&home, &cas, true).unwrap();
+    assert!(report.dry_run);
+    assert!(
+        report.extract_deleted >= 1,
+        "dry-run should count unreferenced extract, got {report:?}"
+    );
+    assert!(
+        report.projects_removed >= 1,
+        "dry-run should count leftover project dir, got {report:?}"
+    );
+    assert!(
+        report.db_prev_removed >= 1,
+        "dry-run should count db.prev, got {report:?}"
+    );
+    assert!(
+        cas.get_extract(k).is_some(),
+        "dry-run must not delete CAS extract"
+    );
+    assert!(
+        cas.get_embed(embed).is_some(),
+        "dry-run must not delete embed"
+    );
+    assert!(prev.exists(), "dry-run must not drop db.prev");
+    assert!(
+        leftover.join("marker").is_file(),
+        "dry-run must not remove leftover project dir"
+    );
+    assert!(root.join("notes.md").is_file(), "must not delete source");
+
+    let encoded = serde_json::to_value(&report).unwrap();
+    assert_eq!(encoded["dry_run"], true);
+    let dumped = encoded.to_string();
+    assert!(!dumped.contains("api_key"));
+}
+
+#[test]
+fn gc_project_dry_run_leaves_unreferenced_cas() {
+    let home = tempfile_dir();
+    let root = make_root(&home, "docs");
+    write_config(&home, &[&root]);
+    let pid = project_id(&root);
+    write_state(&home, &pid, &root);
+    let cas = Cas::new(home.join("rag").join("cas"));
+    seed_cas(&cas, "lonely-k", "lonely-e", 1_700_000_000);
+    write_live(&home, &pid, None);
+
+    let report = gc_project_with(&home, &root, &lives_from(&[]), &cas, true).unwrap();
+    assert!(report.dry_run);
+    assert!(report.extract_deleted >= 1);
+    assert!(cas.get_extract("lonely-k").is_some());
+    assert!(cas.get_embed("lonely-e").is_some());
+    assert!(root.join("notes.md").is_file());
+}
+
+fn fake_user_home(home: &Path) -> PathBuf {
+    let fake = home.join("uh");
+    fs::create_dir_all(&fake).unwrap();
+    fake
+}
+
+struct DaemonProcess {
+    child: Child,
+}
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_daemon(home: &Path) -> DaemonProcess {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    let fake = fake_user_home(home);
+    let sock = home.join("run").join("vane.sock");
+    let child = Command::new(bin)
+        .args(["daemon", "--home", home.to_str().expect("utf-8 home")])
+        .env("VANE_HOME", home)
+        .env("HOME", &fake)
+        .env_remove("XDG_CONFIG_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn vane daemon");
+    let mut daemon = DaemonProcess { child };
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(8) {
+        if let Some(status) = daemon.child.try_wait().unwrap() {
+            let mut err = String::new();
+            if let Some(mut pipe) = daemon.child.stderr.take() {
+                use std::io::Read;
+                let _ = pipe.read_to_string(&mut err);
+            }
+            panic!("daemon exited early {status}: {err}");
+        }
+        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+            return daemon;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("daemon socket not ready at {}", sock.display());
+}
+
+fn run_cli(home: &Path, cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let bin = env!("CARGO_BIN_EXE_vane");
+    let output = Command::new(bin)
+        .args(["--home", home.to_str().expect("utf-8 home")])
+        .args(args)
+        .current_dir(cwd)
+        .env("VANE_HOME", home)
+        .env("HOME", fake_user_home(home))
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("run vane");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn short_temp_home() -> TempHome {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "vg{}-{n}-{:x}",
+        std::process::id(),
+        (nanos % 0xfff) as u16
+    ));
+    fs::create_dir_all(&path).unwrap();
+    std::env::set_var("VANE_HOME", &path);
+    TempHome { path }
+}
+
+#[test]
+fn gc_cli_dry_run_leaves_files() {
+    let home = short_temp_home();
+    let root = make_root(&home, "a");
+    write_config(&home, &[&root]);
+    let pid = project_id(&root);
+    write_state(&home, &pid, &root);
+
+    let cas = Cas::new(home.join("rag").join("cas"));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    seed_cas(&cas, "cli-orphan-k", "cli-orphan-e", now);
+    write_live(&home, &pid, None);
+
+    let leftover = project_dir(&home, "orphan-proj");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("marker"), b"keep").unwrap();
+
+    let _daemon = spawn_daemon(&home);
+    let (code, stdout, stderr) = run_cli(&home, &root, &["gc", "--all", "--dry-run"]);
+    assert_eq!(code, 0, "gc --dry-run should succeed, stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("gc JSON");
+    assert_eq!(v["dry_run"], true, "{v}");
+    assert!(
+        v["extract_deleted"].as_u64().unwrap_or(0) >= 1
+            || v["projects_removed"].as_u64().unwrap_or(0) >= 1,
+        "dry-run should count work, got {v}"
+    );
+    assert!(
+        cas.get_extract("cli-orphan-k").is_some(),
+        "CLI dry-run must not delete CAS"
+    );
+    assert!(
+        leftover.join("marker").is_file(),
+        "CLI dry-run must not remove leftover project dir"
+    );
+    assert!(root.join("notes.md").is_file());
+    assert!(
+        !stdout.contains("api_key"),
+        "gc JSON must not include api_key: {stdout}"
+    );
 }

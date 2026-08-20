@@ -5,9 +5,10 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use vane::config::{
-    default_exclude, default_types, load_config, resolve_policy, ProjectFile, TypeRule,
+    default_exclude, default_types, inspect_policy, load_config, resolve_policy, ProjectFile,
+    TypeRule,
 };
-use vane::home::{default_fallback, resolve_home};
+use vane::home::{default_fallback, disk_stats, resolve_home};
 use vane::project::{find_current_root, project_id, resolve_query_scope, QueryScope};
 use vane::sync::rebuild_for_new_model;
 
@@ -57,6 +58,24 @@ enum Commands {
         /// Every registered root
         #[arg(long)]
         all: bool,
+    },
+    /// Print recent daemon logs (redacted)
+    Logs {
+        /// Follow new lines (like tail -f)
+        #[arg(long)]
+        follow: bool,
+        /// How many existing lines to print (default 50)
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+    },
+    /// Print resolved embed / chunk / exclude / types policy
+    Inspect {
+        /// Target a registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Print global defaults only
+        #[arg(long)]
+        global: bool,
     },
     /// Run the sidecar daemon in the foreground
     Daemon,
@@ -115,6 +134,8 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceCmd,
     },
+    /// Show disk usage for $VANE_HOME, CAS, and per-project dbs
+    Df,
     /// Compact the project index and drop unreferenced CAS
     Gc {
         /// Target a registered root (default: current project from cwd)
@@ -123,6 +144,9 @@ enum Commands {
         /// All projects plus global orphan CAS
         #[arg(long)]
         all: bool,
+        /// Count what would be deleted without removing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -187,6 +211,8 @@ fn main() -> ExitCode {
         Commands::Status => run_status(&home),
         Commands::Doctor => run_doctor(&home),
         Commands::Issues { root, all } => run_issues(&home, root, all),
+        Commands::Logs { follow, lines } => run_logs(&home, follow, lines),
+        Commands::Inspect { root, global } => run_inspect(&home, root, global),
         Commands::Daemon => match vane::daemon::serve_forever(home) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -219,7 +245,8 @@ fn main() -> ExitCode {
         Commands::Service {
             action: ServiceCmd::Uninstall,
         } => run_service_uninstall(&home),
-        Commands::Gc { root, all } => run_gc(&home, root, all),
+        Commands::Df => run_df(&home),
+        Commands::Gc { root, all, dry_run } => run_gc(&home, root, all, dry_run),
     }
 }
 
@@ -636,11 +663,126 @@ fn run_rm(home: &Path, path: &Path) -> ExitCode {
     )
 }
 
-fn run_gc(home: &Path, root: Option<PathBuf>, all: bool) -> ExitCode {
+fn run_logs(home: &Path, follow: bool, lines: usize) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
     }
-    let params = if all {
+    let recent = vane::log::recent_lines(home, lines);
+    if follow {
+        if vane::ui::stdout_tty() {
+            for line in &recent {
+                vane::ui::print_log_line(line);
+            }
+        } else {
+            for line in &recent {
+                println!("{}", json!({ "line": line }));
+            }
+        }
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut tail = vane::log::LogTail::open_at_end(home);
+        loop {
+            for line in tail.poll() {
+                if vane::ui::stdout_tty() {
+                    vane::ui::print_log_line(&line);
+                } else {
+                    println!("{}", json!({ "line": line }));
+                }
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    } else if vane::ui::stdout_tty() {
+        for line in &recent {
+            vane::ui::print_log_line(line);
+        }
+        ExitCode::SUCCESS
+    } else {
+        print_json(&json!({ "lines": recent }))
+    }
+}
+
+fn run_inspect(home: &Path, root: Option<PathBuf>, global: bool) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    let cfg = match load_config(home) {
+        Ok(c) => c,
+        Err(e) => {
+            vane::ui::error(&e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let root = if global {
+        None
+    } else if let Some(r) = root {
+        match resolve_root_arg(&r) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        match current_root(home) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    };
+    let report = match inspect_policy(&cfg, root.as_deref(), global) {
+        Ok(r) => r,
+        Err(e) => {
+            vane::ui::error(&e.message);
+            return ExitCode::from(1);
+        }
+    };
+    if vane::ui::stdout_tty() {
+        vane::ui::print_inspect(&report);
+        ExitCode::SUCCESS
+    } else {
+        match serde_json::to_value(&report) {
+            Ok(v) => {
+                let dumped = v.to_string();
+                if dumped.contains("\"api_key\"") {
+                    vane::ui::error("inspect refused to print api_key");
+                    return ExitCode::from(1);
+                }
+                print_json(&v)
+            }
+            Err(e) => {
+                vane::ui::error(&format!("encode inspect: {e}"));
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+fn run_df(home: &Path) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    let stats = disk_stats(home);
+    if vane::ui::stdout_tty() {
+        vane::ui::print_df(home, &stats);
+        ExitCode::SUCCESS
+    } else {
+        print_json(&json!({
+            "home": home.display().to_string(),
+            "home_bytes": stats.home_bytes,
+            "cas_bytes": stats.cas_bytes,
+            "projects": stats.projects,
+            "large": stats.home_bytes > (1u64 << 30),
+        }))
+    }
+}
+
+fn run_gc(home: &Path, root: Option<PathBuf>, all: bool, dry_run: bool) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    let mut params = if all {
         json!({ "all": true })
     } else if let Some(r) = root {
         match resolve_root_arg(&r) {
@@ -659,7 +801,31 @@ fn run_gc(home: &Path, root: Option<PathBuf>, all: bool) -> ExitCode {
             }
         }
     };
-    rpc_print(home, "gc", params)
+    if dry_run {
+        params["dry_run"] = json!(true);
+    }
+    match vane::ipc::rpc_call(home, "gc", params) {
+        Ok(v) => {
+            if vane::ui::stdout_tty() {
+                match serde_json::from_value::<vane::gc::GcReport>(v) {
+                    Ok(report) => {
+                        vane::ui::print_gc(&report);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        vane::ui::error(&format!("decode gc report: {e}"));
+                        ExitCode::from(1)
+                    }
+                }
+            } else {
+                print_json(&v)
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

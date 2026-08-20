@@ -4,7 +4,10 @@ use std::time::Duration;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::config::InspectReport;
 use crate::doctor::{CheckLevel, DoctorReport};
+use crate::gc::GcReport;
+use crate::home::DiskStats;
 use crate::mcp::McpInstallReport;
 use crate::progress::IssuesReport;
 
@@ -306,6 +309,147 @@ fn last_error_text(v: Option<&serde_json::Value>) -> Option<String> {
         .and_then(|m| m.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+pub fn print_log_line(line: &str) {
+    if colors_enabled() {
+        let level = line.split_whitespace().nth(1).unwrap_or("");
+        match level {
+            "ERROR" => println!("{}", style(line).red()),
+            "WARN" => println!("{}", style(line).yellow()),
+            _ => println!("{line}"),
+        }
+    } else {
+        println!("{line}");
+    }
+}
+
+pub fn print_inspect(report: &InspectReport) {
+    match report.root.as_deref() {
+        Some(root) => {
+            let pid = report.project_id.as_deref().unwrap_or("-");
+            println!("{} {}  {} {pid}", accent("root"), root, dim("id"));
+        }
+        None => println!("{}", accent("global defaults")),
+    }
+    println!(
+        "{} {} / {}  {} {}  {} {}",
+        dim("embed"),
+        report.embed.provider,
+        report.embed.model,
+        dim("dim"),
+        report
+            .embed
+            .dim
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".into()),
+        dim("source"),
+        accent(&report.source.embed)
+    );
+    if !report.embed.base_url.is_empty() {
+        println!("  {} {}", dim("base_url"), report.embed.base_url);
+    }
+    println!(
+        "{} {}  max={} overlap={} min={}  {} {}",
+        dim("chunk"),
+        report.chunk.split,
+        report.chunk.max_chars,
+        report.chunk.overlap_chars,
+        report.chunk.min_chars,
+        dim("source"),
+        accent(&report.source.chunk)
+    );
+    println!(
+        "{} {} {}",
+        dim("exclude"),
+        dim("source"),
+        accent(&report.source.exclude)
+    );
+    print_string_layer("global", &report.exclude.global);
+    print_string_layer("project", &report.exclude.project);
+    print_string_layer("effective", &report.exclude.effective);
+    println!(
+        "{} {} {}",
+        dim("types"),
+        dim("source"),
+        accent(&report.source.types)
+    );
+    print_types_layer("global", &report.types.global);
+    print_types_layer("project", &report.types.project);
+    print_types_layer("effective", &report.types.effective);
+}
+
+fn print_string_layer(label: &str, items: &[String]) {
+    if items.is_empty() {
+        println!("  {} {}", dim(label), dim("(none)"));
+        return;
+    }
+    for (i, item) in items.iter().enumerate() {
+        if i == 0 {
+            println!("  {} {item}", dim(label));
+        } else {
+            println!("  {} {item}", dim(""));
+        }
+    }
+}
+
+fn print_types_layer(label: &str, items: &[crate::config::TypeRule]) {
+    if items.is_empty() {
+        println!("  {} {}", dim(label), dim("(none)"));
+        return;
+    }
+    for (i, t) in items.iter().enumerate() {
+        let en = if t.enabled { "on" } else { "off" };
+        let line = format!("{}  {}  {en}", t.glob, t.extractor);
+        if i == 0 {
+            println!("  {} {line}", dim(label));
+        } else {
+            println!("  {} {line}", dim(""));
+        }
+    }
+}
+
+pub fn print_df(home: &std::path::Path, stats: &DiskStats) {
+    println!("{} {}", dim("home"), accent(&home.display().to_string()));
+    println!(
+        "{} {}  {} {}",
+        dim("disk"),
+        accent(&fmt_bytes(stats.home_bytes)),
+        dim("cas"),
+        dim(&fmt_bytes(stats.cas_bytes))
+    );
+    if stats.projects.is_empty() {
+        println!("{}", dim("no project dbs"));
+    } else {
+        println!("{}", dim("projects"));
+        for p in &stats.projects {
+            println!(
+                "  {} {}",
+                accent(&p.project_id),
+                dim(&fmt_bytes(p.db_bytes))
+            );
+        }
+    }
+    if stats.home_bytes > (1 << 30) {
+        warn("home is larger than 1 GiB — run `vane gc --all`");
+    }
+}
+
+pub fn print_gc(report: &GcReport) {
+    let body = format!(
+        "extract={}  embed={}  db_prev={}  projects={}  compacted={}  errors={}",
+        report.extract_deleted,
+        report.embed_deleted,
+        report.db_prev_removed,
+        report.projects_removed,
+        report.compacted,
+        report.errors
+    );
+    if report.dry_run {
+        println!("{} {body}", dim("dry-run"));
+    } else {
+        success(&body);
+    }
 }
 
 fn fmt_bytes(n: u64) -> String {

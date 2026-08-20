@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::VaneCliError;
+use crate::project::project_id;
 
 const DEFAULT_EMBED_PROVIDER: &str = "ollama";
 const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text";
@@ -82,7 +83,7 @@ pub struct GcConfig {
     pub cas_retain_days: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TypeRule {
     pub glob: String,
     pub extractor: String,
@@ -136,6 +137,56 @@ pub struct ResolvedPolicy {
     pub chunk: ChunkConfig,
     pub exclude: Vec<String>,
     pub types: Vec<TypeRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectEmbed {
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub dim: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectChunk {
+    pub split: String,
+    pub max_chars: u32,
+    pub overlap_chars: u32,
+    pub min_chars: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectExclude {
+    pub global: Vec<String>,
+    pub project: Vec<String>,
+    pub effective: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectTypes {
+    pub global: Vec<TypeRule>,
+    pub project: Vec<TypeRule>,
+    pub effective: Vec<TypeRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectSources {
+    pub embed: String,
+    pub chunk: String,
+    pub exclude: String,
+    pub types: String,
+}
+
+/// Resolved policy for `vane inspect`. Never includes `api_key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectReport {
+    pub root: Option<String>,
+    pub project_id: Option<String>,
+    pub embed: InspectEmbed,
+    pub chunk: InspectChunk,
+    pub exclude: InspectExclude,
+    pub types: InspectTypes,
+    pub source: InspectSources,
 }
 
 #[derive(Deserialize, Default)]
@@ -357,6 +408,181 @@ pub fn resolve_policy(
         exclude,
         types,
     })
+}
+
+/// Read-only inspect of global defaults or a root's resolved policy.
+///
+/// `source` tags the last overlay that changed each section:
+/// `global`, `projects` (`[[projects]]`), or `vane.toml`.
+pub fn inspect_policy(
+    cfg: &Config,
+    root: Option<&Path>,
+    global_only: bool,
+) -> Result<InspectReport, VaneCliError> {
+    if global_only {
+        return Ok(InspectReport {
+            root: None,
+            project_id: None,
+            embed: inspect_embed(&cfg.defaults.embed),
+            chunk: inspect_chunk(&cfg.defaults.chunk),
+            exclude: InspectExclude {
+                global: cfg.exclude.clone(),
+                project: Vec::new(),
+                effective: cfg.exclude.clone(),
+            },
+            types: InspectTypes {
+                global: cfg.types.clone(),
+                project: Vec::new(),
+                effective: cfg.types.clone(),
+            },
+            source: InspectSources {
+                embed: "global".into(),
+                chunk: "global".into(),
+                exclude: "global".into(),
+                types: "global".into(),
+            },
+        });
+    }
+    let root =
+        root.ok_or_else(|| VaneCliError::new("inspect requires a project root or --global"))?;
+    let expanded = expand_tilde(root);
+    let canon = expanded.canonicalize().unwrap_or(expanded);
+    let pf = load_optional_project_file(&canon)?;
+    let entry = matching_project(cfg, &canon).or_else(|| matching_project(cfg, root));
+    let resolved = resolve_policy(
+        cfg,
+        entry.map(|e| e.path.as_path()).unwrap_or(&canon),
+        pf.as_ref(),
+    )?;
+
+    let (proj_exclude, exclude_src) = project_exclude_layer(entry, pf.as_ref());
+    let (proj_types, types_src) = project_types_layer(entry, pf.as_ref());
+    let embed_src = layer_source(
+        entry
+            .and_then(|e| e.embed.as_ref())
+            .is_some_and(embed_overlay_set),
+        pf.as_ref()
+            .and_then(|p| p.embed.as_ref())
+            .is_some_and(embed_overlay_set),
+    );
+    let chunk_src = layer_source(
+        entry
+            .and_then(|e| e.chunk.as_ref())
+            .is_some_and(chunk_overlay_set),
+        pf.as_ref()
+            .and_then(|p| p.chunk.as_ref())
+            .is_some_and(chunk_overlay_set),
+    );
+
+    Ok(InspectReport {
+        root: Some(canon.display().to_string()),
+        project_id: Some(project_id(&canon)),
+        embed: inspect_embed(&resolved.embed),
+        chunk: inspect_chunk(&resolved.chunk),
+        exclude: InspectExclude {
+            global: cfg.exclude.clone(),
+            project: proj_exclude,
+            effective: resolved.exclude,
+        },
+        types: InspectTypes {
+            global: cfg.types.clone(),
+            project: proj_types,
+            effective: resolved.types,
+        },
+        source: InspectSources {
+            embed: embed_src.into(),
+            chunk: chunk_src.into(),
+            exclude: exclude_src.into(),
+            types: types_src.into(),
+        },
+    })
+}
+
+fn inspect_embed(embed: &EmbedConfig) -> InspectEmbed {
+    InspectEmbed {
+        provider: embed.provider.clone(),
+        model: embed.model.clone(),
+        base_url: embed.base_url.clone(),
+        dim: embed.dim,
+    }
+}
+
+fn inspect_chunk(chunk: &ChunkConfig) -> InspectChunk {
+    InspectChunk {
+        split: chunk.split.clone(),
+        max_chars: chunk.max_chars,
+        overlap_chars: chunk.overlap_chars,
+        min_chars: chunk.min_chars,
+    }
+}
+
+fn load_optional_project_file(root: &Path) -> Result<Option<ProjectFile>, VaneCliError> {
+    let path = root.join(".vane.toml");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| VaneCliError::new(format!("failed to read {}: {e}", path.display())))?;
+    ProjectFile::parse_toml(&text).map(Some)
+}
+
+fn project_exclude_layer(
+    entry: Option<&ProjectEntry>,
+    pf: Option<&ProjectFile>,
+) -> (Vec<String>, &'static str) {
+    let from_projects = entry.map(|e| e.exclude.as_slice()).unwrap_or(&[]);
+    let from_file = pf.map(|p| p.exclude.as_slice()).unwrap_or(&[]);
+    let extras = union_exclude(from_projects, from_file);
+    let src = layer_source(!from_projects.is_empty(), !from_file.is_empty());
+    (extras, src)
+}
+
+fn project_types_layer(
+    entry: Option<&ProjectEntry>,
+    pf: Option<&ProjectFile>,
+) -> (Vec<TypeRule>, &'static str) {
+    if let Some(pf) = pf {
+        if pf.types.is_some() || pf.include.is_some() {
+            return (
+                resolve_types(pf.types.clone(), pf.include.as_deref(), Vec::new()),
+                "vane.toml",
+            );
+        }
+    }
+    if let Some(entry) = entry {
+        if entry.types.is_some() || entry.include.is_some() {
+            return (
+                resolve_types(entry.types.clone(), entry.include.as_deref(), Vec::new()),
+                "projects",
+            );
+        }
+    }
+    (Vec::new(), "global")
+}
+
+fn layer_source(from_projects: bool, from_vane_toml: bool) -> &'static str {
+    if from_vane_toml {
+        "vane.toml"
+    } else if from_projects {
+        "projects"
+    } else {
+        "global"
+    }
+}
+
+fn embed_overlay_set(over: &EmbedOverlay) -> bool {
+    over.provider.is_some()
+        || over.model.is_some()
+        || over.base_url.is_some()
+        || over.dim.is_some()
+        || over.api_key.is_some()
+}
+
+fn chunk_overlay_set(over: &ChunkOverlay) -> bool {
+    over.split.is_some()
+        || over.max_chars.is_some()
+        || over.overlap_chars.is_some()
+        || over.min_chars.is_some()
 }
 
 impl ProjectFile {
