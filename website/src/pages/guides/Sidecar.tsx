@@ -21,9 +21,11 @@ ollama pull nomic-embed-text`;
 
 const INIT = `vane init
 # 1. Embedding provider: ollama (default) or openai_compat
-# 2. First project root (can skip)
-# 3. Exclude globs (defaults include .git, node_modules, target, *.log, .env, …)
-# 4. Enable image types? (default no)  /  Install user service? (default yes)
+# 2. Model / Base URL
+# 3. API key (openai_compat only; empty uses OPENAI_API_KEY / VANE_EMBED_API_KEY)
+# 4. First project root (can skip)
+# 5. Exclude globs (defaults include .git, node_modules, target, *.log, .env, …)
+# 6. Enable image types? (default no)  /  Install user service? (default yes)
 
 vane add ~/notes          # if you skipped the first root
 vane start                # if the user service is not installed

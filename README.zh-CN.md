@@ -190,7 +190,7 @@ ollama pull nomic-embed-text
 ### 第一次跑
 
 ```bash
-vane init                 # embedding、第一个目录、排除规则、用户服务
+vane init                 # embedding、openai_compat 时填 API key、第一个目录、用户服务
 vane add ~/notes          # 再登记一个根
 vane start                # 若没装用户服务
 vane status

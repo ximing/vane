@@ -68,6 +68,7 @@ fn assume_writes_config_toml_with_chosen_exclude() {
         provider: "ollama".into(),
         model: "nomic-embed-text".into(),
         base_url: "http://127.0.0.1:11434".into(),
+        api_key: None,
         first_root: None,
         exclude: vec!["**/node_modules/**".into(), "**/secret/**".into()],
         images: false,
@@ -97,6 +98,88 @@ fn assume_writes_config_toml_with_chosen_exclude() {
     assert!(
         !image.enabled,
         "images=false should leave image type disabled"
+    );
+    let raw = fs::read_to_string(tmp.join("config").join("config.toml")).expect("read config");
+    assert!(
+        !raw.contains("api_key"),
+        "ollama init should not write api_key, got {raw}"
+    );
+}
+
+#[test]
+fn assume_openai_compat_writes_api_key_to_global_config() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+
+    let answers = InitAnswers {
+        provider: "openai_compat".into(),
+        model: "qwen3.7-text-embedding".into(),
+        base_url: "https://example.invalid/compatible-mode/v1".into(),
+        api_key: Some("sk-test-from-init".into()),
+        first_root: None,
+        exclude: vec!["**/.git/**".into()],
+        images: false,
+        install_service: false,
+    };
+    let mut out = Vec::new();
+    run_init(&tmp, Cursor::new(""), &mut out, Some(answers)).expect("run_init assume");
+
+    let cfg = load_config(&tmp).expect("load written config");
+    assert_eq!(cfg.defaults.embed.provider, "openai_compat");
+    assert_eq!(
+        cfg.defaults.embed.api_key.as_deref(),
+        Some("sk-test-from-init")
+    );
+    let path = tmp.join("config").join("config.toml");
+    let raw = fs::read_to_string(&path).expect("read config");
+    assert!(
+        raw.contains("api_key"),
+        "global config should persist api_key, got {raw}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path)
+            .expect("stat config")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "config with a secret must be 0600, got {mode:o}"
+        );
+    }
+}
+
+#[test]
+fn interactive_openai_compat_asks_for_api_key() {
+    let tmp = tempfile_dir();
+    assert_isolated(&tmp);
+    // Probe hits 127.0.0.1:1 (connection refused) so init does not wait on a real API.
+    let stdin = [
+        "openai_compat",
+        "qwen3.7-text-embedding",
+        "http://127.0.0.1:1/compatible-mode/v1",
+        "sk-typed-in-wizard",
+        "",
+        "",
+        "",
+        "n",
+        "n",
+    ]
+    .join("\n")
+        + "\n";
+    let mut out = Vec::new();
+    run_init(&tmp, Cursor::new(stdin), &mut out, None).expect("interactive init");
+    let printed = String::from_utf8_lossy(&out);
+    assert!(
+        printed.contains("API key"),
+        "wizard must prompt for an API key, got {printed}"
+    );
+    let cfg = load_config(&tmp).expect("load written config");
+    assert_eq!(
+        cfg.defaults.embed.api_key.as_deref(),
+        Some("sk-typed-in-wizard")
     );
 }
 
