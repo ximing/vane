@@ -616,7 +616,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 
 ## Status
 
-**v0.3.1** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI:
+**v0.4.0** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI with human-friendly UX:
 
 - ✅ Core API, VFS, tokenizer (standard/cjk_bigram/jieba), BM25, segment HNSW, RRF fusion
 - ✅ Persistence (segments + manifest + WAL), tombstone delete, compaction, snapshot export
@@ -627,6 +627,9 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 - ✅ `@vane-rs/web` + `@vane-rs/dict-zh` npm packages (ESM, vite 6+/webpack 5 native,
   dictData inline transfer, zero CDN)
 - ✅ Native sidecar CLI (`vane`): folder watch, CAS, hybrid query, MCP stdio (macOS/Linux)
+- ✅ CLI Human UX: query scope header + lean hits, `vane read <n>`, human-readable
+  status dashboard, add summary + progress bar, bare-vane dispatch + grouped `--help`,
+  `vane watch`, MCP skill install, zh TTY rendering (JSON/piped stays English)
 
 Known gaps: `filter` is wired in core but not yet exposed through the binding query parsers
 (see [Filtering](#filtering)); musl/linux-arm64/winx64-arm Node prebuilts and the wazero
