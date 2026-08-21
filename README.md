@@ -220,6 +220,8 @@ vane start                # if the service is not installed
 vane status               # TTY dashboard (JSON if piped)
 vane query "how does auth work"
 vane query "release" --all
+vane read 2               # open hit #2 from the last TTY query (human review)
+vane watch                # live index changes; Ctrl-C to stop
 ```
 
 Home directory: `--home` > `VANE_HOME` > `~/.vane`. Project policy lives in
