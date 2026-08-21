@@ -1,0 +1,735 @@
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct TempHome {
+    path: std::path::PathBuf,
+}
+
+fn temp_home(tag: &str) -> TempHome {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path =
+        std::env::temp_dir().join(format!("vane-ux-{tag}-{}-{nanos}-{n}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    TempHome { path }
+}
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        let tmp = std::env::temp_dir();
+        if self.path.starts_with(&tmp) && self.path != tmp {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Call only while holding ENV_LOCK: sets VANE_ALLOW_EMBED_FAIL so the embed
+/// probe fails closed and init continues without a live embedder.
+fn init_home() -> TempHome {
+    let dir = temp_home("init");
+    let answers = vane::wizard::InitAnswers {
+        install_service: false,
+        ..Default::default()
+    };
+    std::env::set_var("VANE_ALLOW_EMBED_FAIL", "1");
+    vane::wizard::run_init(&dir.path, std::io::empty(), std::io::sink(), Some(answers)).unwrap();
+    dir
+}
+
+mod fsutil_tests {
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn atomic_write_creates_parent_and_renames() {
+        let dir = std::env::temp_dir().join(format!("vane-fsutil-{}", std::process::id()));
+        let path = dir.join("a").join("b.json");
+        vane::fsutil::atomic_write(&path, b"{}", "b.json").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        assert!(!dir.join("a").join("b.json.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_tilde_handles_all_forms() {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        assert_eq!(vane::fsutil::expand_tilde(Path::new("~")), home);
+        assert_eq!(
+            vane::fsutil::expand_tilde(Path::new("~/notes")),
+            home.join("notes")
+        );
+        assert_eq!(
+            vane::fsutil::expand_tilde(Path::new("/abs/x")),
+            PathBuf::from("/abs/x")
+        );
+        assert_eq!(
+            vane::fsutil::expand_tilde(Path::new("rel/x")),
+            PathBuf::from("rel/x")
+        );
+    }
+}
+
+mod i18n_tests {
+    use vane::i18n::{pick, tr, Lang};
+
+    #[test]
+    fn tables_have_identical_keys() {
+        let mut en: Vec<&str> = vane::i18n::EN_TABLE.iter().map(|(k, _)| *k).collect();
+        let mut zh: Vec<&str> = vane::i18n::ZH_TABLE.iter().map(|(k, _)| *k).collect();
+        en.sort_unstable();
+        zh.sort_unstable();
+        assert_eq!(en, zh, "EN/ZH key sets diverged");
+    }
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn detect_priority_and_zh_prefix() {
+        assert_eq!(Lang::detect_with(&env(&[])), Lang::En);
+        assert_eq!(
+            Lang::detect_with(&env(&[("LANG", "zh_CN.UTF-8")])),
+            Lang::Zh
+        );
+        assert_eq!(
+            Lang::detect_with(&env(&[("LANG", "zh_CN.UTF-8"), ("LC_ALL", "en_US.UTF-8")])),
+            Lang::En
+        );
+        assert_eq!(
+            Lang::detect_with(&env(&[("LC_ALL", "en_US"), ("VANE_LANG", "zh")])),
+            Lang::Zh
+        );
+        assert_eq!(Lang::detect_with(&env(&[("LANG", "ZH_TW")])), Lang::Zh);
+    }
+
+    #[test]
+    fn pick_forces_english_off_tty() {
+        assert_eq!(pick(Lang::Zh, false, "time.just_now"), "just now");
+        assert_eq!(pick(Lang::Zh, true, "time.just_now"), "刚刚");
+        assert_eq!(tr(Lang::En, "nonexistent.key"), "missing-i18n-key");
+    }
+}
+
+mod humanize_tests {
+    use vane::humanize::{abs_date, rel_time};
+    use vane::i18n::Lang;
+
+    const NOW: u64 = 1_755_700_000; // fixed reference
+
+    #[test]
+    fn all_buckets_en_and_zh() {
+        assert_eq!(rel_time(0, NOW, Lang::En), "never");
+        assert_eq!(rel_time(NOW + 100, NOW, Lang::En), "just now"); // clock skew
+        assert_eq!(rel_time(NOW - 5, NOW, Lang::En), "just now");
+        assert_eq!(rel_time(NOW - 30, NOW, Lang::En), "30s ago");
+        assert_eq!(rel_time(NOW - 180, NOW, Lang::En), "3 min ago");
+        assert_eq!(rel_time(NOW - 5 * 3600, NOW, Lang::En), "5 hours ago");
+        assert_eq!(rel_time(NOW - 10 * 86_400, NOW, Lang::En), "10 days ago");
+        assert_eq!(
+            rel_time(NOW - 40 * 86_400, NOW, Lang::En),
+            abs_date(NOW - 40 * 86_400)
+        );
+        assert_eq!(rel_time(NOW - 180, NOW, Lang::Zh), "3 分钟前");
+        assert_eq!(rel_time(0, NOW, Lang::Zh), "从未");
+    }
+
+    #[test]
+    fn abs_date_known_epoch() {
+        assert_eq!(abs_date(0), "1970-01-01");
+        assert_eq!(abs_date(1_755_700_000), "2025-08-20");
+    }
+}
+
+mod query_display_tests {
+    use vane::i18n::Lang;
+
+    #[test]
+    fn collapse_home_folds_home_prefix() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(vane::ui::collapse_home(&format!("{home}/notes")), "~/notes");
+        assert_eq!(vane::ui::collapse_home("/var/tmp"), "/var/tmp");
+    }
+
+    #[test]
+    fn scope_header_single_root_and_all() {
+        let one = vane::ui::format_scope_header(Some("~/notes"), 1, 12, false, Lang::En, false);
+        assert_eq!(one, "searching ~/notes · 12 live files · hybrid");
+        let all = vane::ui::format_scope_header(None, 3, 42, false, Lang::En, false);
+        assert_eq!(all, "searching 3 roots · 42 live files · hybrid");
+        let deg = vane::ui::format_scope_header(Some("~/notes"), 1, 12, true, Lang::Zh, false);
+        assert!(deg.contains("BM25（降级：embedder 不可达）"));
+    }
+
+    #[test]
+    fn hit_lines_omit_root_single_scope_and_id_unless_verbose() {
+        let hit = serde_json::json!({
+            "id": "p1:notes/a.md#0", "path": "notes/a.md", "root": "/abs/notes",
+            "snippet": "hello", "score": 0.42, "degraded": false
+        });
+        let single = vane::ui::hit_lines(
+            &hit,
+            0,
+            &vane::ui::HitLineOpts {
+                all: false,
+                verbose: false,
+                header_degraded: true,
+            },
+            false,
+        );
+        assert!(
+            !single.iter().any(|l| l.contains("/abs/notes")),
+            "single scope must not repeat root"
+        );
+        assert!(
+            !single.iter().any(|l| l.contains("p1:notes/a.md#0")),
+            "id hidden by default"
+        );
+        let all = vane::ui::hit_lines(
+            &hit,
+            0,
+            &vane::ui::HitLineOpts {
+                all: true,
+                verbose: true,
+                header_degraded: true,
+            },
+            false,
+        );
+        assert!(all.iter().any(|l| l.contains("/abs/notes")));
+        assert!(all.iter().any(|l| l.contains("p1:notes/a.md#0")));
+        let deg = serde_json::json!({"id":"p:x#0","path":"x","root":"/r","snippet":"","score":0.1,"degraded":true});
+        let lines = vane::ui::hit_lines(
+            &deg,
+            0,
+            &vane::ui::HitLineOpts {
+                all: false,
+                verbose: false,
+                header_degraded: true,
+            },
+            false,
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("degraded")),
+            "header already aggregated it"
+        );
+    }
+}
+
+mod dispatch_tests {
+    use vane::dispatch::{decide_query_arg, QueryArg};
+
+    #[test]
+    fn query_arg_branches() {
+        assert_eq!(
+            decide_query_arg(Some("foo".into()), true),
+            QueryArg::Run("foo".into())
+        );
+        assert_eq!(decide_query_arg(None, true), QueryArg::Prompt);
+        assert_eq!(decide_query_arg(None, false), QueryArg::MissingError);
+    }
+}
+
+mod subprocess_tests {
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn query_without_arg_non_tty_is_single_line_exit_2() {
+        let _g = crate::ENV_LOCK.lock().unwrap();
+        let home = crate::init_home();
+        let out = Command::new(env!("CARGO_BIN_EXE_vane"))
+            .args(["--home", &home.path.display().to_string(), "query"])
+            .env("VANE_LANG", "en")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("missing query"), "got: {stderr}");
+        assert!(
+            !stderr.contains("Usage:"),
+            "must not dump clap help: {stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1);
+    }
+}
+
+mod last_query_tests {
+    use vane::last_query::*;
+
+    fn sample() -> LastQuery {
+        LastQuery {
+            query: "foo".into(),
+            at: 1_755_700_000,
+            scope_root: Some("/abs/notes".into()),
+            hits: vec![CachedHit {
+                id: "p1:notes/a.md#0".into(),
+                path: "notes/a.md".into(),
+                root: "/abs/notes".into(),
+                score: 0.42,
+            }],
+        }
+    }
+
+    #[test]
+    fn roundtrip_and_corrupt_cache() {
+        let dir = crate::temp_home("lq-roundtrip");
+        save_last_query(&dir.path, &sample()).unwrap();
+        assert_eq!(load_last_query(&dir.path).unwrap(), sample());
+        std::fs::write(last_query_path(&dir.path), b"not json").unwrap();
+        assert!(
+            load_last_query(&dir.path).is_none(),
+            "corrupt cache must be None"
+        );
+    }
+
+    #[test]
+    fn read_outcome_errors() {
+        let dir = crate::temp_home("lq-errors");
+        let q = sample();
+        // no live set / CAS → stale (chunk not found)
+        assert!(matches!(
+            read_outcome(&dir.path, &q, 1),
+            Err(ReadError::Stale { n: 1 })
+        ));
+        assert!(matches!(
+            read_outcome(&dir.path, &q, 5),
+            Err(ReadError::OutOfRange { n: 5, k: 1 })
+        ));
+        let empty = LastQuery {
+            hits: vec![],
+            ..sample()
+        };
+        assert!(matches!(
+            read_outcome(&dir.path, &empty, 1),
+            Err(ReadError::Empty)
+        ));
+    }
+
+    #[test]
+    fn read_outcome_reads_chunk_from_cas() {
+        // Minimal live set + CAS: one file, one chunk.
+        let dir = crate::temp_home("lq-cas");
+        let home = dir.path.as_path();
+        let pid = "p1";
+        let mut live = vane::live::LiveSet::default();
+        live.files.insert(
+            "notes/a.md".into(),
+            vane::live::LiveFile {
+                content_sha256: "x".into(),
+                extract_key: "k1".into(),
+                chunk_count: 1,
+            },
+        );
+        live.save_for_project(home, pid).unwrap();
+        let cas = vane::cas::Cas::new(home.join("rag").join("cas"));
+        cas.put_extract(
+            "k1",
+            &[vane::extract::CanonicalDoc {
+                text: "hello world chunk".into(),
+                headings: vec![],
+                path: "notes/a.md".into(),
+                chunk_index: 0,
+                start_byte: 0,
+                end_byte: 17,
+                modality: "text".into(),
+                extractor: "text".into(),
+            }],
+        )
+        .unwrap();
+        let out = read_outcome(home, &sample(), 1).unwrap();
+        assert_eq!(out.text, "hello world chunk");
+        assert_eq!(out.chunk_index, 0);
+    }
+}
+
+mod status_tests {
+    use vane::i18n::Lang;
+
+    fn sample_status() -> serde_json::Value {
+        serde_json::json!({
+            "home": "/h/.vane",
+            "running": true,
+            "dirty_queue_size": 0,
+            "disk": { "home_bytes": 2048, "cas_bytes": 1024 },
+            "roots": [{
+                "path": "/abs/notes", "live_files": 12,
+                "last_reconcile": 1_755_699_700u64, // 300s before NOW
+                "model": "nomic-embed-text", "dim": 768,
+                "dirty_queue_size": 0, "skip_count": 12
+            }]
+        })
+    }
+
+    const NOW: u64 = 1_755_700_000;
+
+    #[test]
+    fn watching_and_humanized_root_lines() {
+        let view = vane::ui::status_view(&sample_status(), None);
+        let lines = vane::ui::format_status_lines(&view, Lang::En, NOW);
+        let joined = lines.join("\n");
+        assert!(joined.contains("watching"), "{joined}");
+        assert!(joined.contains("indexed 5 min ago"), "{joined}");
+        assert!(joined.contains("12 skipped — run vane issues"), "{joined}");
+        assert!(
+            !joined.contains("1755699700"),
+            "no raw unix seconds: {joined}"
+        );
+        assert!(
+            !joined.contains("pending changes"),
+            "dirty=0 must not print"
+        );
+    }
+
+    #[test]
+    fn indexing_state_and_never_indexed() {
+        let mut v = sample_status();
+        v["roots"][0]["last_reconcile"] = serde_json::Value::Null;
+        let view = vane::ui::status_view(&v, Some((34, 120)));
+        let lines = vane::ui::format_status_lines(&view, Lang::Zh, NOW).join("\n");
+        assert!(lines.contains("索引中 34/120"), "{lines}");
+        assert!(lines.contains("从未索引"), "{lines}");
+        assert!(lines.contains("12 个文件被跳过"), "{lines}");
+    }
+
+    #[test]
+    fn daemon_stopped_keeps_existing_warning() {
+        let mut v = sample_status();
+        v["running"] = serde_json::json!(false);
+        let view = vane::ui::status_view(&v, None);
+        let lines = vane::ui::format_status_lines(&view, Lang::En, NOW).join("\n");
+        assert!(lines.contains("daemon not running — vane start"), "{lines}");
+        assert!(!lines.contains("watching"));
+    }
+}
+
+mod add_summary_tests {
+    use vane::i18n::Lang;
+
+    #[test]
+    fn summary_with_and_without_skips() {
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 0, Lang::En),
+            "indexed 80 files"
+        );
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 3, Lang::En),
+            "indexed 80 files, 3 skipped — run vane issues"
+        );
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 0, Lang::Zh),
+            "已索引 80 个文件"
+        );
+        assert_eq!(
+            vane::ui::format_add_summary(5, 75, 3, Lang::Zh),
+            "已索引 80 个文件，跳过 3 个 — 运行 vane issues 查看"
+        );
+    }
+
+    #[test]
+    fn progress_style_choice() {
+        assert_eq!(
+            vane::progress::choose_progress_style(0),
+            vane::progress::ProgressStyle::Spinner
+        );
+        assert_eq!(
+            vane::progress::choose_progress_style(120),
+            vane::progress::ProgressStyle::Bar(120)
+        );
+        assert_eq!(vane::progress::clamp_pos(34, 120), 34);
+        assert_eq!(vane::progress::clamp_pos(150, 120), 120); // spec 13b: pos 封顶
+    }
+}
+
+mod bare_dispatch_tests {
+    use vane::dispatch::{decide_bare, BareAction};
+
+    #[test]
+    fn three_branches() {
+        assert_eq!(decide_bare(false, false), BareAction::InitHint);
+        assert_eq!(decide_bare(false, true), BareAction::InitHint); // 未初始化优先
+        assert_eq!(decide_bare(true, false), BareAction::Doctor);
+        assert_eq!(decide_bare(true, true), BareAction::Status);
+    }
+
+    #[test]
+    fn help_is_grouped() {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_vane"))
+            .arg("--help")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        for heading in ["Common:", "Manage:", "Ops:"] {
+            assert!(stdout.contains(heading), "missing {heading} in:\n{stdout}");
+        }
+        let common_pos = stdout.find("Common:").unwrap();
+        let query_pos = stdout.find("query").unwrap();
+        assert!(query_pos > common_pos);
+        assert!(query_pos < stdout.find("Manage:").unwrap());
+        // Guardrail: `grouped_help` hand-renders the Usage/Options block
+        // (Usage line + --home + -h/--help + -V/--version) rather than letting
+        // clap emit it. If a future global arg is added to `Cli` but not to
+        // `grouped_help`, the top-level --help silently drops it. Asserting the
+        // existing global `--home` appears catches that drift.
+        assert!(
+            stdout.contains("--home"),
+            "global --home arg must appear in --help; if grouped_help stopped rendering it, \
+             it will not — add it there. Output:\n{stdout}"
+        );
+    }
+}
+
+mod mcp_skill_tests {
+    use std::path::Path;
+
+    fn fake_home() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vane-mcp-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn skill_lifecycle_and_report_kind() {
+        let home = fake_home();
+        // dry-run: would_write 含 skill 行
+        let report =
+            vane::mcp::install_mcp(Path::new(&home), true, Some(vane::mcp::McpClient::Claude))
+                .unwrap();
+        assert!(report
+            .would_write
+            .iter()
+            .any(|t| t.kind == "skill" && t.path.ends_with("skills/vane/SKILL.md")));
+        assert!(report
+            .would_write
+            .iter()
+            .all(|t| t.kind == "skill" || t.kind == "config"));
+        assert!(
+            !home.join(".claude/skills/vane/SKILL.md").exists(),
+            "dry-run must not write"
+        );
+        // 首装 wrote
+        let report =
+            vane::mcp::install_mcp(&home, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+        let skill = report.written.iter().find(|t| t.kind == "skill").unwrap();
+        assert_eq!(skill.action, "wrote");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude/skills/vane/SKILL.md")).unwrap(),
+            vane::mcp::SKILL_MD
+        );
+        // 二装 up-to-date
+        let report =
+            vane::mcp::install_mcp(&home, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+        assert!(report
+            .skipped
+            .iter()
+            .any(|s| s.kind == "skill" && s.reason == "up-to-date"));
+        // 内容被改 → updated
+        std::fs::write(home.join(".claude/skills/vane/SKILL.md"), "old").unwrap();
+        let report =
+            vane::mcp::install_mcp(&home, false, Some(vane::mcp::McpClient::Claude)).unwrap();
+        assert!(report
+            .written
+            .iter()
+            .any(|t| t.kind == "skill" && t.action == "updated"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn default_all_without_claude_dir_skips_skill() {
+        let dir = std::env::temp_dir().join(format!("vane-mcp2-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = vane::mcp::install_mcp(&dir, false, None).unwrap();
+        assert!(!report.written.iter().any(|t| t.kind == "skill"));
+        assert!(
+            !dir.join(".claude").exists(),
+            "must not create ~/.claude for skill"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn closing_line_is_present() {
+        // print_mcp_install 是 TTY 打印；改为测纯函数
+        let line = vane::i18n::tr(vane::i18n::Lang::Zh, "mcp.done_new_session");
+        assert!(line.contains("新开一轮 Agent 会话"), "{line}");
+    }
+}
+
+mod zh_copy_tests {
+    use vane::i18n::{tr, Lang};
+
+    #[test]
+    fn all_why_ids_have_zh_keys() {
+        for id in [
+            "not_initialized",
+            "not_registered",
+            "still_indexing",
+            "embedder",
+            "excluded",
+            "wrong_root",
+            "empty_index",
+            "no_match",
+        ] {
+            let key = format!("why.{id}");
+            assert_ne!(tr(Lang::Zh, &key), "missing-i18n-key", "missing {key}");
+            assert_ne!(tr(Lang::En, &key), "missing-i18n-key", "missing {key}");
+        }
+    }
+
+    #[test]
+    fn doctor_json_stays_english_tty_renders_zh() {
+        let check = vane::doctor::DoctorCheck::bi(
+            "daemon",
+            vane::doctor::CheckLevel::Red,
+            "daemon is not running",
+            "守护进程未运行",
+            "run `vane start`",
+            "运行 vane start",
+        );
+        let json = serde_json::to_value(&check).unwrap();
+        assert_eq!(json["message"], "daemon is not running");
+        assert!(
+            json.get("message_zh").is_none(),
+            "zh fields must not serialize"
+        );
+        assert!(json.get("fix_zh").is_none(), "zh fields must not serialize");
+    }
+
+    /// Spec test 14: pipe-driven init rejects a missing first_root directory,
+    /// re-prompts, and accepts "." (canonicalized); a later re-init accepts "~"
+    /// and stores the $HOME-expanded path.
+    #[test]
+    fn wizard_rejects_missing_dir_then_accepts_dot() {
+        let _g = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("vane-wiz-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap(); // 必须先建目录，否则 set_current_dir 静默失败
+        std::env::set_var("VANE_ALLOW_EMBED_FAIL", "1");
+        std::env::set_var("VANE_LANG", "en"); // 固定语言，避免 zh locale 机器上断言英文失败
+        let cwd_restore = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap(); // "." 解析到临时目录
+                                                  // 8 defaults (provider..min_chars) + first_root rejected "/no/such/dir"
+                                                  // + accepted "." + exclude_drop + exclude_extra + images + install_service=n
+        let answers_script = "\n\n\n\n\n\n\n\n/no/such/dir\n.\n\n\n\nn\n";
+        let mut out = Vec::new();
+        let result = vane::wizard::run_init(&dir, answers_script.as_bytes(), &mut out, None);
+        std::env::set_current_dir(cwd_restore).unwrap();
+        assert!(result.is_ok(), "run_init failed: {result:?}");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("directory does not exist"),
+            "expected re-prompt warning, got: {text}"
+        );
+        let cfg = std::fs::read_to_string(dir.join("config/config.toml")).unwrap();
+        let canon_dir = std::fs::canonicalize(&dir).unwrap();
+        assert!(
+            cfg.contains(&canon_dir.display().to_string()),
+            "first root '.' must register canonicalized cwd: {cfg}"
+        );
+
+        // `~` 展开用例并入：re-init（已存在 config），first_root 输入 "~"
+        let mut out2 = Vec::new();
+        let reinit_script = "\n\n\n\n\n\n\n\n~\n\n\n\n\n";
+        vane::wizard::run_init(&dir, reinit_script.as_bytes(), &mut out2, None)
+            .expect("re-init with ~ first root");
+        let cfg2 = std::fs::read_to_string(dir.join("config/config.toml")).unwrap();
+        let canon_home =
+            std::fs::canonicalize(std::env::var_os("HOME").expect("HOME set")).unwrap();
+        assert!(
+            cfg2.contains(&canon_home.display().to_string()),
+            "first root '~' must store $HOME-expanded path: {cfg2}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+mod watch_diff_tests {
+    use std::collections::BTreeMap;
+    use vane::i18n::Lang;
+    use vane::live::{LiveFile, LiveSet};
+    use vane::watch_diff::{diff_live, diff_queued, event_line, WatchEvent};
+
+    fn file(key: &str) -> LiveFile {
+        LiveFile {
+            content_sha256: key.into(),
+            extract_key: key.into(),
+            chunk_count: 1,
+        }
+    }
+
+    fn set(entries: &[(&str, &str)]) -> LiveSet {
+        LiveSet {
+            files: entries
+                .iter()
+                .map(|(p, k)| (p.to_string(), file(k)))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn live_diff_classifies() {
+        let prev = set(&[("a.md", "k1"), ("b.md", "k2")]);
+        let next = set(&[("a.md", "k1"), ("b.md", "k3"), ("c.md", "k4")]);
+        let events = diff_live(&prev, &next);
+        assert!(events.contains(&WatchEvent::Updated("b.md".into())));
+        assert!(events.contains(&WatchEvent::Added("c.md".into())));
+        assert!(!events.iter().any(|e| matches!(e, WatchEvent::Removed(_))));
+        let gone = diff_live(&next, &prev);
+        assert!(gone.contains(&WatchEvent::Removed("c.md".into())));
+    }
+
+    #[test]
+    fn queued_only_reports_new_entries() {
+        let ev = diff_queued(&["a.md".into()], &["a.md".into(), "b.md".into()]);
+        assert_eq!(ev, vec![WatchEvent::Queued("b.md".into())]);
+        assert!(
+            diff_queued(&["a.md".into()], &[]).is_empty(),
+            "dequeue is silent by design"
+        );
+    }
+
+    #[test]
+    fn event_line_renders() {
+        assert_eq!(
+            event_line(&WatchEvent::Updated("n/a.md".into()), Lang::En),
+            "updated n/a.md"
+        );
+        assert_eq!(
+            event_line(&WatchEvent::Added("n/a.md".into()), Lang::Zh),
+            "新增 n/a.md"
+        );
+    }
+
+    #[test]
+    fn dirty_queue_lists_paths() {
+        let mut q = vane::dirty::DirtyQueue::new();
+        q.push("p1", "a.md");
+        q.push("p1", "b.md");
+        q.push("p2", "c.md");
+        assert_eq!(
+            q.paths_for("p1"),
+            vec!["a.md".to_string(), "b.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn interval_bounds() {
+        use vane::watch_diff::valid_interval;
+        assert!(!valid_interval(0));
+        assert!(!valid_interval(99));
+        assert!(valid_interval(100));
+        assert!(valid_interval(60_000));
+        assert!(!valid_interval(60_001));
+    }
+}

@@ -5,6 +5,7 @@ use crate::config::{
     default_chunk, default_embed, default_exclude, default_types, ChunkConfig, Config, EmbedConfig,
 };
 use crate::error::VaneCliError;
+use crate::i18n::{tr, Lang};
 use crate::service::install_user_service;
 
 #[derive(Debug, Clone)]
@@ -58,11 +59,16 @@ where
 {
     let cfg_path = home.join("config").join("config.toml");
     let existing = crate::config::load_config(home).ok();
+    let lang = if crate::ui::interactive() {
+        Lang::detect()
+    } else {
+        Lang::En
+    };
     let answers = match assume {
         Some(a) => a,
         None => {
             let mut reader = BufReader::new(stdin);
-            prompt_answers(&mut reader, &mut stdout, existing.as_ref())?
+            prompt_answers(&mut reader, &mut stdout, existing.as_ref(), lang)?
         }
     };
     validate_provider(&answers.provider)?;
@@ -92,16 +98,14 @@ fn prompt_answers<R, W>(
     stdin: &mut R,
     stdout: &mut W,
     existing: Option<&Config>,
+    lang: Lang,
 ) -> Result<InitAnswers, VaneCliError>
 where
     R: BufRead,
     W: Write,
 {
     if existing.is_some() {
-        let _ = writeln!(
-            stdout,
-            "already initialized — empty answers keep the current value"
-        );
+        let _ = writeln!(stdout, "{}", tr(lang, "wizard.already_initialized"));
     }
     let def = existing
         .map(|c| c.defaults.embed.clone())
@@ -109,12 +113,7 @@ where
     let chunk_def = existing
         .map(|c| c.defaults.chunk.clone())
         .unwrap_or_else(default_chunk);
-    let provider = prompt(
-        stdin,
-        stdout,
-        "Embedding provider (ollama / openai_compat)",
-        &def.provider,
-    )?;
+    let provider = prompt(stdin, stdout, tr(lang, "wizard.provider"), &def.provider)?;
     validate_provider(&provider)?;
     let (default_model, default_url) = if provider == def.provider {
         (def.model.clone(), def.base_url.clone())
@@ -127,61 +126,69 @@ where
         let fallback = default_embed();
         (fallback.model, fallback.base_url)
     };
-    let model = prompt(stdin, stdout, "Model", &default_model)?;
-    let base_url = prompt(stdin, stdout, "Base URL", &default_url)?;
+    let model = prompt(stdin, stdout, tr(lang, "wizard.model"), &default_model)?;
+    let base_url = prompt(stdin, stdout, tr(lang, "wizard.base_url"), &default_url)?;
     let api_key = if provider == "openai_compat" {
-        prompt_api_key(stdin, stdout)?
+        prompt_api_key(stdin, stdout, lang)?
     } else {
         None
     };
-    let dim = prompt_dim(stdin, stdout, def.dim)?;
-    let split = prompt(
-        stdin,
-        stdout,
-        "Chunk split (markdown / plain)",
-        &chunk_def.split,
-    )?;
+    let dim = prompt_dim(stdin, stdout, def.dim, lang)?;
+    let split = prompt(stdin, stdout, tr(lang, "wizard.split"), &chunk_def.split)?;
     if split != "markdown" && split != "plain" {
         return Err(VaneCliError::new(format!(
             "invalid chunk split {split:?}, expected markdown or plain"
         )));
     }
-    let max_chars = prompt_u32(stdin, stdout, "Chunk max_chars", chunk_def.max_chars)?;
+    let max_chars = prompt_u32(
+        stdin,
+        stdout,
+        tr(lang, "wizard.max_chars"),
+        chunk_def.max_chars,
+    )?;
     let overlap_chars = prompt_u32(
         stdin,
         stdout,
-        "Chunk overlap_chars",
+        tr(lang, "wizard.overlap"),
         chunk_def.overlap_chars,
     )?;
-    let min_chars = prompt_u32(stdin, stdout, "Chunk min_chars", chunk_def.min_chars)?;
+    let min_chars = prompt_u32(
+        stdin,
+        stdout,
+        tr(lang, "wizard.min_chars"),
+        chunk_def.min_chars,
+    )?;
 
     if provider == "openai_compat" && api_key.is_none() && !env_embed_api_key_set() {
-        let _ = writeln!(
-            stdout,
-            "warning: no API key; probe will likely 401. Enter a key, or export OPENAI_API_KEY / VANE_EMBED_API_KEY"
-        );
+        let _ = writeln!(stdout, "{}", tr(lang, "wizard.no_api_key"));
     }
 
-    let root_s = prompt(stdin, stdout, "First project root (empty to skip)", "")?;
-    let first_root = if root_s.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(root_s))
+    // Validate inline: re-prompt until the path is empty (skip) or an existing
+    // directory (spec §5.2). `.` / `~` / relative inputs all expand here.
+    let first_root = loop {
+        let root_s = prompt(stdin, stdout, tr(lang, "wizard.first_root"), "")?;
+        if root_s.is_empty() {
+            break None;
+        }
+        let expanded = crate::fsutil::expand_tilde(Path::new(&root_s));
+        if expanded.is_dir() {
+            break Some(expanded);
+        }
+        let _ = writeln!(
+            stdout,
+            "{}",
+            tr(lang, "wizard.root_not_dir").replace("{path}", &root_s)
+        );
     };
 
     let defaults = existing
         .map(|c| c.exclude.clone())
         .unwrap_or_else(default_exclude);
-    let _ = writeln!(stdout, "Default excludes:");
+    let _ = writeln!(stdout, "{}", tr(lang, "wizard.exclude_defaults"));
     for (i, e) in defaults.iter().enumerate() {
         let _ = writeln!(stdout, "  [{}] {e}", i + 1);
     }
-    let drop_s = prompt(
-        stdin,
-        stdout,
-        "Numbers to uncheck (comma-separated, empty to keep all)",
-        "",
-    )?;
+    let drop_s = prompt(stdin, stdout, tr(lang, "wizard.exclude_drop"), "")?;
     let mut exclude = defaults;
     if !drop_s.is_empty() {
         let drop_idx: Vec<usize> = drop_s
@@ -197,12 +204,7 @@ where
             .map(|(_, e)| e)
             .collect();
     }
-    let extra = prompt(
-        stdin,
-        stdout,
-        "Additional exclude glob or folder (empty to skip)",
-        "",
-    )?;
+    let extra = prompt(stdin, stdout, tr(lang, "wizard.exclude_extra"), "")?;
     if !extra.is_empty() {
         let extra_glob = folder_to_exclude_glob(&extra);
         if !exclude.iter().any(|e| e == &extra_glob) {
@@ -213,9 +215,13 @@ where
     let images_default = existing
         .map(|c| c.types.iter().any(|t| t.extractor == "image" && t.enabled))
         .unwrap_or(false);
-    let images = prompt_yes_no(stdin, stdout, "Enable image types?", images_default)?;
-    let install_service =
-        prompt_yes_no(stdin, stdout, "Install user service?", existing.is_none())?;
+    let images = prompt_yes_no(stdin, stdout, tr(lang, "wizard.images"), images_default)?;
+    let install_service = prompt_yes_no(
+        stdin,
+        stdout,
+        tr(lang, "wizard.install_service"),
+        existing.is_none(),
+    )?;
 
     Ok(InitAnswers {
         provider,
@@ -246,18 +252,14 @@ fn prompt_dim<R, W>(
     stdin: &mut R,
     stdout: &mut W,
     current: Option<u32>,
+    lang: Lang,
 ) -> Result<Option<u32>, VaneCliError>
 where
     R: BufRead,
     W: Write,
 {
     let default = current.map(|d| d.to_string()).unwrap_or_default();
-    let raw = prompt(
-        stdin,
-        stdout,
-        "Vector dimension (empty to probe from the API)",
-        &default,
-    )?;
+    let raw = prompt(stdin, stdout, tr(lang, "wizard.dim"), &default)?;
     parse_dim(&raw)
 }
 
@@ -292,19 +294,24 @@ pub(crate) fn parse_dim(raw: &str) -> Result<Option<u32>, VaneCliError> {
     Ok(Some(n))
 }
 
-fn prompt_api_key<R, W>(stdin: &mut R, stdout: &mut W) -> Result<Option<String>, VaneCliError>
+fn prompt_api_key<R, W>(
+    stdin: &mut R,
+    stdout: &mut W,
+    lang: Lang,
+) -> Result<Option<String>, VaneCliError>
 where
     R: BufRead,
     W: Write,
 {
     let hint = if env_nonempty("OPENAI_API_KEY") {
-        "empty keeps OPENAI_API_KEY"
+        tr(lang, "wizard.api_key_keep_openai")
     } else if env_nonempty("VANE_EMBED_API_KEY") {
-        "empty keeps VANE_EMBED_API_KEY"
+        tr(lang, "wizard.api_key_keep_vane")
     } else {
-        "empty uses OPENAI_API_KEY / VANE_EMBED_API_KEY"
+        tr(lang, "wizard.api_key_use_env")
     };
-    let raw = prompt(stdin, stdout, &format!("API key ({hint})"), "")?;
+    let label = tr(lang, "wizard.api_key").replace("{hint}", hint);
+    let raw = prompt(stdin, stdout, &label, "")?;
     if raw.is_empty() {
         Ok(None)
     } else {
@@ -505,27 +512,10 @@ fn type_rule_value(t: crate::config::TypeRule) -> toml::Value {
 }
 
 fn normalize_root(path: &Path) -> Result<PathBuf, VaneCliError> {
-    let expanded = expand_tilde(path);
+    let expanded = crate::fsutil::expand_tilde(path);
     expanded
         .canonicalize()
         .map_err(|e| VaneCliError::new(format!("canonicalize {}: {e}", expanded.display())))
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if s == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path.to_path_buf()
 }
 
 fn load_existing_projects(home: &Path) -> Vec<toml::Value> {
@@ -599,12 +589,8 @@ where
     R: BufRead,
     W: Write,
 {
-    let write_file = prompt_yes_no(
-        stdin,
-        stdout,
-        "Write .vane.toml in this repo (chunk / types)?",
-        true,
-    )?;
+    let lang = Lang::detect();
+    let write_file = prompt_yes_no(stdin, stdout, tr(lang, "wizard.write_project_toml"), true)?;
     if !write_file {
         return Ok(ProjectSetup {
             chunk: global.clone(),
@@ -612,16 +598,26 @@ where
             write_file: false,
         });
     }
-    let split = prompt(
+    let split = prompt(stdin, stdout, tr(lang, "wizard.split"), &global.split)?;
+    let max_chars = prompt_u32(
         stdin,
         stdout,
-        "Chunk split (markdown / plain)",
-        &global.split,
+        tr(lang, "wizard.max_chars"),
+        global.max_chars,
     )?;
-    let max_chars = prompt_u32(stdin, stdout, "Chunk max_chars", global.max_chars)?;
-    let overlap_chars = prompt_u32(stdin, stdout, "Chunk overlap_chars", global.overlap_chars)?;
-    let min_chars = prompt_u32(stdin, stdout, "Chunk min_chars", global.min_chars)?;
-    let images = prompt_yes_no(stdin, stdout, "Enable image types?", false)?;
+    let overlap_chars = prompt_u32(
+        stdin,
+        stdout,
+        tr(lang, "wizard.overlap"),
+        global.overlap_chars,
+    )?;
+    let min_chars = prompt_u32(
+        stdin,
+        stdout,
+        tr(lang, "wizard.min_chars"),
+        global.min_chars,
+    )?;
+    let images = prompt_yes_no(stdin, stdout, tr(lang, "wizard.images"), false)?;
     Ok(ProjectSetup {
         chunk: ChunkConfig {
             split,
@@ -655,25 +651,29 @@ pub fn run_init_tty(home: &Path) -> Result<(), VaneCliError> {
 }
 
 fn prompt_answers_tty(existing: Option<&Config>) -> Result<InitAnswers, VaneCliError> {
+    let lang = Lang::detect();
     let def = existing
         .map(|c| c.defaults.embed.clone())
         .unwrap_or_else(default_embed);
     let chunk_def = existing
         .map(|c| c.defaults.chunk.clone())
         .unwrap_or_else(default_chunk);
-    cliclack::intro("Vane sidecar").map_err(clack_err)?;
+    cliclack::intro(tr(lang, "wizard.intro")).map_err(clack_err)?;
     if existing.is_some() {
-        cliclack::log::info("Already initialized — empty answers keep the current value")
-            .map_err(clack_err)?;
+        cliclack::log::info(tr(lang, "wizard.already_initialized")).map_err(clack_err)?;
     }
-    let provider = cliclack::select("Embedding provider")
+    let provider = cliclack::select(tr(lang, "wizard.provider_short"))
         .initial_value(if def.provider == "openai_compat" {
             "openai_compat"
         } else {
             "ollama"
         })
-        .item("ollama", "ollama", "local Ollama")
-        .item("openai_compat", "openai_compat", "OpenAI-compatible HTTP")
+        .item("ollama", "ollama", tr(lang, "wizard.hint_ollama"))
+        .item(
+            "openai_compat",
+            "openai_compat",
+            tr(lang, "wizard.hint_openai_compat"),
+        )
         .interact()
         .map_err(clack_err)?
         .to_string();
@@ -693,16 +693,16 @@ fn prompt_answers_tty(existing: Option<&Config>) -> Result<InitAnswers, VaneCliE
     } else {
         (def.model.clone(), def.base_url.clone())
     };
-    let model: String = cliclack::input("Model")
+    let model: String = cliclack::input(tr(lang, "wizard.model"))
         .default_input(&fallback_model)
         .interact()
         .map_err(clack_err)?;
-    let base_url: String = cliclack::input("Base URL")
+    let base_url: String = cliclack::input(tr(lang, "wizard.base_url"))
         .default_input(&fallback_url)
         .interact()
         .map_err(clack_err)?;
     let api_key = if provider == "openai_compat" {
-        let typed: String = cliclack::input("API key (empty keeps env / stored key)")
+        let typed: String = cliclack::input(tr(lang, "wizard.api_key_tty"))
             .required(false)
             .interact()
             .map_err(clack_err)?;
@@ -716,50 +716,70 @@ fn prompt_answers_tty(existing: Option<&Config>) -> Result<InitAnswers, VaneCliE
     };
     let dim_default = def.dim.map(|d| d.to_string()).unwrap_or_default();
     let dim_raw: String = if dim_default.is_empty() {
-        cliclack::input("Vector dimension (empty to probe)")
+        cliclack::input(tr(lang, "wizard.dim_tty"))
             .required(false)
             .interact()
             .map_err(clack_err)?
     } else {
-        cliclack::input("Vector dimension (empty to probe)")
+        cliclack::input(tr(lang, "wizard.dim_tty"))
             .default_input(&dim_default)
             .required(false)
             .interact()
             .map_err(clack_err)?
     };
     let dim = parse_dim(&dim_raw)?;
-    let split = cliclack::select("Chunk split")
+    let split = cliclack::select(tr(lang, "wizard.split_tty"))
         .initial_value(if chunk_def.split == "plain" {
             "plain"
         } else {
             "markdown"
         })
-        .item("markdown", "markdown", "split on ATX/Setext headings")
-        .item("plain", "plain", "ignore headings")
+        .item("markdown", "markdown", tr(lang, "wizard.hint_markdown"))
+        .item("plain", "plain", tr(lang, "wizard.hint_plain"))
         .interact()
         .map_err(clack_err)?
         .to_string();
-    let max_chars = clack_u32("Chunk max_chars", chunk_def.max_chars)?;
-    let overlap_chars = clack_u32("Chunk overlap_chars", chunk_def.overlap_chars)?;
-    let min_chars = clack_u32("Chunk min_chars", chunk_def.min_chars)?;
+    let max_chars = clack_u32(tr(lang, "wizard.max_chars"), chunk_def.max_chars)?;
+    let overlap_chars = clack_u32(tr(lang, "wizard.overlap"), chunk_def.overlap_chars)?;
+    let min_chars = clack_u32(tr(lang, "wizard.min_chars"), chunk_def.min_chars)?;
 
-    let root_s: String = cliclack::input("First project root (empty to skip)")
+    // Validate inline (spec §5.2): empty skips; otherwise the path must be an
+    // existing directory — the error re-prompts automatically. Show cwd as a
+    // reference for "." / relative inputs.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root_prompt = format!(
+        "{} [current: {}]",
+        tr(lang, "wizard.first_root"),
+        cwd.display()
+    );
+    let root_s: String = cliclack::input(root_prompt)
         .required(false)
+        .validate(|s: &String| {
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(());
+            }
+            if crate::fsutil::expand_tilde(Path::new(t)).is_dir() {
+                Ok(())
+            } else {
+                Err(tr(Lang::detect(), "wizard.root_not_dir").replace("{path}", t))
+            }
+        })
         .interact()
         .map_err(clack_err)?;
     let first_root = if root_s.trim().is_empty() {
         None
     } else {
-        Some(PathBuf::from(root_s.trim()))
+        Some(crate::fsutil::expand_tilde(Path::new(root_s.trim())))
     };
     let images_default = existing
         .map(|c| c.types.iter().any(|t| t.extractor == "image" && t.enabled))
         .unwrap_or(false);
-    let images = cliclack::confirm("Enable image types?")
+    let images = cliclack::confirm(tr(lang, "wizard.images"))
         .initial_value(images_default)
         .interact()
         .map_err(clack_err)?;
-    let install_service = cliclack::confirm("Install user service?")
+    let install_service = cliclack::confirm(tr(lang, "wizard.install_service"))
         .initial_value(existing.is_none())
         .interact()
         .map_err(clack_err)?;
@@ -783,20 +803,21 @@ fn prompt_answers_tty(existing: Option<&Config>) -> Result<InitAnswers, VaneCliE
 }
 
 pub fn prompt_project_setup_tty(global: &ChunkConfig) -> Result<ProjectSetup, VaneCliError> {
-    cliclack::intro("Add project").map_err(clack_err)?;
-    let write_file = cliclack::confirm("Write .vane.toml in this repo?")
+    let lang = Lang::detect();
+    cliclack::intro(tr(lang, "wizard.add_project_intro")).map_err(clack_err)?;
+    let write_file = cliclack::confirm(tr(lang, "wizard.write_project_toml_tty"))
         .initial_value(true)
         .interact()
         .map_err(clack_err)?;
     if !write_file {
-        cliclack::outro("using global chunk defaults").map_err(clack_err)?;
+        cliclack::outro(tr(lang, "wizard.using_global_defaults")).map_err(clack_err)?;
         return Ok(ProjectSetup {
             chunk: global.clone(),
             images: false,
             write_file: false,
         });
     }
-    let split = cliclack::select("Chunk split")
+    let split = cliclack::select(tr(lang, "wizard.split_tty"))
         .initial_value(if global.split == "plain" {
             "plain"
         } else {
@@ -807,14 +828,14 @@ pub fn prompt_project_setup_tty(global: &ChunkConfig) -> Result<ProjectSetup, Va
         .interact()
         .map_err(clack_err)?
         .to_string();
-    let max_chars = clack_u32("Chunk max_chars", global.max_chars)?;
-    let overlap_chars = clack_u32("Chunk overlap_chars", global.overlap_chars)?;
-    let min_chars = clack_u32("Chunk min_chars", global.min_chars)?;
-    let images = cliclack::confirm("Enable image types?")
+    let max_chars = clack_u32(tr(lang, "wizard.max_chars"), global.max_chars)?;
+    let overlap_chars = clack_u32(tr(lang, "wizard.overlap"), global.overlap_chars)?;
+    let min_chars = clack_u32(tr(lang, "wizard.min_chars"), global.min_chars)?;
+    let images = cliclack::confirm(tr(lang, "wizard.images"))
         .initial_value(false)
         .interact()
         .map_err(clack_err)?;
-    cliclack::outro("project policy ready").map_err(clack_err)?;
+    cliclack::outro(tr(lang, "wizard.project_ready")).map_err(clack_err)?;
     Ok(ProjectSetup {
         chunk: ChunkConfig {
             split,
@@ -878,8 +899,12 @@ fn probe_or_fail_closed<W: Write>(
     match crate::embed::live_probe(&embed_from_answers(answers)) {
         Ok(dim) => {
             if tty {
-                cliclack::log::success(format!("probe ok, dim={dim}")).map_err(clack_err)?;
+                cliclack::log::success(
+                    tr(Lang::detect(), "wizard.probe_ok").replace("{dim}", &dim.to_string()),
+                )
+                .map_err(clack_err)?;
             } else {
+                // Non-TTY stdout stays English (spec §5.1 hard rule).
                 let _ = writeln!(stdout, "probe ok, dim={dim}");
             }
             Ok(())
@@ -906,7 +931,7 @@ fn probe_or_fail_closed<W: Write>(
             }
             if tty && crate::ui::interactive() {
                 cliclack::log::warning(&msg).map_err(clack_err)?;
-                if crate::ui::confirm("Continue anyway?", false)? {
+                if crate::ui::confirm(tr(Lang::detect(), "wizard.continue_anyway"), false)? {
                     return Ok(());
                 }
             }

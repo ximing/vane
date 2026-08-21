@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -380,6 +380,8 @@ pub struct McpInstallTarget {
     pub path: String,
     pub client: String,
     pub action: String,
+    /// Additive field (spec §4.4): "config" for client config merges, "skill" for the agent skill.
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,7 +389,12 @@ pub struct McpInstallSkip {
     pub path: String,
     pub client: String,
     pub reason: String,
+    /// Additive field (spec §4.4): "config" for client config merges, "skill" for the agent skill.
+    pub kind: String,
 }
+
+/// Single source of truth for the vane agent skill installed under `~/.claude/skills/vane/`.
+pub const SKILL_MD: &str = include_str!("../../../skills/vane/SKILL.md");
 
 /// TTY / piped report for `vane mcp install`. `--dry-run` fills `would_write` only.
 #[derive(Debug, Clone, Serialize)]
@@ -418,12 +425,17 @@ pub fn install_mcp(
     let mut skipped = Vec::new();
 
     for job in &jobs {
+        let kind = match job.format {
+            ConfigFormat::Skill => "skill",
+            _ => "config",
+        };
         match prepare_job(job)? {
             PreparedJob::Skip { reason } => {
                 skipped.push(McpInstallSkip {
                     path: job.path.display().to_string(),
                     client: job.client.to_string(),
                     reason,
+                    kind: kind.to_string(),
                 });
             }
             PreparedJob::Write { action, bytes } => {
@@ -431,11 +443,12 @@ pub fn install_mcp(
                     path: job.path.display().to_string(),
                     client: job.client.to_string(),
                     action: action.to_string(),
+                    kind: kind.to_string(),
                 };
                 if dry_run {
                     would_write.push(target);
                 } else {
-                    atomic_write(&job.path, &bytes, job.client)?;
+                    crate::fsutil::atomic_write(&job.path, &bytes, job.client)?;
                     written.push(target);
                 }
             }
@@ -451,6 +464,7 @@ pub fn install_mcp(
             path: user_home.join(".codex").display().to_string(),
             client: "codex".into(),
             reason: "no existing Codex MCP config (will not create)".into(),
+            kind: "config".into(),
         });
     }
 
@@ -474,6 +488,7 @@ struct InstallJob {
 enum ConfigFormat {
     Json,
     Toml,
+    Skill,
 }
 
 enum PreparedJob {
@@ -494,6 +509,21 @@ fn install_jobs(user_home: &Path, client: Option<McpClient>) -> Vec<InstallJob> 
             client: "claude",
             path: user_home.join(".claude.json"),
             format: ConfigFormat::Json,
+            create: true,
+        });
+    }
+    // Skill install (spec §4.4): explicit `--client claude` always installs (and creates the
+    // skills dir tree); default-all only when ~/.claude already exists.
+    let explicit_claude = client == Some(McpClient::Claude);
+    if explicit_claude || (all && user_home.join(".claude").is_dir()) {
+        jobs.push(InstallJob {
+            client: "claude-skill",
+            path: user_home
+                .join(".claude")
+                .join("skills")
+                .join("vane")
+                .join("SKILL.md"),
+            format: ConfigFormat::Skill,
             create: true,
         });
     }
@@ -542,6 +572,19 @@ fn install_jobs(user_home: &Path, client: Option<McpClient>) -> Vec<InstallJob> 
 }
 
 fn prepare_job(job: &InstallJob) -> Result<PreparedJob, VaneCliError> {
+    if matches!(job.format, ConfigFormat::Skill) {
+        let bytes = SKILL_MD.as_bytes();
+        let exists = job.path.is_file();
+        if exists && std::fs::read(&job.path).ok().as_deref() == Some(bytes) {
+            return Ok(PreparedJob::Skip {
+                reason: "up-to-date".into(),
+            });
+        }
+        return Ok(PreparedJob::Write {
+            action: if exists { "updated" } else { "wrote" },
+            bytes: bytes.to_vec(),
+        });
+    }
     let exists = job.path.is_file();
     if !exists && !job.create {
         return Ok(PreparedJob::Skip {
@@ -568,6 +611,7 @@ fn prepare_job(job: &InstallJob) -> Result<PreparedJob, VaneCliError> {
             let merged = merge_vane_into_toml(root, &job.path)?;
             encode_toml_pretty(&merged, &job.path)?
         }
+        ConfigFormat::Skill => unreachable!("skill jobs return early in prepare_job"),
     };
     Ok(PreparedJob::Write { action, bytes })
 }
@@ -676,36 +720,4 @@ fn encode_toml_pretty(value: &toml::Value, path: &Path) -> Result<Vec<u8>, VaneC
         body.push('\n');
     }
     Ok(body.into_bytes())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), VaneCliError> {
-    let dir = path.parent().ok_or_else(|| {
-        VaneCliError::new(format!("{label} path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(dir).map_err(|e| {
-        VaneCliError::new(format!("create {} parent {}: {e}", label, dir.display()))
-    })?;
-    let tmp = dir.join(format!(
-        "{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or(label)
-    ));
-    {
-        let mut f = File::create(&tmp).map_err(|e| {
-            VaneCliError::new(format!("create {} temp {}: {e}", label, tmp.display()))
-        })?;
-        f.write_all(bytes).map_err(|e| {
-            VaneCliError::new(format!("write {} temp {}: {e}", label, tmp.display()))
-        })?;
-        f.sync_all().map_err(|e| {
-            VaneCliError::new(format!("sync {} temp {}: {e}", label, tmp.display()))
-        })?;
-    }
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        VaneCliError::new(format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })
 }

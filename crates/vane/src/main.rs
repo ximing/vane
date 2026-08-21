@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::json;
 use vane::config::{
     default_exclude, default_types, inspect_policy, load_config, resolve_policy, ProjectFile,
@@ -21,12 +21,13 @@ struct Cli {
     home: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Write global config (re-run to edit; empty answers keep current values)
+    #[command(next_help_heading = "Common")]
     Init,
     /// Register a project root and notify the daemon
     Add {
@@ -35,7 +36,42 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Search the current project (or --all / --root)
+    Query {
+        /// Query text (omit on a TTY to be prompted)
+        q: Option<String>,
+        /// Fuse hits across every registered project (RRF)
+        #[arg(long)]
+        all: bool,
+        /// Force global scope (same as --all); ignore `.vane.toml` walk-up
+        #[arg(long)]
+        global: bool,
+        /// Search a single registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Filter by extractor name (`text` / `image`)
+        #[arg(long = "type")]
+        extractor: Option<String>,
+        /// Max hits (default 8, cap 50)
+        #[arg(long, default_value_t = 8)]
+        top_k: u32,
+        /// Also print internal hit ids
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Read the n-th hit of the last TTY query (chunk text; --file for the source file)
+    Read {
+        n: usize,
+        /// Print the whole source file from disk instead of the chunk
+        #[arg(long)]
+        file: bool,
+    },
+    /// Print the resolved home directory and daemon status
+    Status,
+    /// Diagnose sidecar home, daemon, embedder, and registered roots
+    Doctor,
     /// Unregister a project root (keeps CAS / project db until gc)
+    #[command(next_help_heading = "Manage")]
     Rm { path: PathBuf },
     /// Change the current project's include / types table
     Include {
@@ -47,10 +83,6 @@ enum Commands {
         #[command(subcommand)]
         action: GlobAction,
     },
-    /// Print the resolved home directory and daemon status
-    Status,
-    /// Diagnose sidecar home, daemon, embedder, and registered roots
-    Doctor,
     /// List skipped files (too large, invalid UTF-8, embed / extractor errors)
     Issues {
         /// Target a registered root
@@ -78,37 +110,6 @@ enum Commands {
         #[arg(long)]
         global: bool,
     },
-    /// Run the sidecar daemon in the foreground
-    Daemon,
-    /// Start the daemon (user service if installed, else background process)
-    Start,
-    /// Stop the daemon
-    Stop,
-    /// Search the current project (or --all / --root)
-    Query {
-        /// Query text
-        q: String,
-        /// Fuse hits across every registered project (RRF)
-        #[arg(long)]
-        all: bool,
-        /// Force global scope (same as --all); ignore `.vane.toml` walk-up
-        #[arg(long)]
-        global: bool,
-        /// Search a single registered root
-        #[arg(long)]
-        root: Option<PathBuf>,
-        /// Filter by extractor name (`text` / `image`)
-        #[arg(long = "type")]
-        extractor: Option<String>,
-        /// Max hits (default 8, cap 50)
-        #[arg(long, default_value_t = 8)]
-        top_k: u32,
-    },
-    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
-    Mcp {
-        #[command(subcommand)]
-        cmd: Option<McpCmd>,
-    },
     /// Change the embedding model and rebuild the project index
     Model {
         /// Write `[defaults.embed]` in the global config instead of `.vane.toml`
@@ -133,6 +134,30 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// JSON-RPC 2.0 MCP stdio bridge to a running daemon (no args), or `install`
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
+    /// Foreground-watch a root for index changes (client-side polling)
+    Watch {
+        /// Target a registered root
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Watch every registered root
+        #[arg(long)]
+        all: bool,
+        /// Polling interval in milliseconds (100..=60000)
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+    },
+    /// Run the sidecar daemon in the foreground
+    #[command(next_help_heading = "Ops")]
+    Daemon,
+    /// Start the daemon (user service if installed, else background process)
+    Start,
+    /// Stop the daemon
+    Stop,
     /// User service (launchd / systemd --user)
     Service {
         #[command(subcommand)]
@@ -202,11 +227,107 @@ fn resolved_home(cli_home: Option<&std::path::Path>) -> PathBuf {
     resolve_home(cli_home, env_home.as_deref(), &fallback)
 }
 
+/// Render top-level help with subcommands grouped by their
+/// `next_help_heading` markers (Common / Manage / Ops). clap only groups
+/// args by heading — subcommands always render under one "Commands:"
+/// section — so the grouping is rendered here instead (spec §4.2).
+fn grouped_help(cmd: &clap::Command) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if let Some(about) = cmd.get_about() {
+        let _ = writeln!(out, "{about}\n");
+    }
+    let _ = writeln!(out, "Usage: vane [OPTIONS] [COMMAND]\n");
+
+    let subs: Vec<&clap::Command> = cmd.get_subcommands().filter(|s| !s.is_hide_set()).collect();
+    let width = subs.iter().map(|s| s.get_name().len()).max().unwrap_or(2);
+    let mut groups: Vec<(&str, Vec<&clap::Command>)> = Vec::new();
+    for sub in subs {
+        if let Some(heading) = sub.get_next_help_heading() {
+            groups.push((heading, Vec::new()));
+        }
+        if groups.is_empty() {
+            groups.push(("Commands", Vec::new()));
+        }
+        if let Some((_, members)) = groups.last_mut() {
+            members.push(sub);
+        }
+    }
+    for (i, (heading, members)) in groups.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "{heading}:");
+        for sub in members {
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let _ = writeln!(out, "  {:width$}  {}", sub.get_name(), about, width = width);
+        }
+    }
+
+    let home_help = cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "home")
+        .and_then(|a| a.get_help())
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    let _ = writeln!(out, "\nOptions:");
+    let _ = writeln!(out, "      --home <HOME>  {home_help}");
+    let _ = writeln!(out, "  -h, --help         Print help");
+    let _ = writeln!(out, "  -V, --version      Print version");
+    out
+}
+
+/// Top-level command with the grouped help attached via `override_help`.
+fn build_cli() -> clap::Command {
+    let cmd = Cli::command();
+    let help = grouped_help(&cmd);
+    cmd.override_help(help)
+}
+
+fn parse_cli() -> Cli {
+    let matches = match build_cli().try_get_matches() {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(e.exit_code());
+        }
+    };
+    match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(e.exit_code());
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let home = resolved_home(cli.home.as_deref());
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        if !vane::ui::stdout_tty() {
+            let mut cmd = build_cli();
+            let _ = cmd.print_help();
+            println!();
+            return ExitCode::from(2);
+        }
+        let initialized = home.join("config").join("config.toml").is_file();
+        let running = vane::daemon::is_running(&home);
+        return match vane::dispatch::decide_bare(initialized, running) {
+            vane::dispatch::BareAction::InitHint => {
+                println!(
+                    "{}",
+                    vane::i18n::pick(vane::i18n::Lang::detect(), true, "bare.init_hint")
+                );
+                ExitCode::SUCCESS
+            }
+            vane::dispatch::BareAction::Doctor => run_doctor(&home),
+            vane::dispatch::BareAction::Status => run_status(&home),
+        };
+    };
+
+    match command {
         Commands::Init => run_init(&home),
         Commands::Add { path, yes } => run_add(&home, &path, yes),
         Commands::Rm { path } => run_rm(&home, &path),
@@ -230,6 +351,11 @@ fn main() -> ExitCode {
             None => run_mcp(&home),
             Some(McpCmd::Install { dry_run, client }) => run_mcp_install(dry_run, client),
         },
+        Commands::Watch {
+            root,
+            all,
+            interval_ms,
+        } => run_watch(&home, root, all, interval_ms),
         Commands::Query {
             q,
             all,
@@ -237,7 +363,25 @@ fn main() -> ExitCode {
             root,
             extractor,
             top_k,
-        } => run_query(&home, q, all || global, root, extractor, top_k),
+            verbose,
+        } => match vane::dispatch::decide_query_arg(q, vane::ui::interactive()) {
+            vane::dispatch::QueryArg::Run(q) => {
+                run_query(&home, q, all || global, root, extractor, top_k, verbose)
+            }
+            vane::dispatch::QueryArg::Prompt => match prompt_query_text() {
+                Some(q) => run_query(&home, q, all || global, root, extractor, top_k, verbose),
+                None => ExitCode::SUCCESS, // empty input cancels (spec §2.3)
+            },
+            vane::dispatch::QueryArg::MissingError => {
+                vane::ui::error(vane::i18n::pick(
+                    vane::i18n::Lang::detect(),
+                    false,
+                    "query.missing_query",
+                ));
+                ExitCode::from(2)
+            }
+        },
+        Commands::Read { n, file } => run_read(&home, n, file),
         Commands::Model {
             global,
             root,
@@ -258,14 +402,23 @@ fn main() -> ExitCode {
 fn require_init(home: &std::path::Path) -> Result<(), ExitCode> {
     let config = home.join("config").join("config.toml");
     if config.is_file() {
-        Ok(())
+        return Ok(());
+    }
+    // TTY renders in the detected language; non-TTY stderr stays English
+    // (spec §5.1 hard rule).
+    if vane::ui::stdout_tty() {
+        let lang = vane::i18n::Lang::detect();
+        eprintln!(
+            "{}",
+            vane::i18n::tr(lang, "init.required").replace("{path}", &config.display().to_string())
+        );
     } else {
         eprintln!(
             "not initialized: missing {}; run `vane init`",
             config.display()
         );
-        Err(ExitCode::from(1))
     }
+    Err(ExitCode::from(1))
 }
 
 fn run_init(home: &Path) -> ExitCode {
@@ -303,7 +456,7 @@ fn run_status(home: &Path) -> ExitCode {
         vane::doctor::status_from_disk(home, false)
     };
     if vane::ui::stdout_tty() {
-        vane::ui::print_status_dashboard(&v);
+        vane::ui::print_status_dashboard(home, &v);
         ExitCode::SUCCESS
     } else {
         print_json(&v)
@@ -562,11 +715,41 @@ fn add_root_poll_progress(
     let handle = std::thread::spawn(move || {
         vane::ipc::rpc_call(&home_rpc, "add_root", json!({ "path": path }))
     });
+    let mut bar: Option<indicatif::ProgressBar> = None;
     while !handle.is_finished() {
-        if let Some(progress) = vane::progress::load_progress(home) {
-            spin.set_message(vane::progress::spinner_message(&progress));
+        if let Some(p) = vane::progress::load_progress(home) {
+            match vane::progress::choose_progress_style(p.total_estimate) {
+                vane::progress::ProgressStyle::Spinner => {
+                    if bar.is_none() {
+                        spin.set_message(vane::progress::spinner_message(&p));
+                    }
+                }
+                vane::progress::ProgressStyle::Bar(total) => {
+                    let pb = bar.get_or_insert_with(|| {
+                        spin.finish_and_clear();
+                        let pb = indicatif::ProgressBar::new(total);
+                        if let Ok(style) =
+                            indicatif::ProgressStyle::with_template("{bar:30} {pos}/{len} {msg}")
+                        {
+                            pb.set_style(style);
+                        }
+                        pb
+                    });
+                    pb.set_length(total);
+                    pb.set_position(vane::progress::clamp_pos(p.scanned, total));
+                    pb.set_message(format!(
+                        "{} {}",
+                        p.phase.as_str(),
+                        vane::ui::collapse_home(&p.root)
+                    ));
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(80));
+    }
+    spin.finish_and_clear();
+    if let Some(pb) = &bar {
+        pb.finish_and_clear();
     }
     handle
         .join()
@@ -583,7 +766,13 @@ fn print_add_report(root: &Path, v: &serde_json::Value) {
         "added {}  scanned {scanned}  new {added}  embedded {embedded}  unchanged {unchanged}  skipped {skipped}",
         root.display()
     ));
-    if !vane::ui::interactive() {
+    if vane::ui::interactive() {
+        // Human summary is additive on TTY; the machine line above stays for parsers.
+        println!(
+            "{}",
+            vane::ui::format_add_summary(added, unchanged, skipped, vane::i18n::Lang::detect())
+        );
+    } else {
         print_json(v);
     }
 }
@@ -648,6 +837,122 @@ fn current_issues_root(home: &Path) -> Result<PathBuf, vane::error::VaneCliError
     find_current_root(&cwd, &roots).ok_or_else(|| {
         vane::error::VaneCliError::new("cwd is not inside a registered root; pass --root or --all")
     })
+}
+
+/// `vane watch` (spec §6.2): foreground observer that polls live + dirty state
+/// per root and prints a diff stream. Pure client-side polling — no new IPC, no
+/// hard daemon dependency (if the daemon is down it shows the current snapshot
+/// only). TTY prints human `event_line`s; non-TTY prints one JSON object per
+/// event. Human meta (start header, daemon-down hint) goes to stderr so stdout
+/// stays a pure event stream in both modes.
+fn run_watch(home: &Path, root: Option<PathBuf>, all: bool, interval_ms: u64) -> ExitCode {
+    if require_init(home).is_err() {
+        return ExitCode::from(1);
+    }
+    let tty = vane::ui::stdout_tty();
+    let lang = vane::i18n::Lang::detect();
+    if !vane::watch_diff::valid_interval(interval_ms) {
+        vane::ui::error(vane::i18n::pick(lang, tty, "watch.bad_interval"));
+        return ExitCode::from(2);
+    }
+    let cfg = match load_config(home) {
+        Ok(c) => c,
+        Err(e) => {
+            vane::ui::error(&e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let registered: Vec<PathBuf> = cfg
+        .projects
+        .iter()
+        .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
+        .collect();
+    let selected: Vec<PathBuf> = if all {
+        registered
+    } else if let Some(r) = root {
+        match resolve_root_arg(&r) {
+            Ok(p) => {
+                if !registered.iter().any(|reg| reg == &p) {
+                    let msg = vane::i18n::pick(lang, tty, "watch.not_registered")
+                        .replace("{path}", &p.display().to_string());
+                    vane::ui::error(&msg);
+                    return ExitCode::from(1);
+                }
+                vec![p]
+            }
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        match current_issues_root(home) {
+            Ok(p) => vec![p],
+            Err(e) => {
+                vane::ui::error(&e.message);
+                return ExitCode::from(1);
+            }
+        }
+    };
+
+    // Daemon-down is a one-shot hint, not fatal: the user may still want the
+    // current snapshot. Route to stderr so stdout stays a pure event stream.
+    if !vane::daemon::is_running(home) {
+        let msg = vane::i18n::pick(lang, tty, "watch.daemon_down");
+        if tty {
+            eprintln!("{}", vane::ui::dim(msg));
+        } else {
+            eprintln!("{msg}");
+        }
+    }
+
+    // Start header — one line per root (multi-root → one line each).
+    for r in &selected {
+        let line =
+            vane::i18n::pick(lang, tty, "watch.start").replace("{root}", &r.display().to_string());
+        eprintln!("{line}");
+    }
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // Per-root previous frame: (live set, dirty paths). Seeded once so the first
+    // poll diffs against the initial snapshot instead of emitting everything.
+    let mut state: std::collections::HashMap<String, (LiveSet, Vec<String>)> =
+        std::collections::HashMap::new();
+    for r in &selected {
+        let pid = project_id(r);
+        let live = LiveSet::load_for_project(home, &pid).unwrap_or_default();
+        let dirty = vane::dirty::DirtyQueue::load(&vane::dirty::dirty_path(home)).paths_for(&pid);
+        state.insert(r.display().to_string(), (live, dirty));
+    }
+
+    loop {
+        std::thread::sleep(Duration::from_millis(interval_ms));
+        for r in &selected {
+            let key = r.display().to_string();
+            let pid = project_id(r);
+            let live = LiveSet::load_for_project(home, &pid).unwrap_or_default();
+            let dirty =
+                vane::dirty::DirtyQueue::load(&vane::dirty::dirty_path(home)).paths_for(&pid);
+            let events = match state.get(&key) {
+                Some((prev_live, prev_dirty)) => {
+                    let mut ev = vane::watch_diff::diff_live(prev_live, &live);
+                    ev.extend(vane::watch_diff::diff_queued(prev_dirty, &dirty));
+                    ev
+                }
+                None => Vec::new(),
+            };
+            state.insert(key.clone(), (live, dirty));
+            for ev in &events {
+                if tty {
+                    println!("{}", vane::watch_diff::event_line(ev, lang));
+                } else {
+                    let obj = vane::watch_diff::event_json(ev, &key, vane::progress::unix_now());
+                    println!("{obj}");
+                }
+            }
+        }
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
 }
 
 fn run_rm(home: &Path, path: &Path) -> ExitCode {
@@ -910,6 +1215,24 @@ fn apply_glob_reset(
     }
 }
 
+fn prompt_query_text() -> Option<String> {
+    let lang = vane::i18n::Lang::detect();
+    let prompt = vane::i18n::tr(lang, "query.prompt");
+    let input: Result<String, _> = cliclack::input(prompt).interact();
+    match input {
+        Ok(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_query(
     home: &std::path::Path,
     q: String,
@@ -917,6 +1240,7 @@ fn run_query(
     root: Option<PathBuf>,
     extractor: Option<String>,
     top_k: u32,
+    verbose: bool,
 ) -> ExitCode {
     if require_init(home).is_err() {
         return ExitCode::from(1);
@@ -932,10 +1256,12 @@ fn run_query(
     if let Some(t) = extractor {
         params["type"] = json!(t);
     }
-    if all {
+    let resolved_root: Option<PathBuf> = if all {
         params["all"] = json!(true);
+        None
     } else if let Some(r) = root.as_ref() {
         params["root"] = json!(r.display().to_string());
+        Some(r.clone())
     } else {
         let cwd = match std::env::current_dir() {
             Ok(c) => c,
@@ -950,12 +1276,34 @@ fn run_query(
             .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
             .collect();
         match resolve_query_scope(&cwd, &roots, false) {
-            QueryScope::All => params["all"] = json!(true),
-            QueryScope::Root(r) => params["root"] = json!(r.display().to_string()),
+            QueryScope::All => {
+                params["all"] = json!(true);
+                None
+            }
+            QueryScope::Root(r) => {
+                params["root"] = json!(r.display().to_string());
+                Some(r)
+            }
         }
-    }
+    };
     match vane::ipc::rpc_call(home, "search", params) {
-        Ok(v) => print_search_result(home, &v, &q, all, root.as_deref()),
+        Ok(v) => {
+            // TTY only (spec §2.4): cache the last query — including the empty
+            // result — so `vane read <n>` can resolve it. A pipe must not
+            // clobber the human's cache.
+            if vane::ui::stdout_tty() {
+                save_query_cache(home, &q, &v, resolved_root.as_deref());
+            }
+            print_search_result(
+                home,
+                &v,
+                &q,
+                all,
+                root.as_deref(),
+                resolved_root.as_deref(),
+                verbose,
+            )
+        }
         Err(e) => {
             vane::ui::error(&e.message);
             ExitCode::from(1)
@@ -963,12 +1311,160 @@ fn run_query(
     }
 }
 
+/// Best-effort cache write for `vane read <n>`; failures never fail the query.
+fn save_query_cache(home: &Path, q: &str, v: &serde_json::Value, scope_root: Option<&Path>) {
+    let hits = v.as_array().cloned().unwrap_or_else(|| {
+        v.get("hits")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default()
+    });
+    let cached: Vec<vane::last_query::CachedHit> = hits
+        .iter()
+        .filter_map(|h| {
+            Some(vane::last_query::CachedHit {
+                id: h.get("id")?.as_str()?.to_string(),
+                path: h.get("path")?.as_str()?.to_string(),
+                root: h.get("root")?.as_str()?.to_string(),
+                score: h.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0),
+            })
+        })
+        .collect();
+    let last = vane::last_query::LastQuery {
+        query: q.to_string(),
+        at: vane::progress::unix_now(),
+        scope_root: scope_root.map(|r| r.display().to_string()),
+        hits: cached,
+    };
+    let _ = vane::last_query::save_last_query(home, &last);
+}
+
+fn run_read(home: &Path, n: usize, file: bool) -> ExitCode {
+    let lang = vane::i18n::Lang::detect();
+    let tty = vane::ui::stdout_tty();
+    let Some(q) = vane::last_query::load_last_query(home) else {
+        vane::ui::error(vane::i18n::pick(lang, tty, "read.no_cache"));
+        return ExitCode::from(1);
+    };
+    if file {
+        return run_read_file(&q, n, lang, tty);
+    }
+    match vane::last_query::read_outcome(home, &q, n) {
+        Ok(out) => {
+            if tty {
+                let meta = match &q.scope_root {
+                    Some(_) => format!(
+                        "{} · score {:.3} · chunk {}",
+                        out.hit.path, out.hit.score, out.chunk_index
+                    ),
+                    None => format!(
+                        "{} :: {} · score {:.3} · chunk {}",
+                        out.hit.root, out.hit.path, out.hit.score, out.chunk_index
+                    ),
+                };
+                println!("{}\n", vane::ui::dim(&meta));
+            }
+            println!("{}", out.text);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            vane::ui::error(&read_error_message(&e, lang, tty));
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn read_error_message(
+    e: &vane::last_query::ReadError,
+    lang: vane::i18n::Lang,
+    tty: bool,
+) -> String {
+    use vane::last_query::ReadError;
+    match e {
+        ReadError::Empty => vane::i18n::pick(lang, tty, "read.empty").to_string(),
+        ReadError::OutOfRange { n, k } => vane::i18n::pick(lang, tty, "read.out_of_range")
+            .replace("{n}", &n.to_string())
+            .replace("{k}", &k.to_string()),
+        ReadError::Stale { n } => {
+            vane::i18n::pick(lang, tty, "read.stale").replace("{n}", &n.to_string())
+        }
+    }
+}
+
+/// `--file`: print the whole source file from disk (unaffected by staleness).
+fn run_read_file(
+    q: &vane::last_query::LastQuery,
+    n: usize,
+    lang: vane::i18n::Lang,
+    tty: bool,
+) -> ExitCode {
+    let hit = match vane::last_query::hit_at(q, n) {
+        Ok(h) => h,
+        Err(e) => {
+            vane::ui::error(&read_error_message(&e, lang, tty));
+            return ExitCode::from(1);
+        }
+    };
+    let path = Path::new(&hit.root).join(&hit.path);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            let msg = vane::i18n::pick(lang, tty, "read.file_missing")
+                .replace("{path}", &path.display().to_string());
+            vane::ui::error(&msg);
+            return ExitCode::from(1);
+        }
+    };
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        let msg = vane::i18n::pick(lang, tty, "read.binary")
+            .replace("{path}", &path.display().to_string())
+            .replace("{extractor}", "binary");
+        vane::ui::error(&msg);
+        return ExitCode::from(1);
+    }
+    // Body only, even on a TTY: pipe-friendly (spec §2.4).
+    print!("{}", String::from_utf8_lossy(&bytes));
+    ExitCode::SUCCESS
+}
+
+/// Header data for the resolved scope: (root label, root count, live files).
+fn header_scope(home: &Path, resolved_root: Option<&Path>) -> (Option<String>, usize, u64) {
+    match resolved_root {
+        Some(r) => {
+            let pid = project_id(r);
+            let live = LiveSet::load_for_project(home, &pid)
+                .map(|l| l.files.len() as u64)
+                .unwrap_or(0);
+            (
+                Some(vane::ui::collapse_home(&r.display().to_string())),
+                1,
+                live,
+            )
+        }
+        None => match load_config(home) {
+            Ok(cfg) => {
+                let roots: Vec<PathBuf> = cfg
+                    .projects
+                    .iter()
+                    .map(|p| p.path.canonicalize().unwrap_or_else(|_| p.path.clone()))
+                    .collect();
+                let live = count_live_files(home, &roots);
+                (None, roots.len(), live)
+            }
+            Err(_) => (None, 0, 0),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_search_result(
     home: &Path,
     v: &serde_json::Value,
     q: &str,
     all: bool,
     root: Option<&Path>,
+    resolved_root: Option<&Path>,
+    verbose: bool,
 ) -> ExitCode {
     let hits = v.as_array().cloned().unwrap_or_else(|| {
         v.get("hits")
@@ -976,19 +1472,39 @@ fn print_search_result(
             .cloned()
             .unwrap_or_default()
     });
+    let tty = vane::ui::stdout_tty();
+    let degraded = hits
+        .iter()
+        .any(|h| h.get("degraded").and_then(|x| x.as_bool()).unwrap_or(false));
+    if tty {
+        // Spec §2.1: the scope header prints even when the result is empty.
+        let (root_label, roots, live) = header_scope(home, resolved_root);
+        let lang = vane::i18n::Lang::detect();
+        println!(
+            "{}",
+            vane::ui::format_scope_header(
+                root_label.as_deref(),
+                roots,
+                live,
+                degraded,
+                lang,
+                vane::ui::colors_enabled(),
+            )
+        );
+    }
     if hits.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let why = vane::doctor::explain_empty_query(home, &cwd, q, all, root);
-        if vane::ui::stdout_tty() {
-            vane::ui::print_why(&why.message);
+        if tty {
+            vane::ui::print_why(why.id, &why.message);
             return ExitCode::SUCCESS;
         }
         print_json(v);
         eprintln!("{}", why.message);
         return ExitCode::SUCCESS;
     }
-    if vane::ui::stdout_tty() {
-        vane::ui::print_hits(&hits);
+    if tty {
+        vane::ui::print_hits(&hits, resolved_root.is_none(), verbose, degraded);
         ExitCode::SUCCESS
     } else {
         print_json(v)
@@ -1030,7 +1546,7 @@ fn run_model(
     let targets: Vec<PathBuf> = if global {
         roots
     } else if let Some(r) = root {
-        let expanded = expand_tilde(&r);
+        let expanded = vane::fsutil::expand_tilde(&r);
         vec![expanded.canonicalize().unwrap_or(expanded)]
     } else {
         let cwd = match std::env::current_dir() {
@@ -1362,7 +1878,7 @@ fn resolve_policy_root(
 }
 
 fn resolve_root_arg(path: &Path) -> Result<PathBuf, vane::error::VaneCliError> {
-    let expanded = expand_tilde(path);
+    let expanded = vane::fsutil::expand_tilde(path);
     let abs = if expanded.is_absolute() {
         expanded
     } else {
@@ -1389,21 +1905,4 @@ fn print_json(v: &serde_json::Value) -> ExitCode {
         Err(_) => println!("{v}"),
     }
     ExitCode::SUCCESS
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if s == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path.to_path_buf()
 }
