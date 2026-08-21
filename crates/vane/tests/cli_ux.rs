@@ -475,6 +475,16 @@ mod bare_dispatch_tests {
         let query_pos = stdout.find("query").unwrap();
         assert!(query_pos > common_pos);
         assert!(query_pos < stdout.find("Manage:").unwrap());
+        // Guardrail: `grouped_help` hand-renders the Usage/Options block
+        // (Usage line + --home + -h/--help + -V/--version) rather than letting
+        // clap emit it. If a future global arg is added to `Cli` but not to
+        // `grouped_help`, the top-level --help silently drops it. Asserting the
+        // existing global `--home` appears catches that drift.
+        assert!(
+            stdout.contains("--home"),
+            "global --home arg must appear in --help; if grouped_help stopped rendering it, \
+             it will not — add it there. Output:\n{stdout}"
+        );
     }
 }
 
