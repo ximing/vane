@@ -357,9 +357,11 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Fuzz smoke (60s per target, 5 targets)
+        # cargo-fuzz 默认在「非 fuzz」package 下找 fuzz/；workspace 根不是
+        # fuzz crate，vane-fuzz 自己才是。必须 --fuzz-dir . 指向本目录。
         run: |
           for target in brute_search_fuzz hnsw_search_fuzz persist_roundtrip_fuzz merge_fuzz dict_load_fuzz; do
-            cargo fuzz run $target -- -max_total_time=60 -max_len=4096
+            cargo fuzz run --fuzz-dir . $target -- -max_total_time=60 -max_len=4096
           done
         working-directory: crates/vane-fuzz
 
@@ -383,7 +385,7 @@ jobs:
       - name: Fuzz long (10min per target, 5 targets)
         run: |
           for target in brute_search_fuzz hnsw_search_fuzz persist_roundtrip_fuzz merge_fuzz dict_load_fuzz; do
-            cargo fuzz run $target -- -max_total_time=600 -max_len=65536 || true
+            cargo fuzz run --fuzz-dir . $target -- -max_total_time=600 -max_len=65536 || true
           done
         working-directory: crates/vane-fuzz
       - name: Upload crash artifacts
