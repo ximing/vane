@@ -351,3 +351,63 @@ mod last_query_tests {
         assert_eq!(out.chunk_index, 0);
     }
 }
+
+mod status_tests {
+    use vane::i18n::Lang;
+
+    fn sample_status() -> serde_json::Value {
+        serde_json::json!({
+            "home": "/h/.vane",
+            "running": true,
+            "dirty_queue_size": 0,
+            "disk": { "home_bytes": 2048, "cas_bytes": 1024 },
+            "roots": [{
+                "path": "/abs/notes", "live_files": 12,
+                "last_reconcile": 1_755_699_700u64, // 300s before NOW
+                "model": "nomic-embed-text", "dim": 768,
+                "dirty_queue_size": 0, "skip_count": 12
+            }]
+        })
+    }
+
+    const NOW: u64 = 1_755_700_000;
+
+    #[test]
+    fn watching_and_humanized_root_lines() {
+        let view = vane::ui::status_view(&sample_status(), None);
+        let lines = vane::ui::format_status_lines(&view, Lang::En, NOW);
+        let joined = lines.join("\n");
+        assert!(joined.contains("watching"), "{joined}");
+        assert!(joined.contains("indexed 5 min ago"), "{joined}");
+        assert!(joined.contains("12 skipped — run vane issues"), "{joined}");
+        assert!(
+            !joined.contains("1755699700"),
+            "no raw unix seconds: {joined}"
+        );
+        assert!(
+            !joined.contains("pending changes"),
+            "dirty=0 must not print"
+        );
+    }
+
+    #[test]
+    fn indexing_state_and_never_indexed() {
+        let mut v = sample_status();
+        v["roots"][0]["last_reconcile"] = serde_json::Value::Null;
+        let view = vane::ui::status_view(&v, Some((34, 120)));
+        let lines = vane::ui::format_status_lines(&view, Lang::Zh, NOW).join("\n");
+        assert!(lines.contains("索引中 34/120"), "{lines}");
+        assert!(lines.contains("从未索引"), "{lines}");
+        assert!(lines.contains("12 个文件被跳过"), "{lines}");
+    }
+
+    #[test]
+    fn daemon_stopped_keeps_existing_warning() {
+        let mut v = sample_status();
+        v["running"] = serde_json::json!(false);
+        let view = vane::ui::status_view(&v, None);
+        let lines = vane::ui::format_status_lines(&view, Lang::En, NOW).join("\n");
+        assert!(lines.contains("daemon not running — vane start"), "{lines}");
+        assert!(!lines.contains("watching"));
+    }
+}
