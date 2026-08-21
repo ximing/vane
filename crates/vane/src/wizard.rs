@@ -59,7 +59,11 @@ where
 {
     let cfg_path = home.join("config").join("config.toml");
     let existing = crate::config::load_config(home).ok();
-    let lang = Lang::detect();
+    let lang = if crate::ui::interactive() {
+        Lang::detect()
+    } else {
+        Lang::En
+    };
     let answers = match assume {
         Some(a) => a,
         None => {
