@@ -590,11 +590,41 @@ fn add_root_poll_progress(
     let handle = std::thread::spawn(move || {
         vane::ipc::rpc_call(&home_rpc, "add_root", json!({ "path": path }))
     });
+    let mut bar: Option<indicatif::ProgressBar> = None;
     while !handle.is_finished() {
-        if let Some(progress) = vane::progress::load_progress(home) {
-            spin.set_message(vane::progress::spinner_message(&progress));
+        if let Some(p) = vane::progress::load_progress(home) {
+            match vane::progress::choose_progress_style(p.total_estimate) {
+                vane::progress::ProgressStyle::Spinner => {
+                    if bar.is_none() {
+                        spin.set_message(vane::progress::spinner_message(&p));
+                    }
+                }
+                vane::progress::ProgressStyle::Bar(total) => {
+                    let pb = bar.get_or_insert_with(|| {
+                        spin.finish_and_clear();
+                        let pb = indicatif::ProgressBar::new(total);
+                        if let Ok(style) =
+                            indicatif::ProgressStyle::with_template("{bar:30} {pos}/{len} {msg}")
+                        {
+                            pb.set_style(style);
+                        }
+                        pb
+                    });
+                    pb.set_length(total);
+                    pb.set_position(vane::progress::clamp_pos(p.scanned, total));
+                    pb.set_message(format!(
+                        "{} {}",
+                        p.phase.as_str(),
+                        vane::ui::collapse_home(&p.root)
+                    ));
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(80));
+    }
+    spin.finish_and_clear();
+    if let Some(pb) = &bar {
+        pb.finish_and_clear();
     }
     handle
         .join()
@@ -611,7 +641,13 @@ fn print_add_report(root: &Path, v: &serde_json::Value) {
         "added {}  scanned {scanned}  new {added}  embedded {embedded}  unchanged {unchanged}  skipped {skipped}",
         root.display()
     ));
-    if !vane::ui::interactive() {
+    if vane::ui::interactive() {
+        // Human summary is additive on TTY; the machine line above stays for parsers.
+        println!(
+            "{}",
+            vane::ui::format_add_summary(added, unchanged, skipped, vane::i18n::Lang::detect())
+        );
+    } else {
         print_json(v);
     }
 }

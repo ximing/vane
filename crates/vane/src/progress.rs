@@ -10,6 +10,26 @@ use crate::project::project_id;
 
 pub const SKIPS_CAP: usize = 200;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressStyle {
+    Spinner,
+    Bar(u64),
+}
+
+/// Bar once the daemon knows the total; spinner during the initial scan window.
+pub fn choose_progress_style(total_estimate: u64) -> ProgressStyle {
+    if total_estimate == 0 {
+        ProgressStyle::Spinner
+    } else {
+        ProgressStyle::Bar(total_estimate)
+    }
+}
+
+/// Cap the bar position at its length (total_estimate can lag the true scan count).
+pub fn clamp_pos(scanned: u64, total: u64) -> u64 {
+    scanned.min(total)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressPhase {
