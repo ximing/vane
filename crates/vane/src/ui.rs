@@ -8,8 +8,9 @@ use crate::config::InspectReport;
 use crate::doctor::{CheckLevel, DoctorReport};
 use crate::gc::GcReport;
 use crate::home::DiskStats;
+use crate::i18n::Lang;
 use crate::mcp::McpInstallReport;
-use crate::progress::IssuesReport;
+use crate::progress::{IssuesReport, ProgressPhase};
 
 pub fn colors_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
@@ -85,40 +86,143 @@ pub fn spinner(message: &str) -> ProgressBar {
     pb
 }
 
-pub fn print_hits(hits: &[serde_json::Value]) {
+/// Fold a leading $HOME into `~` for display.
+pub fn collapse_home(path: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if path == home.as_ref() {
+            return "~".to_string();
+        }
+        if let Some(rest) = path.strip_prefix(format!("{home}/").as_str()) {
+            return format!("~/{rest}");
+        }
+    }
+    path.to_string()
+}
+
+/// The one-line scope header printed before TTY query hits (spec §2.1).
+pub fn format_scope_header(
+    root: Option<&str>,
+    roots: usize,
+    live: u64,
+    degraded: bool,
+    lang: Lang,
+    colors: bool,
+) -> String {
+    let mode = if degraded {
+        crate::i18n::tr(lang, "header.degraded").to_string()
+    } else {
+        crate::i18n::tr(lang, "header.hybrid").to_string()
+    };
+    let text = match root {
+        Some(r) => crate::i18n::tr(lang, "header.searching_one")
+            .replace("{root}", r)
+            .replace("{n}", &live.to_string())
+            .replace("{mode}", &mode),
+        None => crate::i18n::tr(lang, "header.searching_all")
+            .replace("{k}", &roots.to_string())
+            .replace("{n}", &live.to_string())
+            .replace("{mode}", &mode),
+    };
+    if colors && degraded {
+        // Approved simplification: only the degraded mode substring is colored.
+        text.replace(&mode, &style(&mode).yellow().to_string())
+    } else {
+        text
+    }
+}
+
+/// One-line human summary after `vane add` (TTY only; the machine line stays).
+/// `added + unchanged` is the indexed work-set total.
+pub fn format_add_summary(added: u64, unchanged: u64, skipped: u64, lang: Lang) -> String {
+    let n = added + unchanged;
+    let key = if skipped == 0 {
+        "add.summary"
+    } else {
+        "add.summary_skipped"
+    };
+    crate::i18n::tr(lang, key)
+        .replace("{n}", &n.to_string())
+        .replace("{skipped}", &skipped.to_string())
+}
+
+pub struct HitLineOpts {
+    pub all: bool,
+    pub verbose: bool,
+    pub header_degraded: bool,
+}
+
+/// Pure per-hit line assembly; `print_hits` is a thin shell over this.
+pub fn hit_lines(
+    hit: &serde_json::Value,
+    index: usize,
+    opts: &HitLineOpts,
+    colors: bool,
+) -> Vec<String> {
+    let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let path = hit.get("path").and_then(|v| v.as_str()).unwrap_or("-");
+    let root = hit.get("root").and_then(|v| v.as_str()).unwrap_or("");
+    let snippet = hit.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+    let degraded = hit
+        .get("degraded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let dim_if = |msg: &str| {
+        if colors {
+            style(msg).dim().to_string()
+        } else {
+            msg.to_string()
+        }
+    };
+    let n = index + 1;
+    let mut lines = Vec::new();
+    if colors {
+        lines.push(format!(
+            "{} {} {}",
+            style(format!("{n:>2}.")).cyan().bold(),
+            style(format!("{score:.3}")).magenta(),
+            style(path).green()
+        ));
+    } else {
+        lines.push(format!("{n:>2}. {score:.3}  {path}"));
+    }
+    if opts.all && !root.is_empty() {
+        lines.push(format!("    {}", dim_if(root)));
+    }
+    if !snippet.is_empty() {
+        lines.push(format!("    {snippet}"));
+    }
+    if degraded && !opts.header_degraded {
+        if colors {
+            lines.push(format!(
+                "    {} degraded (BM25 only; embedder unreachable)",
+                style("⚠").yellow().bold()
+            ));
+        } else {
+            lines.push("    warning: degraded (BM25 only; embedder unreachable)".to_string());
+        }
+    }
+    if opts.verbose && !id.is_empty() {
+        lines.push(format!("    {}", dim_if(&format!("id {id}"))));
+    }
+    lines
+}
+
+pub fn print_hits(hits: &[serde_json::Value], all: bool, verbose: bool, header_degraded: bool) {
     if hits.is_empty() {
         warn("no hits");
         return;
     }
+    let opts = HitLineOpts {
+        all,
+        verbose,
+        header_degraded,
+    };
+    let colors = colors_enabled();
     for (i, hit) in hits.iter().enumerate() {
-        let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let path = hit.get("path").and_then(|v| v.as_str()).unwrap_or("-");
-        let root = hit.get("root").and_then(|v| v.as_str()).unwrap_or("");
-        let snippet = hit.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
-        let degraded = hit
-            .get("degraded")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let n = i + 1;
-        if colors_enabled() {
-            print!("{} ", style(format!("{n:>2}.")).cyan().bold());
-            print!("{} ", style(format!("{score:.3}")).magenta());
-            println!("{}", style(path).green());
-        } else {
-            println!("{n:>2}. {score:.3}  {path}");
-        }
-        if !root.is_empty() {
-            println!("    {}", dim(root));
-        }
-        if !snippet.is_empty() {
-            println!("    {snippet}");
-        }
-        if degraded {
-            warn("    degraded (BM25 only; embedder unreachable)");
-        }
-        if !id.is_empty() {
-            println!("    {}", dim(&format!("id {id}")));
+        for line in hit_lines(hit, i, &opts, colors) {
+            println!("{line}");
         }
     }
 }
@@ -189,9 +293,23 @@ pub fn print_mcp_install(report: &McpInstallReport) {
             dim(&format!("{} ({})", skip.path, skip.reason))
         );
     }
+    println!(
+        "{}",
+        crate::i18n::tr(crate::i18n::Lang::detect(), "mcp.done_new_session")
+    );
 }
 
-pub fn print_why(reason: &str) {
+/// TTY-only: render the empty-query reason in the detected language, falling
+/// back to the (dynamic, English) message when the key is unknown.
+pub fn print_why(id: &str, fallback_en: &str) {
+    let lang = Lang::detect();
+    let key = format!("why.{id}");
+    let text = crate::i18n::tr(lang, &key);
+    let reason = if text == "missing-i18n-key" {
+        fallback_en
+    } else {
+        text
+    };
     if colors_enabled() {
         println!(
             "{} {}",
@@ -204,8 +322,14 @@ pub fn print_why(reason: &str) {
 }
 
 pub fn print_doctor(report: &DoctorReport) {
+    let lang = Lang::detect();
     for check in &report.checks {
-        print_doctor_check(check.level, &check.id, &check.message, &check.fix);
+        let (message, fix) = if lang == Lang::Zh && !check.message_zh.is_empty() {
+            (check.message_zh.as_str(), check.fix_zh.as_str())
+        } else {
+            (check.message.as_str(), check.fix.as_str())
+        };
+        print_doctor_check(check.level, &check.id, message, fix);
     }
 }
 
@@ -239,66 +363,184 @@ fn print_doctor_check(level: CheckLevel, id: &str, message: &str, fix: &str) {
     }
 }
 
-pub fn print_status_dashboard(v: &serde_json::Value) {
-    if let Some(home) = v.get("home").and_then(|x| x.as_str()) {
-        println!("{} {}", dim("home"), accent(home));
-    }
+pub struct RootStatusView {
+    pub path: String,
+    pub live: u64,
+    pub last_reconcile: Option<u64>,
+    pub model: String,
+    pub dim: Option<u64>,
+    pub dirty: u64,
+    pub skips: u64,
+    pub last_error: Option<String>,
+}
+
+pub struct StatusView {
+    pub home: String,
+    pub running: bool,
+    pub indexing: Option<(u64, u64)>, // (scanned, total) when progress phase != Idle
+    pub dirty_total: u64,
+    pub disk_home: u64,
+    pub disk_cas: u64,
+    pub last_error: Option<String>,
+    pub roots: Vec<RootStatusView>,
+}
+
+/// Defensive JSON → view extraction (same read paths as the old dashboard).
+pub fn status_view(v: &serde_json::Value, indexing: Option<(u64, u64)>) -> StatusView {
+    let home = v
+        .get("home")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let running = v.get("running").and_then(|x| x.as_bool()).unwrap_or(false);
-    if running {
-        success("daemon running");
+    let dirty_total = v
+        .get("dirty_queue_size")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let (disk_home, disk_cas) = v
+        .get("disk")
+        .map(|d| {
+            (
+                d.get("home_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+                d.get("cas_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+    let last_error = last_error_text(v.get("last_error"));
+    let roots = v
+        .get("roots")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|root| RootStatusView {
+                    path: root
+                        .get("path")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                    live: root.get("live_files").and_then(|x| x.as_u64()).unwrap_or(0),
+                    last_reconcile: root.get("last_reconcile").and_then(|x| x.as_u64()),
+                    model: root
+                        .get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    dim: root.get("dim").and_then(|x| x.as_u64()),
+                    dirty: root
+                        .get("dirty_queue_size")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                    skips: root.get("skip_count").and_then(|x| x.as_u64()).unwrap_or(0),
+                    last_error: last_error_text(root.get("last_error")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    StatusView {
+        home,
+        running,
+        indexing,
+        dirty_total,
+        disk_home,
+        disk_cas,
+        last_error,
+        roots,
+    }
+}
+
+/// Plain-text (no color) status lines; the unit-testable data layer.
+pub fn format_status_lines(view: &StatusView, lang: Lang, now: u64) -> Vec<String> {
+    use crate::i18n::tr;
+    let mut lines = Vec::new();
+    if !view.home.is_empty() {
+        lines.push(format!("home {}", view.home));
+    }
+    let daemon = if !view.running {
+        // Fixed English in both languages (not in the i18n tables).
+        "daemon not running — vane start".to_string()
+    } else if let Some((s, t)) = view.indexing {
+        format!(
+            "daemon {}",
+            tr(lang, "status.indexing")
+                .replace("{scanned}", &s.to_string())
+                .replace("{total}", &t.to_string())
+        )
     } else {
-        warn("daemon not running — vane start");
-    }
-    if let Some(n) = v.get("dirty_queue_size").and_then(|x| x.as_u64()) {
-        println!("{} {}", dim("dirty"), accent(&n.to_string()));
-    }
-    if let Some(disk) = v.get("disk") {
-        let home_b = disk.get("home_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
-        let cas_b = disk.get("cas_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
-        println!(
-            "{} {}  {} {}",
-            dim("disk"),
-            accent(&fmt_bytes(home_b)),
-            dim("cas"),
-            dim(&fmt_bytes(cas_b))
-        );
-    }
-    if let Some(err) = last_error_text(v.get("last_error")) {
-        println!("{} {err}", dim("last_error"));
-    }
-    let Some(roots) = v.get("roots").and_then(|p| p.as_array()) else {
-        return;
+        format!("daemon {}", tr(lang, "status.watching"))
     };
-    if roots.is_empty() {
-        println!("{}", dim("no registered roots"));
-        return;
+    lines.push(daemon);
+    lines.push(format!("dirty {}", view.dirty_total));
+    lines.push(format!(
+        "disk {}  cas {}",
+        fmt_bytes(view.disk_home),
+        fmt_bytes(view.disk_cas)
+    ));
+    if let Some(err) = &view.last_error {
+        lines.push(format!("last_error {err}"));
     }
-    for root in roots {
-        let path = root.get("path").and_then(|x| x.as_str()).unwrap_or("?");
-        println!("{} {}", accent("root"), path);
-        let live = root.get("live_files").and_then(|x| x.as_u64()).unwrap_or(0);
-        println!("  {} {}", dim("live_files"), accent(&live.to_string()));
-        match root.get("last_reconcile").and_then(|x| x.as_u64()) {
-            Some(ts) => println!("  {} {ts}", dim("last_reconcile")),
-            None => println!("  {} {}", dim("last_reconcile"), dim("never")),
+    if view.roots.is_empty() {
+        lines.push("no registered roots".to_string());
+        return lines;
+    }
+    for r in &view.roots {
+        lines.push(format!("root {}", r.path));
+        lines.push(format!("  live_files {}", r.live));
+        let reconciled = match r.last_reconcile {
+            Some(ts) if ts > 0 => tr(lang, "status.indexed_ago")
+                .replace("{ago}", &crate::humanize::rel_time(ts, now, lang)),
+            _ => tr(lang, "status.never_indexed").to_string(),
+        };
+        lines.push(format!("  {reconciled}"));
+        let dim_s = r.dim.map(|d| d.to_string()).unwrap_or_else(|| "-".into());
+        lines.push(format!("  model {}  dim {dim_s}", r.model));
+        if r.dirty > 0 {
+            lines.push(format!(
+                "  {}",
+                tr(lang, "status.pending_changes").replace("{n}", &r.dirty.to_string())
+            ));
         }
-        let model = root.get("model").and_then(|x| x.as_str()).unwrap_or("-");
-        let dim_v = root
-            .get("dim")
-            .and_then(|x| x.as_u64())
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "-".into());
-        println!("  {} {}  {} {dim_v}", dim("model"), dim(model), dim("dim"));
-        if let Some(n) = root.get("dirty_queue_size").and_then(|x| x.as_u64()) {
-            println!("  {} {n}", dim("dirty"));
+        if let Some(err) = &r.last_error {
+            lines.push(format!("  last_error {err}"));
         }
-        if let Some(err) = last_error_text(root.get("last_error")) {
-            println!("  {} {err}", dim("last_error"));
-        }
-        if let Some(n) = root.get("skip_count").and_then(|x| x.as_u64()) {
-            println!("  {} {n}", dim("skips"));
+        if r.skips > 0 {
+            lines.push(format!(
+                "  {}",
+                tr(lang, "status.skipped_hint").replace("{n}", &r.skips.to_string())
+            ));
         }
     }
+    lines
+}
+
+/// Thin shell: load progress, detect lang, print with minimal coloring.
+pub fn print_status_dashboard(home: &std::path::Path, v: &serde_json::Value) {
+    let indexing = crate::progress::load_progress(home)
+        .filter(|p| p.phase != ProgressPhase::Idle)
+        .map(|p| (p.scanned, p.total_estimate));
+    let view = status_view(v, indexing);
+    let lang = Lang::detect();
+    let now = crate::progress::unix_now();
+    let colors = colors_enabled();
+    for line in format_status_lines(&view, lang, now) {
+        println!("{}", color_status_line(&line, colors));
+    }
+}
+
+/// Minimal coloring: root/home paths and numbers only; everything else plain.
+fn color_status_line(line: &str, colors: bool) -> String {
+    if !colors {
+        return line.to_string();
+    }
+    if let Some(rest) = line.strip_prefix("home ") {
+        return format!("{} {}", style("home").dim(), style(rest).cyan().bold());
+    }
+    if let Some(rest) = line.strip_prefix("root ") {
+        return format!("{} {}", style("root").cyan().bold(), style(rest).green());
+    }
+    if line == "daemon not running — vane start" {
+        return format!("{} {line}", style("⚠").yellow().bold());
+    }
+    line.to_string()
 }
 
 fn last_error_text(v: Option<&serde_json::Value>) -> Option<String> {

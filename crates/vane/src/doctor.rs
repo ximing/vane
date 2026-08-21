@@ -33,6 +33,34 @@ pub struct DoctorCheck {
     pub level: CheckLevel,
     pub message: String,
     pub fix: String,
+    /// TTY-only zh rendering (spec §5.1 hard rule): never serialized, so the
+    /// JSON consumer surface stays byte-identical English.
+    #[serde(skip)]
+    pub message_zh: String,
+    #[serde(skip)]
+    pub fix_zh: String,
+}
+
+impl DoctorCheck {
+    /// Bilingual constructor: `message_en`/`fix_en` feed JSON and non-TTY
+    /// output; the `_zh` halves are used only by TTY rendering under zh lang.
+    pub fn bi(
+        id: &str,
+        level: CheckLevel,
+        message_en: &str,
+        message_zh: &str,
+        fix_en: &str,
+        fix_zh: &str,
+    ) -> DoctorCheck {
+        DoctorCheck {
+            id: id.to_string(),
+            level,
+            message: message_en.to_string(),
+            fix: fix_en.to_string(),
+            message_zh: message_zh.to_string(),
+            fix_zh: fix_zh.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,7 +252,7 @@ pub fn explain_empty_query(
         .map(|p| {
             p.path
                 .canonicalize()
-                .unwrap_or_else(|_| expand_tilde(&p.path))
+                .unwrap_or_else(|_| crate::fsutil::expand_tilde(&p.path))
         })
         .collect();
     let in_root = find_current_root(cwd, &registered);
@@ -289,32 +317,38 @@ fn why(id: &'static str, message: impl Into<String>) -> EmptyQueryWhy {
 fn check_config(home: &Path, checks: &mut Vec<DoctorCheck>) -> Option<Config> {
     let path = home.join("config").join("config.toml");
     if !path.is_file() {
-        checks.push(DoctorCheck {
-            id: "config".into(),
-            level: CheckLevel::Red,
-            message: format!("missing {}", path.display()),
-            fix: "run `vane init`".into(),
-        });
+        checks.push(DoctorCheck::bi(
+            "config",
+            CheckLevel::Red,
+            &format!("missing {}", path.display()),
+            &format!("缺少 {}", path.display()),
+            "run `vane init`",
+            "运行 vane init",
+        ));
         return None;
     }
     match load_config(home) {
         Ok(cfg) => {
-            checks.push(DoctorCheck {
-                id: "config".into(),
-                level: CheckLevel::Green,
-                message: format!("{} exists", path.display()),
-                fix: String::new(),
-            });
+            checks.push(DoctorCheck::bi(
+                "config",
+                CheckLevel::Green,
+                &format!("{} exists", path.display()),
+                &format!("{} 存在", path.display()),
+                "",
+                "",
+            ));
             check_config_mode(&path, checks);
             Some(cfg)
         }
         Err(e) => {
-            checks.push(DoctorCheck {
-                id: "config".into(),
-                level: CheckLevel::Red,
-                message: e.message,
-                fix: "fix config.toml or re-run `vane init`".into(),
-            });
+            checks.push(DoctorCheck::bi(
+                "config",
+                CheckLevel::Red,
+                &e.message,
+                &format!("config 解析失败：{}", e.message),
+                "fix config.toml or re-run `vane init`",
+                "修复 config.toml 或重新运行 vane init",
+            ));
             if path.is_file() {
                 check_config_mode(&path, checks);
             }
@@ -325,193 +359,245 @@ fn check_config(home: &Path, checks: &mut Vec<DoctorCheck>) -> Option<Config> {
 
 fn check_config_mode(path: &Path, checks: &mut Vec<DoctorCheck>) {
     let Ok(meta) = fs::metadata(path) else {
-        checks.push(DoctorCheck {
-            id: "config_mode".into(),
-            level: CheckLevel::Red,
-            message: format!("cannot stat {}", path.display()),
-            fix: format!("chmod 0600 {}", path.display()),
-        });
+        checks.push(DoctorCheck::bi(
+            "config_mode",
+            CheckLevel::Red,
+            &format!("cannot stat {}", path.display()),
+            &format!("无法 stat {}", path.display()),
+            &format!("chmod 0600 {}", path.display()),
+            &format!("chmod 0600 {}", path.display()),
+        ));
         return;
     };
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o004 != 0 {
-        checks.push(DoctorCheck {
-            id: "config_mode".into(),
-            level: CheckLevel::Red,
-            message: format!("{} is world-readable ({mode:04o})", path.display()),
-            fix: format!("chmod 0600 {}", path.display()),
-        });
+        checks.push(DoctorCheck::bi(
+            "config_mode",
+            CheckLevel::Red,
+            &format!("{} is world-readable ({mode:04o})", path.display()),
+            &format!("{} 权限为 {mode:04o}，全局可读", path.display()),
+            &format!("chmod 0600 {}", path.display()),
+            &format!("chmod 0600 {}", path.display()),
+        ));
     } else if mode != 0o600 {
-        checks.push(DoctorCheck {
-            id: "config_mode".into(),
-            level: CheckLevel::Yellow,
-            message: format!("{} mode is {mode:04o}, expected 0600", path.display()),
-            fix: format!("chmod 0600 {}", path.display()),
-        });
+        checks.push(DoctorCheck::bi(
+            "config_mode",
+            CheckLevel::Yellow,
+            &format!("{} mode is {mode:04o}, expected 0600", path.display()),
+            &format!("{} 权限为 {mode:04o}，应为 0600", path.display()),
+            &format!("chmod 0600 {}", path.display()),
+            &format!("chmod 0600 {}", path.display()),
+        ));
     } else {
-        checks.push(DoctorCheck {
-            id: "config_mode".into(),
-            level: CheckLevel::Green,
-            message: format!("{} mode 0600", path.display()),
-            fix: String::new(),
-        });
+        checks.push(DoctorCheck::bi(
+            "config_mode",
+            CheckLevel::Green,
+            &format!("{} mode 0600", path.display()),
+            &format!("{} 权限 0600", path.display()),
+            "",
+            "",
+        ));
     }
 }
 
 fn check_socket(home: &Path, checks: &mut Vec<DoctorCheck>) {
     let sock = crate::daemon::socket_path(home);
     match UnixStream::connect(&sock) {
-        Ok(_) => checks.push(DoctorCheck {
-            id: "socket".into(),
-            level: CheckLevel::Green,
-            message: format!("{} is connectable", sock.display()),
-            fix: String::new(),
-        }),
-        Err(_) => checks.push(DoctorCheck {
-            id: "socket".into(),
-            level: CheckLevel::Red,
-            message: format!("cannot connect to {}", sock.display()),
-            fix: "run `vane start`".into(),
-        }),
+        Ok(_) => checks.push(DoctorCheck::bi(
+            "socket",
+            CheckLevel::Green,
+            &format!("{} is connectable", sock.display()),
+            &format!("{} 可连接", sock.display()),
+            "",
+            "",
+        )),
+        Err(_) => checks.push(DoctorCheck::bi(
+            "socket",
+            CheckLevel::Red,
+            &format!("cannot connect to {}", sock.display()),
+            &format!("无法连接 {}", sock.display()),
+            "run `vane start`",
+            "运行 vane start",
+        )),
     }
 }
 
 fn check_daemon(home: &Path, checks: &mut Vec<DoctorCheck>) {
     if crate::daemon::is_running(home) {
-        checks.push(DoctorCheck {
-            id: "daemon".into(),
-            level: CheckLevel::Green,
-            message: "daemon is running".into(),
-            fix: String::new(),
-        });
+        checks.push(DoctorCheck::bi(
+            "daemon",
+            CheckLevel::Green,
+            "daemon is running",
+            "daemon 正在运行",
+            "",
+            "",
+        ));
     } else {
-        checks.push(DoctorCheck {
-            id: "daemon".into(),
-            level: CheckLevel::Red,
-            message: "daemon is not running".into(),
-            fix: "run `vane start`".into(),
-        });
+        checks.push(DoctorCheck::bi(
+            "daemon",
+            CheckLevel::Red,
+            "daemon is not running",
+            "daemon 未运行",
+            "run `vane start`",
+            "运行 vane start",
+        ));
     }
 }
 
 fn check_service(checks: &mut Vec<DoctorCheck>) {
     let paths = crate::service::service_paths_from_env();
     if paths.unit_path.is_file() {
-        checks.push(DoctorCheck {
-            id: "service".into(),
-            level: CheckLevel::Green,
-            message: format!("user service unit {}", paths.unit_path.display()),
-            fix: String::new(),
-        });
+        checks.push(DoctorCheck::bi(
+            "service",
+            CheckLevel::Green,
+            &format!("user service unit {}", paths.unit_path.display()),
+            &format!("用户服务单元 {}", paths.unit_path.display()),
+            "",
+            "",
+        ));
     } else {
-        checks.push(DoctorCheck {
-            id: "service".into(),
-            level: CheckLevel::Yellow,
-            message: format!("user service unit missing ({})", paths.unit_path.display()),
-            fix: "run `vane init` and install the user service".into(),
-        });
+        checks.push(DoctorCheck::bi(
+            "service",
+            CheckLevel::Yellow,
+            &format!("user service unit missing ({})", paths.unit_path.display()),
+            &format!("用户服务单元缺失（{}）", paths.unit_path.display()),
+            "run `vane init` and install the user service",
+            "运行 vane init 并安装用户服务",
+        ));
     }
 }
 
 fn check_embed(cfg: &Config, checks: &mut Vec<DoctorCheck>) {
     let embedder = embedder_from_config(&cfg.defaults.embed);
     match embedder.probe_dim() {
-        Ok(dim) => checks.push(DoctorCheck {
-            id: "embed".into(),
-            level: CheckLevel::Green,
-            message: format!(
+        Ok(dim) => checks.push(DoctorCheck::bi(
+            "embed",
+            CheckLevel::Green,
+            &format!(
                 "embed probe ok ({} / {} dim {dim})",
                 cfg.defaults.embed.provider, cfg.defaults.embed.model
             ),
-            fix: String::new(),
-        }),
-        Err(e) => checks.push(DoctorCheck {
-            id: "embed".into(),
-            level: CheckLevel::Red,
-            message: format!("embed probe failed: {}", redact_secrets(&e.message)),
-            fix: format!(
+            &format!(
+                "embed 探测成功（{} / {} dim {dim}）",
+                cfg.defaults.embed.provider, cfg.defaults.embed.model
+            ),
+            "",
+            "",
+        )),
+        Err(e) => checks.push(DoctorCheck::bi(
+            "embed",
+            CheckLevel::Red,
+            &format!("embed probe failed: {}", redact_secrets(&e.message)),
+            &format!("embed 探测失败：{}", redact_secrets(&e.message)),
+            &format!(
                 "check embedder at {} (ollama serve, or OPENAI_API_KEY / VANE_EMBED_API_KEY)",
                 cfg.defaults.embed.base_url
             ),
-        }),
+            &format!(
+                "检查 {} 的 embedder（ollama serve，或 OPENAI_API_KEY / VANE_EMBED_API_KEY）",
+                cfg.defaults.embed.base_url
+            ),
+        )),
     }
 }
 
 fn check_roots(cfg: &Config, checks: &mut Vec<DoctorCheck>) {
     if cfg.projects.is_empty() {
-        checks.push(DoctorCheck {
-            id: "root".into(),
-            level: CheckLevel::Yellow,
-            message: "no registered roots".into(),
-            fix: "run `vane add <path>`".into(),
-        });
+        checks.push(DoctorCheck::bi(
+            "root",
+            CheckLevel::Yellow,
+            "no registered roots",
+            "没有已注册的 root",
+            "run `vane add <path>`",
+            "运行 vane add <路径>",
+        ));
         return;
     }
     for proj in &cfg.projects {
-        let stored = expand_tilde(&proj.path);
+        let stored = crate::fsutil::expand_tilde(&proj.path);
         let path = stored.canonicalize().unwrap_or_else(|_| stored.clone());
         let pid = project_id(&path);
         let id = format!("root:{pid}");
         if !path.exists() {
-            checks.push(DoctorCheck {
-                id,
-                level: CheckLevel::Red,
-                message: format!("root missing: {}", proj.path.display()),
-                fix: format!("restore the folder or `vane rm {}`", proj.path.display()),
-            });
+            checks.push(DoctorCheck::bi(
+                &id,
+                CheckLevel::Red,
+                &format!("root missing: {}", proj.path.display()),
+                &format!("root 不存在：{}", proj.path.display()),
+                &format!("restore the folder or `vane rm {}`", proj.path.display()),
+                &format!("恢复该目录或运行 vane rm {}", proj.path.display()),
+            ));
             continue;
         }
         if fs::read_dir(&path).is_err() {
-            checks.push(DoctorCheck {
-                id,
-                level: CheckLevel::Red,
-                message: format!("root not readable: {}", proj.path.display()),
-                fix: format!("chmod the directory so vane can read {}", path.display()),
-            });
+            checks.push(DoctorCheck::bi(
+                &id,
+                CheckLevel::Red,
+                &format!("root not readable: {}", proj.path.display()),
+                &format!("root 不可读：{}", proj.path.display()),
+                &format!("chmod the directory so vane can read {}", path.display()),
+                &format!("chmod 该目录使 vane 能读取 {}", path.display()),
+            ));
             continue;
         }
-        checks.push(DoctorCheck {
-            id,
-            level: CheckLevel::Green,
-            message: format!("root ok: {}", proj.path.display()),
-            fix: String::new(),
-        });
+        checks.push(DoctorCheck::bi(
+            &id,
+            CheckLevel::Green,
+            &format!("root ok: {}", proj.path.display()),
+            &format!("root 正常：{}", proj.path.display()),
+            "",
+            "",
+        ));
     }
 }
 
 fn check_disk(home: &Path, checks: &mut Vec<DoctorCheck>) {
     let stats = disk_stats(home);
     if stats.home_bytes > DISK_YELLOW_BYTES {
-        checks.push(DoctorCheck {
-            id: "disk".into(),
-            level: CheckLevel::Yellow,
-            message: format!(
+        checks.push(DoctorCheck::bi(
+            "disk",
+            CheckLevel::Yellow,
+            &format!(
                 "{} is {} bytes (cas {})",
                 home.display(),
                 stats.home_bytes,
                 stats.cas_bytes
             ),
-            fix: "run `vane gc --all` to compact unused RAG data".into(),
-        });
+            &format!(
+                "{} 占用 {} 字节（cas {}）",
+                home.display(),
+                stats.home_bytes,
+                stats.cas_bytes
+            ),
+            "run `vane gc --all` to compact unused RAG data",
+            "运行 vane gc --all 清理未使用的 RAG 数据",
+        ));
     } else {
-        checks.push(DoctorCheck {
-            id: "disk".into(),
-            level: CheckLevel::Green,
-            message: format!(
+        checks.push(DoctorCheck::bi(
+            "disk",
+            CheckLevel::Green,
+            &format!(
                 "{} is {} bytes (cas {})",
                 home.display(),
                 stats.home_bytes,
                 stats.cas_bytes
             ),
-            fix: String::new(),
-        });
+            &format!(
+                "{} 占用 {} 字节（cas {}）",
+                home.display(),
+                stats.home_bytes,
+                stats.cas_bytes
+            ),
+            "",
+            "",
+        ));
     }
 }
 
 fn root_status_object(home: &Path, stored: &Path, dirty: &DirtyQueue) -> Value {
     let for_id = stored
         .canonicalize()
-        .unwrap_or_else(|_| expand_tilde(stored));
+        .unwrap_or_else(|_| crate::fsutil::expand_tilde(stored));
     let pid = project_id(&for_id);
     let state = ProjectState::load(&state_path(home, &pid)).unwrap_or_default();
     let live = LiveSet::load_for_project(home, &pid).unwrap_or_default();
@@ -564,12 +650,12 @@ fn selected_roots(
             .map(|p| {
                 p.path
                     .canonicalize()
-                    .unwrap_or_else(|_| expand_tilde(&p.path))
+                    .unwrap_or_else(|_| crate::fsutil::expand_tilde(&p.path))
             })
             .collect();
     }
     if let Some(r) = user_root {
-        let expanded = expand_tilde(r);
+        let expanded = crate::fsutil::expand_tilde(r);
         return vec![expanded.canonicalize().unwrap_or(expanded)];
     }
     if let Some(r) = cwd_root {
@@ -580,7 +666,7 @@ fn selected_roots(
         .map(|p| {
             p.path
                 .canonicalize()
-                .unwrap_or_else(|_| expand_tilde(&p.path))
+                .unwrap_or_else(|_| crate::fsutil::expand_tilde(&p.path))
         })
         .collect()
 }
@@ -665,23 +751,6 @@ fn query_as_rel_path(query: &str, selected: &[PathBuf]) -> Option<String> {
     } else {
         None
     }
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if s == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path.to_path_buf()
 }
 
 fn redact_secrets(s: &str) -> String {

@@ -260,6 +260,11 @@ fn first_json_object(stdout: &str) -> Value {
 }
 
 fn wait_hits(home: &Path, query: &str, timeout: Duration) -> Vec<Value> {
+    // Wait for startup reconcile to actually finish before searching: the
+    // daemon serves `search` immediately (returning [] until docs/auth.md is
+    // indexed), so a bare timeout budget races reconcile completion. Polling
+    // `status.roots[].last_reconcile` until it is set is the completion signal.
+    wait_for_reconcile(home, timeout);
     let start = Instant::now();
     let mut last = Vec::new();
     while start.elapsed() < timeout {
@@ -270,6 +275,36 @@ fn wait_hits(home: &Path, query: &str, timeout: Duration) -> Vec<Value> {
         thread::sleep(Duration::from_millis(100));
     }
     last
+}
+
+/// Poll the daemon `status` RPC until every registered root reports a
+/// `last_reconcile` timestamp (reconcile completed), or `timeout` elapses.
+/// Panic on timeout so the failure message names the real cause (reconcile
+/// never finished) rather than the downstream "no hits" symptom.
+fn wait_for_reconcile(home: &Path, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let v = rpc(home, "status", serde_json::json!({}));
+        if v.get("error").is_none_or(|e| e.is_null()) {
+            // RPC envelope is {"id":..,"result":{...}}; roots live under result.
+            let roots = v
+                .get("result")
+                .and_then(|r| r.get("roots"))
+                .and_then(|r| r.as_array());
+            if let Some(roots) = roots {
+                if !roots.is_empty()
+                    && roots
+                        .iter()
+                        .all(|r| r.get("last_reconcile").is_some_and(|x| !x.is_null()))
+                {
+                    return;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let v = rpc(home, "status", serde_json::json!({}));
+    panic!("daemon did not finish startup reconcile within {timeout:?}; status: {v}");
 }
 
 #[test]

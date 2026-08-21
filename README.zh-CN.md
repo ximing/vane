@@ -196,6 +196,8 @@ vane start                # 若没装用户服务
 vane status               # 终端仪表盘（管道输出为 JSON）
 vane query "鉴权怎么做"
 vane query "发版" --all
+vane read 2               # 打开上次 TTY 查询的第 2 条命中（人工验收）
+vane watch                # 实时观察索引变更；Ctrl-C 停止
 ```
 
 家目录：`--home` > `VANE_HOME` > `~/.vane`。项目策略写在 `<root>/.vane.toml`（禁止放
