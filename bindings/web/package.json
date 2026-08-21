@@ -1,6 +1,6 @@
 {
   "name": "@vane-rs/web",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Vane 混合检索库 Web 端 npm 包（wasm-bindgen --target web ESM 双变体 + worker + dictData 内联）",
   "license": "Apache-2.0",
   "type": "module",
