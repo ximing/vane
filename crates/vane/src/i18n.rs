@@ -81,6 +81,10 @@ pub const EN_TABLE: &[(&str, &str)] = &[
     ("status.never_indexed", "never indexed"),
     ("status.skipped_hint", "{n} skipped — run vane issues"),
     ("status.pending_changes", "{n} pending changes"),
+    (
+        "bare.init_hint",
+        "vane is not initialized — run vane init to set up",
+    ),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -131,6 +135,10 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
         "{n} 个文件被跳过 — 运行 vane issues 查看",
     ),
     ("status.pending_changes", "{n} 个待处理变更"),
+    (
+        "bare.init_hint",
+        "vane 尚未初始化 — 运行 vane init 开始设置",
+    ),
 ];
 
 pub fn tr(lang: Lang, key: &str) -> &'static str {
