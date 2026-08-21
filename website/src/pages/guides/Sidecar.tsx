@@ -44,7 +44,23 @@ vane query "release checklist" --all
 # Filter by extractor name (not file suffix)
 vane query "logo" --type image
 
+# Bare vane query on a TTY prompts for the text; empty cancels (exit 0)
+vane query
+
+# --verbose prints each hit's internal id (default hidden)
+vane query "how does auth work" --verbose
+
 # Empty hits still exit 0 and print a why line in a TTY`;
+
+const READ = `# Read the n-th hit (1-based) of the last TTY query's chunk text
+vane read 1
+vane read 2
+
+# Print the whole source file instead of the chunk (ignores cache staleness)
+vane read 2 --file
+
+# Non-TTY output is plain chunk text (no meta line), pipe-friendly
+vane read 1 | less`;
 
 const MCP = `{
   "mcpServers": {
@@ -57,7 +73,10 @@ const MCP = `{
 
 const MCP_INSTALL = `vane mcp install --dry-run              # print what would be written
 vane mcp install                        # Claude, Cursor, existing Codex
-vane mcp install --client claude        # claude | cursor | codex`;
+vane mcp install --client claude        # claude | cursor | codex
+
+# --client claude also installs the vane agent skill to ~/.claude/skills/vane/
+# (default-all installs it only if ~/.claude already exists; it never creates ~/.claude)`;
 
 const DIAGNOSE = `vane status                 # TTY dashboard (JSON if piped)
 vane doctor                 # config, socket, daemon, embedder, roots, disk
@@ -71,6 +90,15 @@ vane inspect --root ~/notes
 vane df                     # $VANE_HOME, CAS, per-project dbs
 vane gc --dry-run           # count unreferenced cache; does not delete
 vane gc --all --dry-run`;
+
+const WATCH = `# Foreground-watch a root for index changes (client-side polling, no daemon IPC)
+vane watch                  # current root
+vane watch --root ~/notes
+vane watch --all            # every registered root
+vane watch --interval-ms 500   # 100..=60000, default 1000
+
+# Non-TTY prints one JSON object per line: {"event":"updated","path":"…","root":"…","at":…}
+vane watch --root ~/notes | jq .`;
 
 const MODEL = `vane model --model nomic-embed-text --yes
 # --yes skips the rebuild prompt (required when not a TTY)`;
@@ -179,6 +207,14 @@ export default function Sidecar() {
         </p>
         <CodeBlock lang="bash" title="vane query" code={QUERY} />
         <p>
+          On a TTY the first line is a scope header —{' '}
+          <code>searching ~/notes · 12 live files · hybrid</code> (or{' '}
+          <code>BM25 (degraded: embedder unreachable)</code> when the embedder
+          is down) — so you always know which directory you searched and whether
+          vectors were used. Single-root hits omit the per-line root (the header
+          already says it); <code>--all</code> repeats it for disambiguation.
+        </p>
+        <p>
           If the embedding provider is down, search falls back to BM25 and
           marks hits <code>degraded</code>. Already-indexed vectors stay on
           disk. Empty hits still succeed: in a terminal the CLI prints a{' '}
@@ -186,6 +222,23 @@ export default function Sidecar() {
           root, still indexing, embedder down, excluded path, wrong root, empty
           index, or no matching chunks). Piped stdout stays JSON; the reason
           goes to stderr.
+        </p>
+
+        <h2 id="read">Read a hit without copying a path</h2>
+        <p>
+          After a TTY <code>vane query</code>, the hits are cached at{' '}
+          <code>~/.vane/run/last_query.json</code>. <code>vane read &lt;n&gt;</code>{' '}
+          prints the chunk text of the n-th hit (1-based), so you can go from
+          search to reading without leaving the terminal. Only TTY queries write
+          the cache — a piped <code>vane query | jq</code> does not clobber it.
+        </p>
+        <CodeBlock lang="bash" title="vane read" code={READ} />
+        <p>
+          If the file changed since the query, <code>read &lt;n&gt;</code>{' '}
+          reports <em>stale</em>; <code>--file</code> reads straight from disk
+          and is unaffected by staleness. <code>read</code> is for human
+          verification — agent scripts should use the stateless MCP{' '}
+          <code>read</code> tool instead, which does not depend on the cache.
         </p>
 
         <h2 id="diagnose">Diagnose and maintain</h2>
@@ -197,6 +250,15 @@ export default function Sidecar() {
           and resolved policy.
         </p>
         <CodeBlock lang="bash" title="doctor, issues, logs, inspect, df, gc" code={DIAGNOSE} />
+        <p>
+          The TTY dashboard speaks human: <code>watching</code> when idle,{' '}
+          <code>indexing 34/120</code> while a reconcile runs,{' '}
+          <code>indexed 3 min ago</code> (relative time, not Unix seconds), and{' '}
+          <code>12 skipped — run vane issues</code> when a root has skips. Under{' '}
+          <code>LANG=zh_CN.UTF-8</code> the wizard prompts, doctor report, empty
+          result reasons, and status lines render in Chinese; JSON and piped
+          output always stay English so agents are unaffected.
+        </p>
         <p>
           <code>vane issues</code> lists files skipped as too large, invalid
           UTF-8, or embed / extractor errors. <code>vane logs</code> prints
@@ -213,6 +275,18 @@ export default function Sidecar() {
           terminal — required in scripts.
         </p>
         <CodeBlock lang="bash" title="vane model --yes" code={MODEL} />
+
+        <h2 id="watch-cli">Watch a root live (vane watch)</h2>
+        <p>
+          <code>vane watch</code> is a foreground observer: it polls the
+          live set and dirty queue client-side (no daemon IPC, no notify) and
+          prints a line per change — <code>added</code>, <code>updated</code>,
+          <code>removed</code> (live-set membership / content-key changes),{' '}
+          <code>queued</code> (new dirty entries). Ctrl-C stops it. If the
+          daemon is down it prints a one-time hint and keeps watching local
+          state.
+        </p>
+        <CodeBlock lang="bash" title="vane watch" code={WATCH} />
 
         <h2 id="mcp">MCP and agent skill</h2>
         <p>
@@ -374,7 +448,27 @@ export default function Sidecar() {
               </td>
               <td>
                 CLI search of the current project, <code>--root</code>, or{' '}
-                <code>--all</code>. Empty hits print a why line
+                <code>--all</code>. <code>--verbose</code> shows hit ids. Empty
+                hits print a why line
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane read &lt;n&gt;</code>
+              </td>
+              <td>
+                Print the n-th hit of the last TTY query.{' '}
+                <code>--file</code> reads the source file (ignores staleness)
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>vane watch</code>
+              </td>
+              <td>
+                Foreground poll of live-set / dirty changes.{' '}
+                <code>--root</code>, <code>--all</code>,{' '}
+                <code>--interval-ms</code> (100–60000)
               </td>
             </tr>
             <tr>
