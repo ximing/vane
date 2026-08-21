@@ -643,3 +643,83 @@ mod zh_copy_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+mod watch_diff_tests {
+    use std::collections::BTreeMap;
+    use vane::i18n::Lang;
+    use vane::live::{LiveFile, LiveSet};
+    use vane::watch_diff::{diff_live, diff_queued, event_line, WatchEvent};
+
+    fn file(key: &str) -> LiveFile {
+        LiveFile {
+            content_sha256: key.into(),
+            extract_key: key.into(),
+            chunk_count: 1,
+        }
+    }
+
+    fn set(entries: &[(&str, &str)]) -> LiveSet {
+        LiveSet {
+            files: entries
+                .iter()
+                .map(|(p, k)| (p.to_string(), file(k)))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn live_diff_classifies() {
+        let prev = set(&[("a.md", "k1"), ("b.md", "k2")]);
+        let next = set(&[("a.md", "k1"), ("b.md", "k3"), ("c.md", "k4")]);
+        let events = diff_live(&prev, &next);
+        assert!(events.contains(&WatchEvent::Updated("b.md".into())));
+        assert!(events.contains(&WatchEvent::Added("c.md".into())));
+        assert!(!events.iter().any(|e| matches!(e, WatchEvent::Removed(_))));
+        let gone = diff_live(&next, &prev);
+        assert!(gone.contains(&WatchEvent::Removed("c.md".into())));
+    }
+
+    #[test]
+    fn queued_only_reports_new_entries() {
+        let ev = diff_queued(&["a.md".into()], &["a.md".into(), "b.md".into()]);
+        assert_eq!(ev, vec![WatchEvent::Queued("b.md".into())]);
+        assert!(
+            diff_queued(&["a.md".into()], &[]).is_empty(),
+            "dequeue is silent by design"
+        );
+    }
+
+    #[test]
+    fn event_line_renders() {
+        assert_eq!(
+            event_line(&WatchEvent::Updated("n/a.md".into()), Lang::En),
+            "updated n/a.md"
+        );
+        assert_eq!(
+            event_line(&WatchEvent::Added("n/a.md".into()), Lang::Zh),
+            "新增 n/a.md"
+        );
+    }
+
+    #[test]
+    fn dirty_queue_lists_paths() {
+        let mut q = vane::dirty::DirtyQueue::new();
+        q.push("p1", "a.md");
+        q.push("p1", "b.md");
+        q.push("p2", "c.md");
+        assert_eq!(
+            q.paths_for("p1"),
+            vec!["a.md".to_string(), "b.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn interval_bounds() {
+        use vane::watch_diff::valid_interval;
+        assert!(!valid_interval(0));
+        assert!(!valid_interval(99));
+        assert!(valid_interval(100));
+        assert!(valid_interval(60_000));
+        assert!(!valid_interval(60_001));
+    }
+}

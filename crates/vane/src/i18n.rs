@@ -191,6 +191,28 @@ pub const EN_TABLE: &[(&str, &str)] = &[
         "init.required",
         "not initialized: missing {path}; run `vane init`",
     ),
+    // `vane watch` (spec §6.2): start header, daemon-down hint, scope errors,
+    // interval guard, and the four per-event TTY lines.
+    (
+        "watch.start",
+        "watching {root} — Ctrl-C to stop",
+    ),
+    (
+        "watch.daemon_down",
+        "daemon not running — index changes need vane start; showing current state only",
+    ),
+    (
+        "watch.not_registered",
+        "root is not registered: {path}",
+    ),
+    (
+        "watch.bad_interval",
+        "--interval-ms must be 100..=60000",
+    ),
+    ("watch.added", "added {path}"),
+    ("watch.updated", "updated {path}"),
+    ("watch.removed", "removed {path}"),
+    ("watch.queued", "queued {path}"),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -339,6 +361,28 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
     ("wizard.continue_anyway", "仍要继续吗？"),
     ("wizard.probe_ok", "探测成功，dim={dim}"),
     ("init.required", "尚未初始化：缺少 {path}；请运行 vane init"),
+    // `vane watch`（spec §6.2）：启动提示、守护进程未运行提示、scope 校验、
+    // interval 边界、四种事件的 TTY 行（zh 仅 TTY，非 TTY 由 pick 退回 en）。
+    (
+        "watch.start",
+        "正在监听 {root} — Ctrl-C 停止",
+    ),
+    (
+        "watch.daemon_down",
+        "守护进程未运行 — 索引变更需要 vane start；当前仅展示现有状态",
+    ),
+    (
+        "watch.not_registered",
+        "目录未登记：{path}",
+    ),
+    (
+        "watch.bad_interval",
+        "--interval-ms 必须在 100..=60000 之间",
+    ),
+    ("watch.added", "新增 {path}"),
+    ("watch.updated", "更新 {path}"),
+    ("watch.removed", "移除 {path}"),
+    ("watch.queued", "排队 {path}"),
 ];
 
 pub fn tr(lang: Lang, key: &str) -> &'static str {
