@@ -85,6 +85,10 @@ pub const EN_TABLE: &[(&str, &str)] = &[
         "bare.init_hint",
         "vane is not initialized — run vane init to set up",
     ),
+    (
+        "mcp.done_new_session",
+        "done — start a new agent session (Claude / Cursor / Codex) for the vane tools to load",
+    ),
 ];
 
 pub const ZH_TABLE: &[(&str, &str)] = &[
@@ -138,6 +142,10 @@ pub const ZH_TABLE: &[(&str, &str)] = &[
     (
         "bare.init_hint",
         "vane 尚未初始化 — 运行 vane init 开始设置",
+    ),
+    (
+        "mcp.done_new_session",
+        "完成 — 新开一轮 Agent 会话（Claude / Cursor / Codex）后 vane 工具才会加载",
     ),
 ];
 
