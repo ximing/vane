@@ -160,9 +160,7 @@ cargo build --workspace 2>&1 | head -20
 ```bash
 git init
 git add -A
-git commit -m "chore: scaffold cargo workspace with vane-core/ffi/node crates
-
-"
+git commit -m "chore: scaffold cargo workspace with vane-core/ffi/node crates"
 ```
 
 ### Task 2: VaneError + Result + code() 映射
@@ -308,9 +306,7 @@ pub type Result<T> = std::result::Result<T, VaneError>;
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(core/types): VaneError with spec-§10 code mapping + Result alias
-
-"
+git commit -m "feat(core/types): VaneError with spec-§10 code mapping + Result alias"
 ```
 
 ### Task 3: 基础数据类型（ScoredDoc / Metric / TokenizerId）
@@ -414,9 +410,7 @@ fn hex_val(c: u8) -> Result<u8> {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(core/types): ScoredDoc, Metric, TokenizerId with hex roundtrip
-
-"
+git commit -m "feat(core/types): ScoredDoc, Metric, TokenizerId with hex roundtrip"
 ```
 
 ### Task 4: Schema + FieldDef + validate()
@@ -550,9 +544,7 @@ impl Schema {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(core/types): Schema/FieldDef/ScalarKind with §3.1 validation
-
-"
+git commit -m "feat(core/types): Schema/FieldDef/ScalarKind with §3.1 validation"
 ```
 
 ### Task 5: 冻结常量
@@ -603,9 +595,7 @@ pub const MAX_SEGMENT_DOCS_SMALL: u32 = 10_000;
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(core/types): frozen spec constants (dim/topk/segment/bm25/rrf/etc)
-
-"
+git commit -m "feat(core/types): frozen spec constants (dim/topk/segment/bm25/rrf/etc)"
 ```
 
 ### Task 6: deny.toml + 依赖黑名单 + 无 std::fs 门禁脚本
@@ -677,7 +667,5 @@ cargo build --workspace
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "chore: cargo-deny config (§13.3)
-
-"
+git commit -m "chore: cargo-deny config (§13.3)"
 ```

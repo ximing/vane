@@ -306,9 +306,7 @@ git commit -m "feat(tokenizer): Token/Tokenizer trait + compute_tokenizer_id (sh
 - 定义 Token、Tokenizer trait、BuiltinTokenizer、UserDictEntry、MAX_USER_DICT_ENTRIES
 - 实现 compute_tokenizer_id = sha256(algorithm_version ‖ builtin_dict_version ‖ user_dict_bytes)
 - serialize_user_dict 确定性二进制序列化（tag + len + bytes + freq）
-- 覆盖不变量 I-4：相同输入同 id；不同 kind/dict 不同 id
-
-"
+- 覆盖不变量 I-4：相同输入同 id；不同 kind/dict 不同 id"
 ```
 
 ---
@@ -490,9 +488,7 @@ git commit -m "feat(tokenizer): StandardTokenizer (unicode_words + lowercase + P
 - unicode_segmentation 按 Unicode word boundary 切词
 - to_lowercase 后喂 rust_stemmers Porter 英语词干
 - position 从 0 起每 token +1 连续递增
-- TokenizerId 经 compute_tokenizer_id 反映 user_dict
-
-"
+- TokenizerId 经 compute_tokenizer_id 反映 user_dict"
 ```
 
 ---
@@ -770,9 +766,7 @@ git commit -m "feat(tokenizer): CjkBigramTokenizer (CJK run bigram + non-CJK sta
 - 按 is_cjk 把文本切成 CJK / 非 CJK 交替 run
 - CJK run 切重叠二元组（单字 run 退化为 unigram）
 - 非 CJK run 复用 standard 管线（unicode_words + lowercase + Porter stem）
-- position 跨 run 连续递增（不变量 I-4，跨语言 phrase query 依赖）
-
-"
+- position 跨 run 连续递增（不变量 I-4，跨语言 phrase query 依赖）"
 ```
 
 ---
@@ -924,9 +918,7 @@ git commit -m "feat(tokenizer): build_tokenizer factory + M0 boundary checks
 - build_tokenizer(Standard|CjkBigram, _) 返回 Ok(Box<dyn Tokenizer>)
 - build_tokenizer(Jieba, _) 返回 Err(DictUnavailable)（M0 占位，§10）
 - user_dict.len() > 100_000 返回 Err(DictTooLarge)（§5.3），优先于 jieba 检查
-- 词表上限检查与 jieba 可用性检查的优先级由测试固化
-
-"
+- 词表上限检查与 jieba 可用性检查的优先级由测试固化"
 ```
 
 ---

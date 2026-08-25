@@ -190,9 +190,7 @@ pub struct SegmentMeta {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(segment): ULID gen + header.bin encode/decode (§6.2/§6.3)
-
-"
+git commit -m "feat(segment): ULID gen + header.bin encode/decode (§6.2/§6.3)"
 ```
 
 ### Task 2: SegmentWriter（写 header/vectors/stored）
@@ -397,9 +395,7 @@ impl SegmentWriter {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(segment): SegmentWriter writes header/vectors/stored/idmap (§6.2, I-1)
-
-"
+git commit -m "feat(segment): SegmentWriter writes header/vectors/stored/idmap (§6.2, I-1)"
 ```
 
 ### Task 3: SegmentReader（读 header/vectors/stored/idmap）
@@ -587,9 +583,7 @@ impl SegmentReader {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(segment): SegmentReader loads header/vectors/idmap (§6.2)
-
-"
+git commit -m "feat(segment): SegmentReader loads header/vectors/idmap (§6.2)"
 ```
 
 ### Task 4: 段不可变验证 + StdFsVfs 往返
@@ -703,7 +697,5 @@ cargo check --target wasm32-unknown-unknown -p vane-core 2>&1 | tail -5
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "test(segment): immutability (I-1) + StdFsVfs roundtrip coverage
-
-"
+git commit -m "test(segment): immutability (I-1) + StdFsVfs roundtrip coverage"
 ```

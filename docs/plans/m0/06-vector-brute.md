@@ -668,9 +668,7 @@ struct Keyf32(f32);              // totalEq + totalOrd，NaN 视为 -∞
 
   SPEC §8.1 vector 模式 M0 实现。score 统一为越大越相似：
   cosine=相似度, l2=-距离, dot=点积。最小堆保留 topK，
-  位图过滤支持越界跳过。
-
-  "
+  位图过滤支持越界跳过。"
   ```
 
 ---
@@ -889,9 +887,7 @@ struct Keyf32(f32);              // totalEq + totalOrd，NaN 视为 -∞
 
   覆盖空 vectors、topK=0、topK>doc_count、dim=0、dim>DIM_MAX、
   query 维度不匹配、vectors 非整数倍、空位图、位图越界、
-  docid<docid_base 跳过、NaN 防御等边界。
-
-  "
+  docid<docid_base 跳过、NaN 防御等边界。"
   ```
 
 ---

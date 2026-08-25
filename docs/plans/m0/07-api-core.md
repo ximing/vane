@@ -178,9 +178,7 @@ mod tests;
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(api): public API types (OpenOptions/SearchQuery/Hit/Doc, §4.2)
-
-"
+git commit -m "feat(api): public API types (OpenOptions/SearchQuery/Hit/Doc, §4.2)"
 ```
 
 ### Task 2: Db::open/close/collection/collections
@@ -376,9 +374,7 @@ pub use db::*;
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(api): Db open/close/collection/collections (§4.1)
-
-"
+git commit -m "feat(api): Db open/close/collection/collections (§4.1)"
 ```
 
 ### Task 3: Collection::add（内存 buffer + auto-commit）
@@ -590,9 +586,7 @@ impl Collection {
 - [ ] **Step 6: Commit**
 ```bash
 git add -A
-git commit -m "feat(api): Collection::add with buffer + auto-commit check (§4.1/§7.1)
-
-"
+git commit -m "feat(api): Collection::add with buffer + auto-commit check (§4.1/§7.1)"
 ```
 
 ### Task 4: Collection::flush（编排 segment + inverted + manifest）
@@ -741,9 +735,7 @@ impl Collection {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(api): Collection::flush orchestrates segment+inverted+manifest (§6.4/§7.1, I-2)
-
-"
+git commit -m "feat(api): Collection::flush orchestrates segment+inverted+manifest (§6.4/§7.1, I-2)"
 ```
 
 ### Task 5: Collection::search（编排 brute + inverted + fusion）
@@ -1023,9 +1015,7 @@ impl Collection {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(api): Collection::search orchestrates brute+inverted+RRF (§8.1/§8.2)
-
-"
+git commit -m "feat(api): Collection::search orchestrates brute+inverted+RRF (§8.1/§8.2)"
 ```
 
 ### Task 6: 集成测试（add→flush→search 全流程 + I-2 不变量）
@@ -1128,9 +1118,7 @@ cargo check --target wasm32-unknown-unknown -p vane-core 2>&1 | tail -5
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "test(api): I-2 atomic visibility + multi-segment + M0 placeholder coverage
-
-"
+git commit -m "test(api): I-2 atomic visibility + multi-segment + M0 placeholder coverage"
 ```
 
 ### Task 7: recall 集成测试骨架（I8）
@@ -1198,7 +1186,5 @@ fn hybrid_recall_at_10_meets_threshold() {
 - [ ] **Step 3: Commit**
 ```bash
 git add -A
-git commit -m "test(api): recall integration test skeleton (I8, §13.2-1)
-
-"
+git commit -m "test(api): recall integration test skeleton (I8, §13.2-1)"
 ```

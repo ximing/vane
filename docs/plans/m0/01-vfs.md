@@ -276,9 +276,7 @@ impl Vfs for MemoryVfs {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(vfs): Vfs trait (§6.1 frozen) + MemoryVfs backend + conformance tests
-
-"
+git commit -m "feat(vfs): Vfs trait (§6.1 frozen) + MemoryVfs backend + conformance tests"
 ```
 
 ### Task 2: StdFsVfs 后端（cfg 隔离 std::fs）
@@ -448,9 +446,7 @@ fn io_err(e: std::io::Error) -> VaneError {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(vfs): StdFsVfs backend (cfg-isolated std::fs, §13.3 exception)
-
-"
+git commit -m "feat(vfs): StdFsVfs backend (cfg-isolated std::fs, §13.3 exception)"
 ```
 
 ### Task 3: PageCache LRU
@@ -641,9 +637,7 @@ impl Inner {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(vfs): LRU PageCache with read-through + eviction (§6.1)
-
-"
+git commit -m "feat(vfs): LRU PageCache with read-through + eviction (§6.1)"
 ```
 
 ### Task 4: 跨后端一致性套件 + sync 验证
@@ -708,7 +702,5 @@ echo "OK"
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "test(vfs): cross-backend conformance + sync/large-append coverage
-
-"
+git commit -m "test(vfs): cross-backend conformance + sync/large-append coverage"
 ```

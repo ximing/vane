@@ -114,9 +114,7 @@ pub struct CollectionMeta {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(persistence): Manifest + CollectionMeta serde roundtrip (§6.2)
-
-"
+git commit -m "feat(persistence): Manifest + CollectionMeta serde roundtrip (§6.2)"
 ```
 
 ### Task 2: ManifestStore 原子读写
@@ -277,9 +275,7 @@ impl ManifestStore {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(persistence): ManifestStore atomic save/load via rename (§6.4, I-6)
-
-"
+git commit -m "feat(persistence): ManifestStore atomic save/load via rename (§6.4, I-6)"
 ```
 
 ### Task 3: AutoCommitter
@@ -391,9 +387,7 @@ impl AutoCommitter {
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "feat(persistence): AutoCommitter with max_docs + interval triggers (§7.1)
-
-"
+git commit -m "feat(persistence): AutoCommitter with max_docs + interval triggers (§7.1)"
 ```
 
 ### Task 4: 崩溃恢复语义验证（不变量 I-6）
@@ -482,7 +476,5 @@ cargo check --target wasm32-unknown-unknown -p vane-core 2>&1 | tail -5
 - [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "test(persistence): crash recovery + orphan cleanup (I-6)
-
-"
+git commit -m "test(persistence): crash recovery + orphan cleanup (I-6)"
 ```
