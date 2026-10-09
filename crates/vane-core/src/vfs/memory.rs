@@ -1,14 +1,16 @@
 use crate::types::{Result, VaneError};
-use crate::vfs::Vfs;
-use std::collections::HashMap;
+use crate::vfs::{DbExclusiveLock, Vfs};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// 纯内存 VFS 后端（测试/纯内存场景）。SPEC §6.1 四后端之一。
 pub struct MemoryVfs {
     files: RwLock<HashMap<String, Vec<u8>>>,
     #[allow(dead_code)]
     seq: AtomicU64,
+    /// 本实例已独占的 db_path。别的 MemoryVfs 有自己的表。
+    locks: Arc<Mutex<HashSet<String>>>,
 }
 
 impl MemoryVfs {
@@ -16,7 +18,25 @@ impl MemoryVfs {
         Self {
             files: RwLock::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            locks: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+}
+
+struct MemoryExclusiveLock {
+    path: String,
+    locks: Arc<Mutex<HashSet<String>>>,
+}
+
+impl DbExclusiveLock for MemoryExclusiveLock {}
+
+impl Drop for MemoryExclusiveLock {
+    fn drop(&mut self) {
+        let mut guard = match self.locks.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.remove(&self.path);
     }
 }
 
@@ -120,6 +140,21 @@ impl Vfs for MemoryVfs {
         out.sort();
         out.dedup();
         Ok(out)
+    }
+
+    fn try_lock_exclusive(&self, db_path: &str) -> Result<Box<dyn DbExclusiveLock>> {
+        let mut guard = match self.locks.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !guard.insert(db_path.to_string()) {
+            return Err(crate::vfs::db_already_open());
+        }
+        drop(guard);
+        Ok(Box::new(MemoryExclusiveLock {
+            path: db_path.to_string(),
+            locks: Arc::clone(&self.locks),
+        }))
     }
 }
 

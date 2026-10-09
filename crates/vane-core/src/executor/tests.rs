@@ -5,8 +5,9 @@
 //! - 多段并行搜索归并：与串行一致（在 collection 集成测试覆盖；此处 unit 验 Executor 语义）。
 
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[test]
 #[cfg(all(not(target_arch = "wasm32"), feature = "executor-native"))]
@@ -97,6 +98,26 @@ fn serial_join_all_executes_all() {
 fn serial_join_all_empty() {
     let exec = SerialExecutor;
     exec.join_all(Vec::new());
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn idle_scheduler_stops_on_drop() {
+    let started = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&started);
+    let sched = IdleScheduler::new();
+    sched.start(move |ticket| {
+        flag.store(true, Ordering::SeqCst);
+        while !ticket.stopped() {
+            ticket.wait_until_changed(ticket.epoch(), Duration::from_secs(30));
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !started.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "idle thread did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(sched);
 }
 
 #[test]

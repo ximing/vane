@@ -123,6 +123,10 @@ fn reindex_atomic_switch_new_identity_active() {
         );
     }
 
+    let new_tokenizer_id = col.tokenizer_id();
+    drop(col);
+    drop(db);
+
     // reopen：manifest 持久化了新身份
     let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let col2 = db2
@@ -137,7 +141,7 @@ fn reindex_atomic_switch_new_identity_active() {
         )
         .unwrap();
     assert_eq!(col2.dict_state(), vane_core::api::DictState::Stable);
-    assert_eq!(col2.tokenizer_id(), col.tokenizer_id());
+    assert_eq!(col2.tokenizer_id(), new_tokenizer_id);
     // reopen 后仍可搜
     let hits = col2.search(&text_query("hello")).unwrap();
     assert!(!hits.is_empty());

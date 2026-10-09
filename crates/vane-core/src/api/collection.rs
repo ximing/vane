@@ -11,6 +11,7 @@ use crate::api::db::DbInner;
 use crate::api::reindex::ReindexHandle;
 use crate::api::types::*;
 use crate::bm25::{write_inverted, InvertedIndexBuilder, InvertedIndexReader};
+use crate::executor::IdleTicket;
 use crate::fusion::{linear_fuse, minmax_normalize, rrf_fuse, FusionCandidate};
 use crate::hnsw::{write_hnsw, HnswReader, HnswWriter};
 use crate::persistence::{AutoCommitConfig, AutoCommitter, CollectionMeta, ManifestStore};
@@ -18,9 +19,9 @@ use crate::segment::{SegmentReader, SegmentWriter};
 use crate::tokenizer::{build_tokenizer, compute_tokenizer_id, BuiltinTokenizer, UserDictEntry};
 use crate::types::{Result, Schema, TokenizerId as CoreTokenizerId, VaneError, RRF_K, TOPK_MAX};
 use crate::vector::brute_search;
-use crate::vfs::Vfs;
+use crate::vfs::{DbExclusiveLock, Vfs};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 
 pub struct Collection {
     pub(crate) inner: Arc<CollectionInner>,
@@ -65,7 +66,8 @@ pub(crate) struct CollectionInner {
     // 查询期 search 把 tombstone 并入 filter 参数（02 手动并入；03 计划 compile_filter 统一）。
     // 04-wal：pub(crate) 供 Db::open 注入 recover 重放的 tombstone。
     pub(crate) tombstones: RwLock<HashMap<String, roaring::RoaringBitmap>>,
-    // 02-tombstone-merge：compact 进行中标志（防重入；06 reindex 状态机复用）。
+    // delete / compact / reindex / auto-merge 互斥。compact 与 reindex 用 try_lock
+    // （第二路 Busy，不阻塞）；delete 阻塞 lock。拿到后持有到操作结束。
     compacting: Mutex<bool>,
     // 06-userdict-reindex：§7.4 词表状态机。
     // M4 §3.6 inspect API：pub(crate) 供 inspect 模块读 CollectionStats.dict_state。
@@ -79,6 +81,11 @@ pub(crate) struct CollectionInner {
     // M2-10：Executor（从 DbInner 克隆 Arc）。search 路径用 Executor::scope 并行搜各段。
     // 平台分支在 executor/mod.rs（I-5），此处零 cfg。
     pub(crate) executor: Arc<dyn crate::executor::Executor>,
+    /// 与 DbInner 同一把锁。只为让 Collection 比 Db 活得更久时仍占着锁，不读取。
+    #[allow(dead_code)]
+    exclusive_lock: Arc<dyn DbExclusiveLock>,
+    /// 留下未刷文档时叫醒 Db 的空闲提交线程。线程本身挂在 Db 上。
+    idle: IdleTicket,
 }
 
 struct WriteState {
@@ -95,19 +102,62 @@ struct BufferedDoc {
     meta: Option<HashMap<String, ScalarValue>>,
 }
 
-/// M-minor-1（02 遗留）：compacting 标志 panic-safe Drop guard。
+/// flush 在写盘前就 take 走 buffer 并 reset auto-commit 计数。
+/// `add_segment` 成功前（含 panic）把这批文档放回 buffer **前面**，
+/// 并 best-effort 删掉未提交的 `seg_<ulid>`。commit 成功后必须立刻 disarm，
+/// 否则下次 flush 会把已提交文档再写一份。
 ///
-/// compact/reindex 期置 `compacting=true` 防重入；操作返回（含 panic）时 Drop 复位 false，
-/// 避免一次 panic 致永久 E_BUSY。guard 不持有锁——仅在 drop 时重新获取锁复位（与原
-/// 显式 finally 模式等价，但 panic-safe）。
-struct CompactingGuard<'a> {
-    flag: &'a Mutex<bool>,
+/// 恢复路径用 `into_inner()`：中毒锁不能在这里 `unwrap` 把进程打崩。
+/// 不跨磁盘 IO 持有 `write_state`（与 merge 的 next_docid 锁会死锁）。
+struct FlushRollback<'a> {
+    inner: &'a CollectionInner,
+    docs: Vec<BufferedDoc>,
+    /// `Some` 表示 ULID 已知且 manifest 尚未 commit。
+    pending_ulid: Option<String>,
+    armed: bool,
 }
+
+impl Drop for FlushRollback<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let n = self.docs.len() as u32;
+        {
+            let mut state = match self.inner.write_state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut batch = std::mem::take(&mut self.docs);
+            // flush 期间其它线程 add 的文档留在后面。
+            batch.append(&mut state.buffer);
+            state.buffer = batch;
+            state.auto_committer.record_docs(n);
+        }
+        if let Some(ulid) = self.pending_ulid.take() {
+            let seg_dir = format!("{}/seg_{}", self.inner.segments_dir, ulid);
+            let _ = crate::merge::delete_segment_dir(self.inner.vfs.as_ref(), &seg_dir);
+        }
+    }
+}
+
+/// 持有 `compacting` 直到操作结束。Drop 把标志设回 false，再随字段释放锁。
+/// panic 时同样复位。不要在 Drop 里再 `lock`：std Mutex 不可重入，那也是
+/// 「先设 true 再立刻放锁」的窗口。
+struct CompactingGuard<'a> {
+    guard: MutexGuard<'a, bool>,
+}
+
+impl<'a> CompactingGuard<'a> {
+    fn arm(mut guard: MutexGuard<'a, bool>) -> Self {
+        *guard = true;
+        Self { guard }
+    }
+}
+
 impl Drop for CompactingGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut g) = self.flag.lock() {
-            *g = false;
-        }
+        *self.guard = false;
     }
 }
 
@@ -207,7 +257,18 @@ impl CollectionInner {
             #[cfg(feature = "jieba")]
             jieba_dict: jieba_dict_snapshot,
             executor: db.executor.clone(),
+            exclusive_lock: Arc::clone(&db.exclusive_lock),
+            idle: db.idle.ticket(),
         })
+    }
+
+    /// 空闲线程用。不持有 `write_state` 越过调用方的 flush。
+    pub(crate) fn idle_delay(&self) -> Option<std::time::Duration> {
+        let state = match self.write_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.auto_committer.interval_delay()
     }
 
     pub(crate) fn restore_from_manifest(
@@ -295,17 +356,24 @@ impl Collection {
         state.auto_committer.record_docs(count as u32);
         // I3：auto-commit 检查（消费 collection 级 AutoCommitConfig）
         let should = state.auto_committer.should_flush();
+        // interval 还没到：叫醒空闲线程，让它睡到到点，而不是干等下一次 add。
+        let notify_idle = !should && state.auto_committer.interval_delay().is_some();
         drop(state);
         if should {
             // auto-commit flush 失败不再静默吞错：记录到 stderr 供排查。
             // 不改 AddReport pub API（加失败标志属 pub API 变更，交编排者裁决）；
             // M1 可引入 log crate 做结构化日志。
+            // flush 在 commit 前失败会把文档放回 buffer，这里仍返回 Ok。
             if let Err(e) = self.flush() {
                 eprintln!(
                     "[vane] auto-commit flush for collection '{}' failed: {}",
                     self.inner.name, e
                 );
+                // reset 已经把计时清零。叫醒线程，让它按 interval 再试，不要空转。
+                self.inner.idle.wake();
             }
+        } else if notify_idle {
+            self.inner.idle.wake();
         }
         Ok(AddReport {
             accepted: count,
@@ -347,6 +415,14 @@ impl Collection {
         state.auto_committer.reset();
         drop(state);
 
+        // commit 前失败（含 panic）放回 buffer；add_segment 成功后立刻 disarm。
+        let mut rollback = FlushRollback {
+            inner: &self.inner,
+            docs,
+            pending_ulid: None,
+            armed: true,
+        };
+
         // 构建 SegmentWriter（I4/FF2 裁决：传入真实全局 docid 基址）
         let tok_id = self.inner.tokenizer_id.read().unwrap().clone();
         let mut writer = SegmentWriter::new(
@@ -356,9 +432,11 @@ impl Collection {
             &tok_id,
             base_docid,
         )?;
-        let mut inv_builder = InvertedIndexBuilder::new(docs.len());
+        // finalize 消费 writer，半成品目录的 ULID 必须提前记下。
+        rollback.pending_ulid = Some(writer.ulid().to_string());
+        let mut inv_builder = InvertedIndexBuilder::new(rollback.docs.len());
 
-        for doc in &docs {
+        for doc in &rollback.docs {
             // I5 裁决：序列化真实 doc.meta 为 stored_json（非空 map）
             let stored_json = if let Some(meta) = &doc.meta {
                 let mut map = serde_json::Map::new();
@@ -462,6 +540,9 @@ impl Collection {
         self.inner
             .manifest_store
             .add_segment(&self.inner.name, &meta.ulid)?;
+        // 已进 manifest：禁止放回 buffer，也禁止删段。必须在 open reader / 更新 snapshot 之前。
+        rollback.armed = false;
+        rollback.pending_ulid = None;
 
         // 更新段快照（Arc swap 语义：写锁替换 Vec）
         // I7：open 一次 InvertedIndexReader 并缓存
@@ -513,39 +594,19 @@ impl Collection {
 
     /// 选最小两段合并（auto-merge on exceeding SEGMENT_MAX，SPEC §3.3）。
     ///
-    /// M4 Phase 4 fix（Bug 2）：auto-merge 原先不获取 compacting 锁，与并发
-    /// compact/reindex 竞争 → 段未正确移除 → double-count。现 try-lock compacting：
-    /// 若并发 compact/reindex 已持锁 → skip（return Ok，auto-merge 是 best-effort
-    /// 优化，skip 安全降级，下次 flush 段数仍超阈值时再 merge）。复用 compact/reindex
-    /// 的 CompactingGuard（M-minor-1 panic-safe Drop 复位 false，避免一次 panic 致
-    /// 永久 E_BUSY）。guard 不持其他锁——Drop 时重新取 compacting 锁复位（与原模式等价）。
+    /// try_lock `compacting`：拿不到就跳过（仍返回 Ok）。Poisoned 用 `into_inner`；
+    /// 标志残留 true 也跳过。拿到则持有到 `merge_segments` 结束。
+    /// 锁顺序：先 `compacting`，再 `write_state` / snapshot。不要在持有 `write_state` 时等这把锁。
     fn auto_merge_two_smallest(&self) -> Result<()> {
-        // try-lock compacting：WouldBlock → skip；Poisoned → 恢复（设 true 继续 merge）。
-        {
-            let mut guard = match self.inner.compacting.try_lock() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    // 并发 compact/reindex 持锁 → skip（best-effort 降级）
-                    return Ok(());
-                }
-                Err(std::sync::TryLockError::Poisoned(e)) => {
-                    // 上次 panic 致锁中毒：恢复（取 guard 继续），guard drop 复位。
-                    e.into_inner()
-                }
-            };
-            if *guard {
-                // 理论上 try_lock 成功时 *guard=false（正常路径）；Poisoned 恢复路径
-                // 若残留 true → skip（保守降级，下次再 merge）。
-                return Ok(());
-            }
-            *guard = true;
-            // 显式 drop MutexGuard：CompactingGuard 的 Drop 会重新取锁复位，
-            // 此处先释放避免后续 merge_segments 取其他锁时的持有顺序歧义
-            // （与 compact/reindex 的 finally 模式一致）。
-        }
-        let _cg = CompactingGuard {
-            flag: &self.inner.compacting,
+        let guard = match self.inner.compacting.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
         };
+        if *guard {
+            return Ok(());
+        }
+        let _compacting_guard = CompactingGuard::arm(guard);
         let snap = self.inner.snapshot.read().unwrap().clone();
         if snap.len() < 2 {
             return Ok(());
@@ -687,7 +748,7 @@ impl Collection {
             // 04-wal：manifest 切换前 append 段增删记录（SPEC §6.4）：
             // DeleteSegment(旧) + AddSegment(新)。crash 在 manifest 切换前 →
             // AddSegment(new) 不在 manifest → 孤儿清理；DeleteSegment(old) → 旧段保留。
-            // B-2：truncate 仅 compact 调（此处 merge_segments 不 truncate）。
+            // B-2：merge 不重写 WAL。compact 在成功后 retain，只留仍在 manifest 里的 tombstone。
             let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
             for u in &source_ulids {
                 wal.append(&crate::wal::WalRecord::DeleteSegment {
@@ -1179,7 +1240,18 @@ impl Collection {
     /// 查询期 search 把 tombstone 并入 filter 过滤；持久化经 WAL（04 计划）。
     /// 段不可变（I-1）：不修改段文件，仅更新内存位图。
     pub fn delete(&self, ids: &[String]) -> Result<u64> {
-        // 06：Rebuilding 期写路径 E_BUSY（Q-6）。
+        // 06：Rebuilding 期写路径 E_BUSY（Q-6）。先看状态，避免无意义地堵在合并后面。
+        if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
+            return Err(VaneError::Busy("reindex/compact in progress".into()));
+        }
+        // 阻塞到 compact / reindex / auto-merge 结束，再读快照和写 WAL。
+        // 这样 tombstone 要么被这次合并看见，要么打在合并后的新 ULID 上（retain 会留下）。
+        // 锁顺序：compacting，然后 snapshot。不要在持有 write_state 时等这把锁。
+        let _compacting_guard = self
+            .inner
+            .compacting
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
             return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
@@ -1240,17 +1312,15 @@ impl Collection {
         if *self.inner.dict_state.read().unwrap() == DictState::Rebuilding {
             return Err(VaneError::Busy("reindex/compact in progress".into()));
         }
-        // 重入保护。M-minor-1：CompactingGuard 保证 panic 时复位标志。
-        {
-            let mut guard = self.inner.compacting.lock().unwrap();
-            if *guard {
+        // 第二路不阻塞。拿到后一直持有，直到 run_compact（含 retain）返回。
+        let guard = match self.inner.compacting.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::WouldBlock) => {
                 return Err(VaneError::Busy("reindex/compact in progress".into()));
             }
-            *guard = true;
-        }
-        let _cg = CompactingGuard {
-            flag: &self.inner.compacting,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
         };
+        let _compacting_guard = CompactingGuard::arm(guard);
         self.run_compact()
     }
 
@@ -1275,11 +1345,21 @@ impl Collection {
         }
         let source_ulids: Vec<String> = snap.iter().map(|r| r.meta().ulid.clone()).collect();
         self.merge_segments(source_ulids)?;
-        // 04-wal：compact 是唯一 truncate 调用点（B-2）。merge_segments 已 append
-        // DeleteSegment(旧) + AddSegment(新) 并切换 manifest；此时所有旧段物理清除
-        // （tombstone 随之清除），WAL 可一次性清空。
+        // manifest 已切换。只丢掉已经不在 manifest 里的段的 tombstone，
+        // 其它 collection 和仍有效段的 AddTombstone 留在 WAL。回调在路径锁内加载。
         let wal = crate::wal::Wal::open(self.inner.vfs.clone(), &self.inner.db_path)?;
-        wal.truncate()?;
+        wal.retain(|| {
+            self.inner.manifest_store.load()?.ok_or_else(|| {
+                VaneError::Corrupt(
+                    crate::types::ErrorContext::new(format!(
+                        "manifest missing after compact (collection={}, db={})",
+                        self.inner.name, self.inner.db_path
+                    ))
+                    .op("compact")
+                    .hint("不要删除 manifest.json，重试 compact"),
+                )
+            })
+        })?;
         Ok(())
     }
 
@@ -1333,19 +1413,15 @@ impl Collection {
     /// - 非 PendingReindex 状态：返回 InvalidArg（Stable 无待重建词表）。
     /// - compact 进行中：返回 E_BUSY。
     pub fn reindex(&self) -> Result<ReindexHandle> {
-        // 互斥：compact 进行中 → E_BUSY。
-        {
-            let mut guard = self.inner.compacting.lock().unwrap();
-            if *guard {
+        // 第二路 compact/reindex 不阻塞。持锁到 run_reindex 结束，含状态校验失败的提前返回。
+        let guard = match self.inner.compacting.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::WouldBlock) => {
                 return Err(VaneError::Busy("reindex/compact in progress".into()));
             }
-            *guard = true;
-        }
-        // M-minor-1：CompactingGuard 保证 panic 时复位标志。提前返回（状态校验失败）
-        // 时 guard drop 复位；成功路径 run_reindex 返回后 guard drop 复位。
-        let _cg = CompactingGuard {
-            flag: &self.inner.compacting,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
         };
+        let _compacting_guard = CompactingGuard::arm(guard);
         // 校验状态：必须 PendingReindex。
         {
             let state = self.inner.dict_state.read().unwrap();

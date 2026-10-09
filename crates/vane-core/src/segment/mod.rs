@@ -83,6 +83,11 @@ impl SegmentWriter {
         self.docid_base
     }
 
+    /// 段 ULID。`finalize` 会消费 writer，调用方须在此之前抄走。
+    pub(crate) fn ulid(&self) -> &str {
+        &self.ulid
+    }
+
     /// 返回段内局部 docid（从 0 起 u64 单调递增）。
     /// 全局 docid = docid_base + 返回值。
     pub fn add_doc(

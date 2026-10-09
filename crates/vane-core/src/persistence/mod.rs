@@ -75,39 +75,104 @@ impl ManifestStore {
         format!("{}/{}", self.db_path, MANIFEST_TMP)
     }
 
-    /// 加载 manifest。新库（manifest 不存在）返回 `Ok(None)`；
-    /// 损坏返回 `Err(VaneError::Corrupt)`。
+    /// 加载 manifest。
+    ///
+    /// 成功解析 `manifest.json` 返回 `Ok(Some)`。真正的新库返回 `Ok(None)`。
+    /// 文件缺失但已有 `seg_*` 或非空 `wal.log` 时返回 `Err(Corrupt)`，禁止当成空库。
+    /// 可解析的 `manifest.json.tmp` 经 `rename` 提升为 manifest。
     pub fn load(&self) -> Result<Option<Manifest>> {
-        let path = self.manifest_path();
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 8192];
-        let mut off = 0u64;
-        loop {
-            let n = match self.vfs.read_at(&path, &mut tmp, off) {
-                Ok(n) => n,
-                Err(VaneError::Io(_)) => return Ok(None), // manifest 不存在（新库）
-                Err(e) => return Err(e),
-            };
-            if n == 0 {
-                break;
+        let entries = match self.vfs.list(&self.db_path) {
+            Ok(entries) => entries,
+            Err(e) if io_is_not_found(&e) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        if entries.iter().any(|name| name == MANIFEST_FILENAME) {
+            let buf = read_vfs_all(self.vfs.as_ref(), &self.manifest_path())?;
+            // 空字节视同缺失，继续尝试 tmp / 持久数据判定。
+            if !buf.is_empty() {
+                return Ok(Some(parse_manifest(&buf, &self.db_path)?));
             }
-            buf.extend_from_slice(&tmp[..n]);
-            off += n as u64;
         }
-        if buf.is_empty() {
-            return Ok(None);
+        self.recover_missing_manifest(&entries)
+    }
+
+    /// manifest 不在目录里（或读出为空）时的恢复。不删除段，不提升无法解析的 tmp。
+    fn recover_missing_manifest(&self, entries: &[String]) -> Result<Option<Manifest>> {
+        if entries.iter().any(|name| name == MANIFEST_TMP) {
+            let buf = read_vfs_all(self.vfs.as_ref(), &self.tmp_path())?;
+            if !buf.is_empty() {
+                if let Ok(manifest) = serde_json::from_slice::<Manifest>(&buf) {
+                    // 提升后 recover 会删掉 manifest 未列出的 seg_*。tmp 若是更旧的
+                    // 空 manifest，提升等于授权清段。盖不住现有段就拒绝打开。
+                    if !self.tmp_covers_on_disk_segments(&manifest)? {
+                        return Err(self.missing_manifest_corrupt());
+                    }
+                    self.vfs.rename(&self.tmp_path(), &self.manifest_path())?;
+                    return Ok(Some(manifest));
+                }
+                if self.has_durable_data()? {
+                    return Err(self.missing_manifest_corrupt());
+                }
+                return Ok(None);
+            }
         }
-        let m: Manifest = serde_json::from_slice(&buf).map_err(|e| {
-            VaneError::Corrupt(
-                crate::types::ErrorContext::new(format!(
-                    "manifest parse: {} (db={})",
-                    e, self.db_path
-                ))
-                .op("load manifest")
-                .hint("检查 manifest.json 完整性或从备份恢复"),
-            )
-        })?;
-        Ok(Some(m))
+        if self.has_durable_data()? {
+            Err(self.missing_manifest_corrupt())
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// tmp 里的 manifest 是否列出了磁盘上每一个 `seg_*`。没有段目录时为 true。
+    fn tmp_covers_on_disk_segments(&self, manifest: &Manifest) -> Result<bool> {
+        let seg_dir = format!("{}/segments", self.db_path);
+        let entries = match self.vfs.list(&seg_dir) {
+            Ok(entries) => entries,
+            Err(e) if io_is_not_found(&e) => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        let listed: std::collections::HashSet<&str> = manifest
+            .collections
+            .values()
+            .flat_map(|col| col.segment_ulids.iter().map(String::as_str))
+            .collect();
+        Ok(entries.iter().all(|name| match name.strip_prefix("seg_") {
+            Some(ulid) => listed.contains(ulid),
+            None => true,
+        }))
+    }
+
+    /// `<db>/segments` 下有 `seg_*`，或 `wal.log` 至少能读到 1 字节。
+    fn has_durable_data(&self) -> Result<bool> {
+        let seg_dir = format!("{}/segments", self.db_path);
+        match self.vfs.list(&seg_dir) {
+            Ok(entries) => {
+                if entries.iter().any(|name| name.starts_with("seg_")) {
+                    return Ok(true);
+                }
+            }
+            Err(e) if io_is_not_found(&e) => {}
+            Err(e) => return Err(e),
+        }
+        let wal_path = format!("{}/wal.log", self.db_path);
+        let mut byte = [0u8; 1];
+        match self.vfs.read_at(&wal_path, &mut byte, 0) {
+            Ok(n) if n >= 1 => Ok(true),
+            Ok(_) => Ok(false),
+            Err(e) if io_is_not_found(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn missing_manifest_corrupt(&self) -> VaneError {
+        VaneError::Corrupt(
+            crate::types::ErrorContext::new(format!(
+                "manifest.json missing with durable data (db={})",
+                self.db_path
+            ))
+            .op("load manifest")
+            .hint("不要删除已有段，请从 export 备份恢复"),
+        )
     }
 
     /// SPEC §6.4 原子切换：写临时文件 → sync → rename。
@@ -187,6 +252,36 @@ impl ManifestStore {
     }
 }
 
+fn read_vfs_all(vfs: &dyn Vfs, path: &str) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut off = 0u64;
+    loop {
+        let n = vfs.read_at(path, &mut tmp, off)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        off += n as u64;
+    }
+    Ok(buf)
+}
+
+fn parse_manifest(buf: &[u8], db_path: &str) -> Result<Manifest> {
+    serde_json::from_slice(buf).map_err(|e| {
+        VaneError::Corrupt(
+            crate::types::ErrorContext::new(format!("manifest parse: {} (db={})", e, db_path))
+                .op("load manifest")
+                .hint("检查 manifest.json 完整性或从备份恢复"),
+        )
+    })
+}
+
+/// list/read 失败时，只有看起来像「文件不存在」的 Io 才当成缺失。
+fn io_is_not_found(err: &VaneError) -> bool {
+    crate::vfs::io_error_is_not_found(err)
+}
+
 /// SPEC §7.1 auto-commit 配置。默认 `On { interval_ms=1000, max_docs=1000 }`。
 #[derive(Debug, Clone)]
 pub enum AutoCommitConfig {
@@ -204,9 +299,9 @@ impl Default for AutoCommitConfig {
 }
 
 /// SPEC §7.1 auto-commit 触发器：无状态计数器 + 时间戳。
-/// 由 api-core 在 add 路径查询 `should_flush()`；触发后调用 `reset()`。
-///
-/// 双触发：`docs_since_flush >= max_docs` 或 `elapsed >= interval_ms`（先到先触发）。
+/// `add()` 查 `should_flush()`（`max_docs` 或 interval 已到）。
+/// 后台线程查 `interval_delay()`，到点再 flush，不靠下一次 `add()`。
+/// 触发 flush 后调用 `reset()`。
 pub struct AutoCommitter {
     config: AutoCommitConfig,
     docs_since_flush: u32,
@@ -241,6 +336,29 @@ impl AutoCommitter {
                 }
                 let elapsed = self.last_flush.elapsed().as_millis() as u32;
                 elapsed >= *interval_ms
+            }
+        }
+    }
+
+    /// 距 interval 触发还要多久。
+    ///
+    /// `None`：Off，或 buffer 里没有文档。`Some(0)`：interval 已到。
+    /// 不看 `max_docs`。那条仍由 `add()` 里的 `should_flush()` 处理，
+    /// 避免 flush 失败后后台线程立刻重试、把一次性故障吃掉。
+    pub fn interval_delay(&self) -> Option<std::time::Duration> {
+        match &self.config {
+            AutoCommitConfig::Off => None,
+            AutoCommitConfig::On { interval_ms, .. } => {
+                if self.docs_since_flush == 0 {
+                    return None;
+                }
+                let interval = std::time::Duration::from_millis(u64::from(*interval_ms));
+                let elapsed = self.last_flush.elapsed();
+                if elapsed >= interval {
+                    Some(std::time::Duration::ZERO)
+                } else {
+                    Some(interval.saturating_sub(elapsed))
+                }
             }
         }
     }

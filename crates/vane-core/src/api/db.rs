@@ -1,11 +1,13 @@
 //! SPEC §4.1 Db 句柄：持有 Vfs + ManifestStore + collections 注册表。
 
+use crate::executor::IdleScheduler;
 use crate::persistence::{AutoCommitConfig, CollectionMeta, Manifest, ManifestStore};
 use crate::tokenizer::compute_tokenizer_id;
 use crate::types::{Result, Schema, VaneError};
-use crate::vfs::Vfs;
+use crate::vfs::{DbExclusiveLock, Vfs};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
+use std::time::Duration;
 
 use super::collection::{Collection, CollectionInner};
 use super::types::{CollectionOptions, OpenOptions};
@@ -15,6 +17,8 @@ pub struct Db {
 }
 
 pub(crate) struct DbInner {
+    /// 声明在最前：Drop 时先停掉空闲线程并 join，其它字段还在。
+    pub(crate) idle: IdleScheduler,
     pub(crate) vfs: Arc<dyn Vfs>,
     pub(crate) db_path: String,
     // M4 Phase 4 fix（Bug 1）：Arc<ManifestStore> → CollectionInner 克隆同一 Arc，
@@ -24,6 +28,8 @@ pub(crate) struct DbInner {
     // M2-10：Executor（SPEC §11）。open 时经 executor::default_executor() 工厂构造，
     // 平台分支集中在 executor/mod.rs（I-5）。search 路径用 Executor::scope 并行搜各段。
     pub(crate) executor: Arc<dyn crate::executor::Executor>,
+    /// 与仍存活的 CollectionInner 共享。最后一个 Arc drop 时才解锁。
+    pub(crate) exclusive_lock: Arc<dyn DbExclusiveLock>,
     // I3：Db 级 fallback，restore 时用（M0 restore 直接用 opts.auto_commit 传入参数；
     // 此字段保留供未来 reopen/动态配置场景，故 allow dead_code）
     #[allow(dead_code)]
@@ -41,6 +47,8 @@ pub(crate) struct DbInner {
 
 impl Db {
     pub fn open(vfs: Arc<dyn Vfs>, path: &str, opts: OpenOptions) -> Result<Self> {
+        // 必须在 load / recover 之前拿锁。Busy 时不得写 manifest、不得清理段。
+        let exclusive_lock = Arc::from(vfs.try_lock_exclusive(path)?);
         let manifest_store = Arc::new(ManifestStore::new(vfs.clone(), path));
         let manifest = manifest_store.load()?.unwrap_or_else(Manifest::empty);
         let collections = RwLock::new(HashMap::new());
@@ -51,11 +59,13 @@ impl Db {
         // M2-10：Executor 工厂构造（平台分支在 executor/mod.rs，I-5）。
         let executor = crate::executor::default_executor();
         let inner = Arc::new(DbInner {
+            idle: IdleScheduler::new(),
             vfs: vfs.clone(),
             db_path: path.to_string(),
             manifest_store,
             collections,
             executor,
+            exclusive_lock,
             auto_commit: opts.auto_commit.clone(),
             #[cfg(feature = "jieba")]
             jieba_dict: std::sync::RwLock::new(jieba_dict),
@@ -94,6 +104,10 @@ impl Db {
                 .unwrap()
                 .insert(name.clone(), Arc::new(col_inner));
         }
+        let weak = Arc::downgrade(&inner);
+        inner
+            .idle
+            .start(move |ticket| idle_commit_loop(weak, ticket));
         Ok(db)
     }
 
@@ -181,9 +195,24 @@ impl Db {
         super::snapshot::write_snapshot(self.inner.vfs.as_ref(), &self.inner.db_path, dest)
     }
 
+    /// 把每个 collection 的 buffer 刷盘。空 buffer 成功。
+    ///
+    /// 与 auto-commit 开关无关。某个 collection 失败时继续刷其余的，返回第一个错误。
+    /// 不停止空闲线程：之后的 `add()` 仍会按 interval 提交。`Drop` 不刷盘。
     pub fn close(&self) -> Result<()> {
-        // M0：无后台线程需 join；flush 由调用方显式调
-        Ok(())
+        let cols = collection_snapshot(&self.inner);
+        let mut first_err = None;
+        for (_, col) in cols {
+            if let Err(err) = (Collection { inner: col }).flush() {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     // ---- M4 §3.6 inspect API：纯新增 pub 方法，不改 M0-M3 冻结签名 ----
@@ -286,6 +315,86 @@ impl Clone for Db {
 
 // S9 裁决：不写 unsafe impl Send/Sync——DbInner 字段全部自动 Send+Sync
 // （Arc<dyn Vfs> 是 Send+Sync，RwLock<HashMap<...>> 是 Send+Sync）。
+
+const IDLE_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+const IDLE_MAX_SLEEP: Duration = Duration::from_secs(60);
+const IDLE_MIN_SLEEP: Duration = Duration::from_millis(1);
+
+fn collection_snapshot(inner: &DbInner) -> Vec<(String, Arc<CollectionInner>)> {
+    let guard = match inner.collections.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .iter()
+        .map(|(name, col)| (name.clone(), Arc::clone(col)))
+        .collect()
+}
+
+fn clamp_idle_sleep(delay: Duration) -> Duration {
+    if delay < IDLE_MIN_SLEEP {
+        IDLE_MIN_SLEEP
+    } else {
+        delay
+    }
+}
+
+/// native 后台循环。wasm 上 `IdleScheduler::start` 不调用它。
+///
+/// 只在 interval 到点时 flush。`max_docs` 仍由 `add()` 处理。
+/// flush 失败后退避，避免磁盘满时空转。Db 丢掉后 `Weak` 升级失败，循环退出。
+fn idle_commit_loop(db: Weak<DbInner>, ticket: crate::executor::IdleTicket) {
+    let mut backoff: HashMap<String, web_time::Instant> = HashMap::new();
+    while !ticket.stopped() {
+        let Some(inner) = db.upgrade() else {
+            break;
+        };
+        let cols = collection_snapshot(&inner);
+        drop(inner);
+        let seen = ticket.epoch();
+        let mut next_wait = IDLE_MAX_SLEEP;
+        let mut flushed_any = false;
+        let now = web_time::Instant::now();
+        for (name, col) in cols {
+            if let Some(until) = backoff.get(&name).copied() {
+                if until > now {
+                    next_wait =
+                        next_wait.min(clamp_idle_sleep(until.saturating_duration_since(now)));
+                    continue;
+                }
+            }
+            match col.idle_delay() {
+                None => {
+                    backoff.remove(&name);
+                }
+                Some(delay) if delay.is_zero() => {
+                    flushed_any = true;
+                    match (Collection { inner: col }).flush() {
+                        Ok(()) => {
+                            backoff.remove(&name);
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[vane] idle auto-commit flush for collection '{name}' failed: {err}"
+                            );
+                            backoff.insert(name, web_time::Instant::now() + IDLE_RETRY_BACKOFF);
+                        }
+                    }
+                }
+                Some(delay) => {
+                    next_wait = next_wait.min(clamp_idle_sleep(delay));
+                }
+            }
+        }
+        if ticket.stopped() {
+            break;
+        }
+        if flushed_any {
+            continue;
+        }
+        ticket.wait_until_changed(seen, next_wait);
+    }
+}
 
 // ---- 07：dict-zh feature 启用时 Db::open 加载预编译 jieba 词典 ----
 

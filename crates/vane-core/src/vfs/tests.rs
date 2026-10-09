@@ -107,6 +107,41 @@ mod std_fs_tests {
         assert_eq!(files, vec!["a.bin", "b.bin", "c.bin"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn std_fs_rename_overwrites_existing_target() {
+        // 目标已存在时 rename 必须留下源内容，且返回后立刻可读。禁止先删出空窗。
+        let dir = std::env::temp_dir().join(format!(
+            "vane-vfs-rename-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vfs = StdFsVfs::with_root(dir.to_str().unwrap());
+        vfs.create("src.bin").unwrap();
+        vfs.write_at("src.bin", b"source-bytes", 0).unwrap();
+        vfs.create("dst.bin").unwrap();
+        vfs.write_at("dst.bin", b"old-target!", 0).unwrap();
+        vfs.rename("src.bin", "dst.bin").unwrap();
+        assert!(
+            vfs.read_at("src.bin", &mut [0u8; 1], 0).is_err(),
+            "source path must be gone"
+        );
+        assert!(
+            !dir.join("src.bin").exists(),
+            "source path must not exist on disk"
+        );
+        let mut buf = [0u8; 12];
+        let n = vfs.read_at("dst.bin", &mut buf, 0).unwrap();
+        assert_eq!(n, b"source-bytes".len());
+        assert_eq!(&buf, b"source-bytes");
+        assert_eq!(std::fs::read(dir.join("dst.bin")).unwrap(), b"source-bytes");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[test]

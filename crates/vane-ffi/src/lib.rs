@@ -1110,12 +1110,25 @@ pub extern "C" fn vane_db_segment_info(
 }
 
 /// 关闭句柄（Db / Collection / Reindex 均可）。注销后该句柄不可再用。
+///
+/// Db 句柄先 `Db::close()` 刷盘。失败则留下句柄，调用方可以再 close。
 #[no_mangle]
 pub extern "C" fn vane_close(handle: u64) -> i32 {
-    catch_unwind_code(|| match remove_handle(handle) {
-        Ok(true) => 0,
-        Ok(false) => VaneError::NotFound(format!("handle {handle} not found").into()).code(),
-        Err(code) => code,
+    catch_unwind_code(|| {
+        match lookup_db(handle) {
+            Ok(Some(db)) => {
+                if let Err(err) = db.close() {
+                    return fail(err);
+                }
+            }
+            Ok(None) => {}
+            Err(code) => return code,
+        }
+        match remove_handle(handle) {
+            Ok(true) => 0,
+            Ok(false) => VaneError::NotFound(format!("handle {handle} not found").into()).code(),
+            Err(code) => code,
+        }
     })
 }
 

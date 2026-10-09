@@ -3,13 +3,14 @@
 //! WAL 文件 `<db>/wal.log`，JSON 行格式（每行一条 [`WalRecord`]）。`append` 后 `sync`
 //! 保证崩溃前落盘。崩溃恢复见 [`recover`]：重放未提交的 tombstone/段增删，清理半成品段。
 //!
-//! # B-2 硬约束（计划裁决）
+//! # B-2 硬约束
 //!
-//! **flush 路径不调 [`Wal::truncate`]**——否则 `flush→delete→flush→崩溃` 会丢失未消费的
-//! `AddTombstone`（tombstone 仅存 WAL，02 不改 header.bin），致已删文档复活（数据损坏）。
-//! **仅 compact/merge 成功 + manifest 切换后调 [`Wal::truncate`]**（此时 AddTombstone
-//! 随旧段物理清除）。WAL 累积 AddSegment 记录直到 compact（ULID 字符串体积可忽略），
-//! compact 后一次性清空。
+//! **flush 不调 [`Wal::truncate`] / [`Wal::retain`]**。tombstone 只在 WAL 里，整份清空会让
+//! 已删文档复活。compact 在合并成功且 manifest 切换后调 [`Wal::retain`]：只留下
+//! `AddTombstone`，且 `(collection, ulid)` 仍在 manifest 的 `segment_ulids` 里。
+//! `AddSegment` / `DeleteSegment` 可丢（孤儿段由目录扫描清理）。重写走
+//! `{wal_path}.tmp` + sync + rename，禁止先删除 `wal.log`。[`Wal::truncate`] 只留给旧单测，
+//! 同样持路径锁并走 tmp + rename。
 //!
 //! # M-minor-2：tombstone abs/local 语义（02 遗留）
 //!
@@ -22,7 +23,7 @@ use crate::persistence::Manifest;
 use crate::types::{Result, VaneError};
 use crate::vfs::Vfs;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(test)]
 mod tests;
@@ -47,9 +48,30 @@ pub enum WalRecord {
 }
 
 /// 薄 WAL 句柄。无状态（每次 append 独立 sync），可随时丢弃/重建。
+/// 同一路径的并发 append 走进程内锁；锁不放在本结构里，因为 [`Wal::open`] 每次新建句柄。
 pub struct Wal {
     vfs: Arc<dyn Vfs>,
     path: String,
+}
+
+/// 按 wal 路径共享。中毒后 `into_inner`，避免一次 panic 让后续 append 全部 panic。
+fn wal_path_lock(path: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = locks.lock().unwrap_or_else(|err| err.into_inner());
+    map.entry(path.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// 文件末尾没有 `\n` 时，最后一段的处置。
+enum WalTail {
+    /// 空文件，或以 `\n` 结束。
+    Clean,
+    /// 最后一段本身是合法 [`WalRecord`]（已计入记录）。
+    ValidPartial,
+    /// 最后一段无法解析（不计入记录）。
+    Torn,
 }
 
 impl Wal {
@@ -62,32 +84,72 @@ impl Wal {
     }
 
     /// 追加一条记录（JSON 行，每行一条；append 后 sync 保证崩溃前落盘）。
+    ///
+    /// 修复残尾和这次 append+sync 持有同一把路径锁。文件不以 `\n` 结尾时，先把应保留的
+    /// 前缀写成规范行再追加。前缀里以 `\n` 结束的坏行返回 `E_CORRUPT`，并且不改文件。
     pub fn append(&self, record: &WalRecord) -> Result<()> {
+        let lock = wal_path_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+        self.append_locked(record)
+    }
+
+    fn append_locked(&self, record: &WalRecord) -> Result<()> {
         // M4 §3.5 tracing：WAL append 次数——记录值（Debug）。cfg 门控，编译期消除。
         #[cfg(feature = "tracing")]
         tracing::debug!(?record, "wal append");
-        let mut line = serde_json::to_vec(record).map_err(|e| {
-            VaneError::Corrupt(
-                crate::types::ErrorContext::new(format!("wal serialize: {}", e))
-                    .op("wal append")
-                    .hint("检查 wal.log 完整性或重新操作"),
-            )
-        })?;
-        line.push(b'\n');
+        self.repair_unterminated_tail()?;
+        let line = encode_line(record)?;
         self.vfs.append(&self.path, &line)?;
         self.vfs.sync(&self.path)?;
         Ok(())
     }
 
-    /// 读取全部记录（崩溃恢复用）。文件不存在（新库）返回空。
+    /// 读取全部记录（崩溃恢复用）。文件不存在（新库）返回空。空行跳过。
+    ///
+    /// 末尾没有 `\n` 且无法解析的残缺记录丢弃，并在返回前从磁盘截掉。末尾没有 `\n`
+    /// 但本身是合法 [`WalRecord`] 则保留。以 `\n` 结束的坏行返回 `E_CORRUPT`（op=`wal recover`）。
     pub fn read_all(&self) -> Result<Vec<WalRecord>> {
+        let lock = wal_path_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+        self.read_all_locked()
+    }
+
+    fn read_all_locked(&self) -> Result<Vec<WalRecord>> {
+        let Some(buf) = self.read_bytes()? else {
+            return Ok(Vec::new());
+        };
+        let (records, tail) = parse_wal(&buf, &self.path)?;
+        if matches!(tail, WalTail::Torn) {
+            // 已持有路径锁。rewrite 不再加锁（std Mutex 不可重入）。
+            self.rewrite_canonical(&records)?;
+        }
+        Ok(records)
+    }
+
+    /// 文件不以 `\n` 结尾时，把应保留的前缀重写成规范行。调用者必须已持有路径锁。
+    fn repair_unterminated_tail(&self) -> Result<()> {
+        let Some(buf) = self.read_bytes()? else {
+            return Ok(());
+        };
+        if buf.is_empty() || buf.last() == Some(&b'\n') {
+            return Ok(());
+        }
+        let (records, _) = parse_wal(&buf, &self.path)?;
+        self.rewrite_canonical(&records)
+    }
+
+    fn read_bytes(&self) -> Result<Option<Vec<u8>>> {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 8192];
         let mut off = 0u64;
         loop {
             let n = match self.vfs.read_at(&self.path, &mut tmp, off) {
                 Ok(n) => n,
-                Err(VaneError::Io(_)) => return Ok(Vec::new()), // 文件不存在（新库）
+                // 还没读到任何字节且是 not-found：新库。其它 Io（含读到一半失败）
+                // 必须上抛，不能当成空 WAL，否则已提交的 tombstone 会在重开时消失。
+                Err(e) if buf.is_empty() && crate::vfs::io_error_is_not_found(&e) => {
+                    return Ok(None);
+                }
                 Err(e) => return Err(e),
             };
             if n == 0 {
@@ -96,38 +158,112 @@ impl Wal {
             buf.extend_from_slice(&tmp[..n]);
             off += n as u64;
         }
-        let mut records = Vec::new();
-        for line in buf.split(|b| *b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            let r: WalRecord = serde_json::from_slice(line).map_err(|e| {
-                VaneError::Corrupt(
-                    crate::types::ErrorContext::new(format!(
-                        "wal parse: {} (path={})",
-                        e, self.path
-                    ))
-                    .op("wal recover")
-                    .hint("wal.log 损坏，检查崩溃恢复或清除 wal.log 重试"),
-                )
-            })?;
-            records.push(r);
-        }
-        Ok(records)
+        Ok(Some(buf))
     }
 
-    /// **仅 compact/merge 成功 + manifest 切换后调用**（B-2 修复）。
-    ///
-    /// flush 路径**不**调 truncate——否则 `flush→delete→flush→崩溃` 会丢失未消费的
-    /// `AddTombstone`（tombstone 仅存 WAL，02 不改 header.bin），致已删文档复活（数据损坏）。
-    /// WAL 累积 AddSegment 记录直到 compact（ULID 字符串体积可忽略），compact 后一次性清空。
-    ///
-    /// 实现：delete（忽略不存在）+ create（空文件）+ sync。
-    pub fn truncate(&self) -> Result<()> {
-        let _ = self.vfs.delete(&self.path);
-        self.vfs.create(&self.path)?;
-        self.vfs.sync(&self.path)?;
+    /// 规范形式经 `{wal_path}.tmp` sync 后 rename 覆盖。不删除 wal.log（没有 truncate）。
+    fn rewrite_canonical(&self, records: &[WalRecord]) -> Result<()> {
+        let mut body = Vec::new();
+        for record in records {
+            body.extend(encode_line(record)?);
+        }
+        let tmp = format!("{}.tmp", self.path);
+        // 残留 tmp 可能比新内容长。Vfs 不能截断，先删 tmp 再建；不碰 wal.log。
+        let _ = self.vfs.delete(&tmp);
+        self.vfs.create(&tmp)?;
+        if !body.is_empty() {
+            self.vfs.write_at(&tmp, &body, 0)?;
+        }
+        self.vfs.sync(&tmp)?;
+        self.vfs.rename(&tmp, &self.path)?;
         Ok(())
+    }
+
+    /// 重写 WAL：只保留仍指向 manifest 现存段的 [`WalRecord::AddTombstone`]。
+    ///
+    /// `load_manifest` 在路径锁内调用，读到的是加锁之后的 manifest，避免把别的
+    /// collection 刚追加的 tombstone 用过期快照滤掉。回调不得再进本 WAL
+    /// （`append` / `read_all` / `retain` / `truncate`）：std Mutex 不可重入。
+    /// `AddSegment` / `DeleteSegment` 丢弃。空结果写成空文件。
+    /// 经 `{path}.tmp` sync 后 rename，不删除 `wal.log`。
+    pub fn retain(&self, load_manifest: impl FnOnce() -> Result<Manifest>) -> Result<()> {
+        let lock = wal_path_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+        let manifest = load_manifest()?;
+        let records = self.read_all_locked()?;
+        let kept: Vec<WalRecord> = records
+            .into_iter()
+            .filter(|record| match record {
+                WalRecord::AddTombstone {
+                    collection, ulid, ..
+                } => ulid_in_manifest(&manifest, collection, ulid),
+                WalRecord::AddSegment { .. } | WalRecord::DeleteSegment { .. } => false,
+            })
+            .collect();
+        self.rewrite_canonical(&kept)
+    }
+
+    /// 清空 WAL。持路径锁，经 tmp + sync + rename 写成空文件，不先删除 `wal.log`。
+    ///
+    /// 生产 compact 用 [`Self::retain`]。本方法留给既有单测。
+    pub fn truncate(&self) -> Result<()> {
+        let lock = wal_path_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+        self.rewrite_canonical(&[])
+    }
+}
+
+fn encode_line(record: &WalRecord) -> Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(record).map_err(|e| {
+        VaneError::Corrupt(
+            crate::types::ErrorContext::new(format!("wal serialize: {}", e))
+                .op("wal append")
+                .hint("检查 wal.log 完整性或重新操作"),
+        )
+    })?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+fn parse_record(line: &[u8], path: &str) -> Result<WalRecord> {
+    serde_json::from_slice(line).map_err(|e| {
+        VaneError::Corrupt(
+            crate::types::ErrorContext::new(format!("wal parse: {} (path={})", e, path))
+                .op("wal recover")
+                .hint("wal.log 损坏，检查崩溃恢复或清除 wal.log 重试"),
+        )
+    })
+}
+
+/// 以 `\n` 结束的坏行是 `E_CORRUPT`（不改文件）。无换行的合法尾记录保留；无法解析的残尾丢掉。
+fn parse_wal(buf: &[u8], path: &str) -> Result<(Vec<WalRecord>, WalTail)> {
+    if buf.is_empty() {
+        return Ok((Vec::new(), WalTail::Clean));
+    }
+    let ends_with_nl = buf.last() == Some(&b'\n');
+    let parts: Vec<&[u8]> = buf.split(|b| *b == b'\n').collect();
+    let Some((last, lines)) = parts.split_last() else {
+        return Ok((Vec::new(), WalTail::Clean));
+    };
+    let mut records = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        records.push(parse_record(line, path)?);
+    }
+    if ends_with_nl {
+        return Ok((records, WalTail::Clean));
+    }
+    if last.is_empty() {
+        return Ok((records, WalTail::Clean));
+    }
+    match serde_json::from_slice::<WalRecord>(last) {
+        Ok(record) => {
+            records.push(record);
+            Ok((records, WalTail::ValidPartial))
+        }
+        Err(_) => Ok((records, WalTail::Torn)),
     }
 }
 

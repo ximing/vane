@@ -318,15 +318,19 @@ fn run_stress_add_flush_search(
 
     // 并发 flush 后 manifest 一致：reopen Db 加载 manifest 不 E_CORRUPT，
     // 且 reopen 后文档数一致（manifest 指向完整状态）。
+    // 同一路径上，活着的 Db/Collection 会让第二个 open 返回 E_BUSY。
+    let hit_count = hits.len();
+    drop(col);
+    drop(db);
     let db2 = Db::open(vfs, db_path, OpenOptions::default()).unwrap();
     let col2 = db2.collection("c", schema(), col_opts()).unwrap();
     let hits2 = col2.search(&text_query(top_k)).unwrap();
     assert_eq!(
         hits2.len(),
-        hits.len(),
+        hit_count,
         "reopen changed hit count (manifest inconsistency; got={}, prev={})",
         hits2.len(),
-        hits.len()
+        hit_count
     );
 
     eprintln!(
@@ -882,17 +886,20 @@ fn stress_concurrent_flush_no_corruption() {
     }
 
     // reopen Db 加载 manifest 不 E_CORRUPT（manifest 一致性核心断言）
+    // 段 ULID 无重复（先取走，再放掉句柄，否则第二个 open 是 E_BUSY）
+    let ulids = col.segment_ulids();
+    let hit_count = hits.len();
+    drop(col);
+    drop(db);
     let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
     let col2 = db2.collection("c", schema(), col_opts()).unwrap();
     let hits2 = col2.search(&text_query(top_k)).unwrap();
     assert_eq!(
         hits2.len(),
-        hits.len(),
+        hit_count,
         "reopen changed hit count (manifest corruption; Bug 1 regression?)"
     );
 
-    // 段 ULID 无重复
-    let ulids = col.segment_ulids();
     let ulid_set: HashSet<_> = ulids.iter().cloned().collect();
     assert_eq!(
         ulid_set.len(),

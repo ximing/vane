@@ -307,3 +307,239 @@ fn reindex_crash_keeps_tombstone_and_cleans_old_segments() {
     // 仅 1 个段（旧段孤儿清理后只剩 reindex 的新段）。
     assert_eq!(col2.segment_count(), 1);
 }
+
+fn read_all(vfs: &dyn Vfs, path: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut off = 0u64;
+    loop {
+        let n = vfs.read_at(path, &mut buf, off).unwrap();
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+        off += n as u64;
+    }
+    out
+}
+
+// manifest.json 在 rename 空窗里消失：已提交段还在时，重新 open 必须是 Corrupt，
+// 不能当成空库把 seg_* 清掉。
+#[test]
+fn manifest_loss_reopen_is_corrupt_and_keeps_segments() {
+    let vfs = Arc::new(MemoryVfs::new());
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let col = setup_col(&db);
+        col.add(&docs()).unwrap();
+        col.flush().unwrap();
+        let hits = col.search(&text_query()).unwrap();
+        assert!(
+            hits.iter().any(|h| h.id == "d0"),
+            "d0 searchable before loss"
+        );
+        assert!(
+            hits.iter().any(|h| h.id == "d1"),
+            "d1 searchable before loss"
+        );
+    }
+    vfs.delete("db/manifest.json").unwrap();
+    let opened = Db::open(vfs.clone(), "db", OpenOptions::default());
+    match opened {
+        Err(vane_core::types::VaneError::Corrupt(ctx)) => {
+            assert_eq!(ctx.op, Some("load manifest"));
+            let hint = ctx.hint.unwrap_or_default();
+            assert!(hint.contains("不要删"), "hint={hint}");
+            assert!(hint.contains("export"), "hint={hint}");
+        }
+        Err(other) => panic!("expected Corrupt, got {other}"),
+        Ok(_) => panic!("expected Corrupt, got Ok — committed segments would be wiped"),
+    }
+    let segs = vfs.list("db/segments").unwrap();
+    assert!(
+        segs.iter().any(|s| s.starts_with("seg_")),
+        "committed seg_* must remain after refused open: {segs:?}"
+    );
+}
+
+// 崩溃落在 tmp 已写完、rename 未完成：把读出的 manifest 放到 tmp 后重新 open，文档仍可搜。
+#[test]
+fn manifest_loss_tmp_promote_docs_remain_searchable() {
+    let vfs = Arc::new(MemoryVfs::new());
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let col = setup_col(&db);
+        col.add(&docs()).unwrap();
+        col.flush().unwrap();
+        let hits = col.search(&text_query()).unwrap();
+        assert!(hits.iter().any(|h| h.id == "d0"));
+    }
+    let bytes = read_all(vfs.as_ref(), "db/manifest.json");
+    assert!(!bytes.is_empty(), "flushed manifest must be non-empty");
+    vfs.delete("db/manifest.json").unwrap();
+    vfs.create("db/manifest.json.tmp").unwrap();
+    vfs.write_at("db/manifest.json.tmp", &bytes, 0).unwrap();
+    assert!(
+        vfs.read_at("db/manifest.json", &mut [0u8; 1], 0).is_err(),
+        "manifest.json must stay absent until open promotes tmp"
+    );
+    let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col2 = db2
+        .collection("c", schema(), CollectionOptions::default())
+        .unwrap();
+    let hits = col2.search(&text_query()).unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == "d0"),
+        "d0 must remain searchable after tmp promotion"
+    );
+    assert!(
+        hits.iter().any(|h| h.id == "d1"),
+        "d1 must remain searchable after tmp promotion"
+    );
+}
+
+// 进程在 write 中途崩溃：wal.log 末尾留下没有换行的半截 JSON。
+// 已提交的 tombstone 必须仍能重放，随后的 delete 也不能粘到残尾上。
+#[test]
+fn torn_wal_tail_reopen_keeps_tombstone_and_next_delete() {
+    let vfs = Arc::new(MemoryVfs::new());
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let col = setup_col(&db);
+        col.add(&docs()).unwrap();
+        col.flush().unwrap();
+        col.delete(&["d1".into()]).unwrap();
+        let hits = col.search(&text_query()).unwrap();
+        assert!(
+            !hits.iter().any(|h| h.id == "d1"),
+            "d1 deleted before torn tail"
+        );
+        assert!(hits.iter().any(|h| h.id == "d0"), "d0 still searchable");
+    }
+    let wal = read_all(vfs.as_ref(), "db/wal.log");
+    assert!(
+        wal.ends_with(b"\n"),
+        "committed wal must end with newline before the torn tail"
+    );
+    vfs.write_at("db/wal.log", b"{\"torn\"", wal.len() as u64)
+        .unwrap();
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let col = setup_col(&db);
+        let hits = col.search(&text_query()).unwrap();
+        assert!(
+            !hits.iter().any(|h| h.id == "d1"),
+            "torn tail must not block reopen or drop the committed tombstone"
+        );
+        assert!(hits.iter().any(|h| h.id == "d0"), "d0 still searchable");
+        col.delete(&["d0".into()]).unwrap();
+    }
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col = setup_col(&db);
+    let hits = col.search(&text_query()).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.id == "d0"),
+        "d0 excluded after second reopen"
+    );
+    assert!(
+        !hits.iter().any(|h| h.id == "d1"),
+        "d1 excluded after second reopen"
+    );
+}
+
+// 全库一份 wal.log。A 的 tombstone 还在 WAL 里时，B 的 compact 不能把它清掉。
+// B 分两段 flush：单段且没有 tombstone 的 compact 会直接返回，根本不重写 WAL。
+#[test]
+fn compact_one_collection_keeps_other_collection_tombstone() {
+    let vfs = Arc::new(MemoryVfs::new());
+    {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        let a = db
+            .collection("a", schema(), CollectionOptions::default())
+            .unwrap();
+        a.add(&docs()).unwrap();
+        a.flush().unwrap();
+        a.delete(&["d0".into()]).unwrap();
+        let hits = a.search(&text_query()).unwrap();
+        assert!(
+            !hits.iter().any(|h| h.id == "d0"),
+            "d0 hidden before the other collection compacts"
+        );
+        assert!(hits.iter().any(|h| h.id == "d1"), "d1 still searchable");
+
+        let b = db
+            .collection("b", schema(), CollectionOptions::default())
+            .unwrap();
+        b.add(&[doc("b0", "hello world")]).unwrap();
+        b.flush().unwrap();
+        b.add(&[doc("b1", "hello world")]).unwrap();
+        b.flush().unwrap();
+        assert!(
+            b.segment_count() >= 2,
+            "b must have two segments so compact rewrites the wal"
+        );
+        b.compact().unwrap();
+        assert_eq!(b.segment_count(), 1, "b compact must merge");
+    }
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let a = db
+        .collection("a", schema(), CollectionOptions::default())
+        .unwrap();
+    let hits = a.search(&text_query()).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.id == "d0"),
+        "a tombstone must survive b compact, got {hits:?}"
+    );
+    assert!(hits.iter().any(|h| h.id == "d1"), "a live doc remains");
+    let b = db
+        .collection("b", schema(), CollectionOptions::default())
+        .unwrap();
+    let hits = b.search(&text_query()).unwrap();
+    assert!(hits.iter().any(|h| h.id == "b0"), "b0 remains");
+    assert!(hits.iter().any(|h| h.id == "b1"), "b1 remains");
+}
+
+// delete 与 compact 互斥：要么合并看见 tombstone，要么 delete 打在新段 ULID 上。
+// 不 sleep。compact 拿不到锁时是 E_BUSY（delete 先持锁），delete 必须等到 Ok。
+#[test]
+fn delete_during_compact_stays_deleted_after_reopen() {
+    let vfs = Arc::new(MemoryVfs::new());
+    let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+    let col = setup_col(&db);
+    col.add(&docs_batch(0)).unwrap();
+    col.flush().unwrap();
+    col.add(&docs_batch(2)).unwrap();
+    col.flush().unwrap();
+    assert!(
+        col.segment_count() >= 2,
+        "compact must merge at least two segments"
+    );
+
+    let col_compact = col.clone();
+    let col_delete = col.clone();
+    let compact_thread = std::thread::spawn(move || col_compact.compact());
+    let delete_thread = std::thread::spawn(move || col_delete.delete(&["d0".into()]));
+    let deleted = delete_thread
+        .join()
+        .expect("delete thread")
+        .expect("delete waits, then Ok");
+    assert_eq!(deleted, 1, "the id must be tombstoned once");
+    match compact_thread.join().expect("compact thread") {
+        Ok(()) => {}
+        Err(vane_core::types::VaneError::Busy(_)) => {}
+        Err(e) => panic!("compact failed: {e}"),
+    }
+    drop(col);
+    drop(db);
+
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col = setup_col(&db);
+    let hits = col.search(&text_query()).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.id == "d0"),
+        "d0 must stay deleted across reopen, got {hits:?}"
+    );
+    assert!(hits.iter().any(|h| h.id == "d1"), "d1 remains");
+    assert!(hits.iter().any(|h| h.id == "d2"), "d2 remains");
+    assert!(hits.iter().any(|h| h.id == "d3"), "d3 remains");
+}

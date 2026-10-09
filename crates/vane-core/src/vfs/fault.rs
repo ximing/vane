@@ -310,6 +310,11 @@ impl Vfs for FaultVfs {
         }
         self.inner.list(dir)
     }
+
+    fn try_lock_exclusive(&self, db_path: &str) -> Result<Box<dyn crate::vfs::DbExclusiveLock>> {
+        // 默认实现是 no-op。包一层 FaultVfs 不能把 inner 的锁丢掉。
+        self.inner.try_lock_exclusive(db_path)
+    }
 }
 
 /// 轻量 glob 匹配：`*` 匹配任意序列（含 `/`，零或多个字符），无其他特殊字符。
@@ -565,5 +570,21 @@ mod tests {
         let mut buf2 = [0u8; 3];
         vfs.read_at("db/manifest.json.tmp", &mut buf2, 0).unwrap();
         assert_eq!(&buf2, b"NEW", "tmp still exists with new content");
+    }
+
+    #[test]
+    fn try_lock_exclusive_forwards_to_inner() {
+        let vfs = FaultVfs::wrap_memory();
+        let held = vfs.try_lock_exclusive("db").unwrap();
+        let err = match vfs.try_lock_exclusive("db") {
+            Err(e) => e,
+            Ok(_) => panic!("second lock must be Busy"),
+        };
+        assert!(
+            matches!(err, VaneError::Busy(ref ctx) if ctx.op == Some("open")),
+            "second lock must be Busy from the inner MemoryVfs, got {err}"
+        );
+        drop(held);
+        vfs.try_lock_exclusive("db").unwrap();
     }
 }

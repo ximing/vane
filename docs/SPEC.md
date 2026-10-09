@@ -1,4 +1,4 @@
-# Vane 技术规范（SPEC v1.6）
+# Vane 技术规范（SPEC v1.7）
 
 > 依据 `docs/REQUIREMENTS.md` v1.1 形式化。本文档与需求合同的关系：REQUIREMENTS 回答"做什么/为什么"，
 > 本 SPEC 回答"精确怎么做"——所有接口签名、格式布局、状态机、数值门禁以本文档为准。
@@ -228,6 +228,8 @@ trait Vfs: Send + Sync {
 2. 崩溃恢复：manifest 永远指向最后一个完整状态；WAL 重放仅恢复 tombstone 追加与段增删元操作；半成品 segment 文件按 ULID 不在 manifest 中即判定垃圾，启动时清理。
 3. **无 mmap 依赖**：native 同样走显式 read + 页缓存（全平台同一代码路径；mmap 只读模式仅作 Could-have 附加）。
 
+std-fs 的 `rename` 在目标已存在时原子覆盖，禁止先删除目标；成功后 fsync 目标的父目录（父目录打不开或 sync 失败不回滚已经完成的 rename）。`manifest.json` 缺失时，可完整解析的 `manifest.json.tmp` 会提升为 manifest；若已有 `seg_*` 或非空 `wal.log`，则返回 E_CORRUPT，禁止把该库当成空库并清理已提交段。WAL 末尾没有换行且无法解析的残缺记录在恢复时丢弃并截掉，库仍可打开；以换行结束的坏行仍然是 E_CORRUPT。compact 只丢弃 manifest 里已经不存在的段的 tombstone，不得清掉其它 collection 或仍有效段的 WAL 记录；WAL 重写用临时文件 rename，禁止先删除 `wal.log`。
+
 ---
 
 ## 7. 一致性与可见性
@@ -236,6 +238,8 @@ trait Vfs: Send + Sync {
 
 - `add()` 返回时数据**不保证可搜**；`flush()` 后对新快照**原子可见**——向量与 BM25 两类索引在同一次 manifest 切换中同时出现（不变量 I-2）。
 - auto-commit 默认开启：`intervalMs=1000` 或 `maxDocs=1000` 先到先触发。API 语义兼容未来真 NRT（内存 buffer 段可查），升级不改签名。
+- `maxDocs` 在 `add()` 路径上触发。`intervalMs` 到点后，即使没有下一次 `add()` 也会 flush：native 每个 `Db` 一个后台线程（线程只在 Executor 模块创建）；wasm 没有该线程，仍在下一次 `add()` 时检查。自动 flush 失败时文档留在 buffer，后台至少隔 200ms 再试。
+- `Db.close()` 刷掉每个 collection 的内存 buffer，并返回第一个错误（其它 collection 仍会尝试刷）。buffer 为空则成功。这与 auto-commit 是否开启无关。`Drop` 不刷盘：没调用 `close()`，且距上次 flush 还没到 interval，进程就退出的话，buffer 丢失。后台线程跟着最后一个 `Db` 句柄结束，不会跟着单独还活着的 Collection 继续跑。
 
 ### 7.2 删除
 
@@ -365,6 +369,7 @@ Node **不经过 C ABI**，`vane-node` 用 napi-rs 直连 core（N-API v6+）；
 - `trait Executor { fn spawn(&self, task: Task); fn scope(&self, …); }`：native 实现 = rayon；wasm 实现 = 同线程串行。**`cfg(target_arch)`/`cfg(target_os)` 平台分支只允许出现在 Executor 与 VFS 实现处**；`cfg(target_feature)` 用于同一算法的向量化/标量双实现时视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中（不变量 I-5，v1.4 释义）。
 - 读路径零锁：快照经 `Arc<SegmentSet>` swap 获取。
 - 写路径：单写者队列；flush/合并/reindex 互斥（E_BUSY）。
+- std-fs 与 memory 上，同一 db 路径同时只能有一个 `Db`（含它发出的 `Collection` 句柄）。第二个 `open` 返回 E_BUSY，不修改已有文件。进程退出后锁释放。WASM 后端（OPFS/IDB）保持默认 no-op。
 - 明确不支持：SharedArrayBuffer 多线程 WASM（COOP/COEP 部署成本）；tokio 进 core。
 
 ---
@@ -484,3 +489,4 @@ crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ np
 - **v1.4**（2026-08-10）：post-v0.1.1 f32 距离 SIMD128 显式向量化需要，一处修订（用户批准）。S1 §14 I-5 释义扩展（§11 同步）：`cfg(target_feature)` 用于同一算法的向量化/标量双实现（如 f32 距离核的 simd128/标量双路径，归约顺序逐位对齐保证双变体 top-10 一致）视为能力开关（类似 `cfg(feature)`），允许出现在算法代码中（向量化能力门控可与 `target_arch` 组合，如 `cfg(all(target_arch = "wasm32", target_feature = "simd128"))`，组合整体仍视为能力开关而非平台分支——澄清，非扩大）；`cfg(target_arch)`/`cfg(target_os)` 平台分支仍仅限 VFS/Executor 实现。实现参照 commit 5668479（`crates/vane-core/src/vector/mod.rs` f32 距离三核 cfg(target_feature="simd128") 双路径）。
 - **v1.5**（2026-08-11）：M3 Web npm 包交付后五处修订（用户批准）。S1 §12.1 Workspace 补全：补 `crates/vane-dict-zh`（jieba-lite 词典数据 crate，M1 起漏列）+ `bindings/web`（@vane-rs/web npm 包源）[M3]。S2 §12.2 目标矩阵三端→四端：加第六行 Web npm `@vane-rs/web`（wasm-bindgen `--target web` ESM 双变体 simd/scalar + worker + dict_loader + TS 类型，vite/webpack 可 import，wasm ≤800KB gzip，`npm publish --access public`）；Node prebuilt 追加目标标注「（未实现，顺延）」——M1 已完成但 musl/arm64-win 从未实现（release.yml 仅 4 平台），保留规范意图 + 诚实标注现状（决策点 1，用户拍板方案 B）。S3 §12.3 词典分发三渠道→四渠道：Node 通道修正为 `crates/vane-dict-zh` cargo path 依赖 `include_bytes!` 编译期内嵌（非 npm 数据包），删 `@vane/slim`（决策点 2，修正错误——`@vane/slim` 从未存在，Node 端词典是编译期内嵌无「无词典变体」概念）；scope `@vane/dict-zh`→`@vane-rs/dict-zh`（R4 修正）；WASM CDN [M2] 降级为 fallback（`dictData` 优先）；新增第四渠道 WASM npm dictData [M3]（`@vane-rs/dict-zh` npm 包 `data/dict.bin`，Web 端 import → fetch + arrayBuffer → VaneWorker `dictData` 内联注入，优先于 CDN，零强制 CDN）；末句三渠道→四渠道 + `scripts/check-dict-hash.sh` + `crates/vane-dict-zh/tests/dict_test.rs` 引用。S4 §12.4 版本与发布三端→四端：crates.io / npm `@vane-rs/node` / GitHub Release（Go `.a` + WASM `.wasm`）/ npm `@vane-rs/web` 四端版本号严格同步；`@vane-rs/dict-zh` 走独立日历版（`YYYY.M.0`），与库 semver 解耦。S5 §13.2 质量门禁：§13.2-3 scope `@vane/dict-zh`→`@vane-rs/dict-zh` + 补 `@vane-rs/web` 双变体（simd128/scalar）wasm 各 ≤800KB gzip；§13.2-4 加「（`@vane-rs/node`）」限定；新增第 5 项 Web npm 安装门禁 [M3]（`npm i @vane-rs/web @vane-rs/dict-zh` 在 vite/webpack 可 import + build）。不触碰 §1-§11 / §13.1 / §13.3 / §14 / §15（M3 不碰 core 语义、不变量、性能承诺、里程碑验收）。
 - **v1.6**（2026-08-13）：M4 生产门槛（数据安全测试+可观测性）后四处修订（用户批准）。S1 §9.2 补列 inspect API FFI 函数面 `vane_db_stats`/`vane_db_segment_info`（core 层 `Db::stats`/`segment_info`/`collection_segment_info` [M4, `684a112`] + FFI/Node/Wasm 三绑定层 [M4, `5143885`] 全实现；7 structs DbStats/CollectionStats/SegmentInfo/FormatVersions/SegmentFileSizes/Health/ExecutorKind；健康检查语义 `SegmentReader::open` 失败→Corrupt / hnsw 缺失→Degraded / 否则 Healthy）。S2 §10 错误码表后补 ErrorContext 结构化注（11 变体统一携带 `ErrorContext` struct [message+seg+docid+op+hint]，builder 链式 `.seg()`/`.docid()`/`.op()`/`.hint()` + `From<String>`/`From<&str>`；`VaneError` `with_*` pub(crate) 替代旧 `append_context`；`context()` pub 返回 `&ErrorContext`；错误码 -1..-11 + 名称不变 [本表硬约束]；Display `E_CODE: message [seg=... op=... docid=... hint=...]` None 省略；`c34e473`+`d9dcc5f`）。S3 §13.2 新增第 6-11 项质量门禁（fuzz-smoke/fuzz-long/崩溃恢复/跨版本兼容/并发压测/proptest 不变量，`b4aa743`+`f849c7b`+`34a9b11`）+ §13.3 补 dev/optional 依赖不触运行时黑名单注（tracing/proptest/cargo-fuzz/libfuzzer-sys；libfuzzer-sys NCSA license 已 allow `9e262db`）。S4 §14 I-5 扩展 tracing feature 能力开关释义（`cfg(feature="tracing")` 编译期消除，体积不变，tracing crate 传递依赖 pin-project-lite/tracing-attributes/tracing-core/once_cell 不触黑名单，`dae29c6`）。不触碰 §1-§8 / §11 / §12 / §13.1 / §13.3 黑名单列表 / §15（M4 不碰 core 检索语义、分发矩阵、性能承诺、里程碑验收）。
+- **v1.7**（2026-10-09）：§6.4 明确 std-fs `rename` 在目标已存在时原子覆盖（禁止先删目标，成功后 fsync 父目录）。`manifest.json` 缺失时，可解析的 `manifest.json.tmp` 提升为 manifest；已有 `seg_*` 或非空 `wal.log` 则返回 E_CORRUPT，禁止当成空库清理段；无换行且无法解析的 WAL 残尾在恢复时丢弃并截掉（库仍可打开），以换行结束的坏行仍是 E_CORRUPT；compact 只丢弃 manifest 里已经不存在的段的 tombstone，不得清掉其它 collection 或仍有效段的 WAL 记录，WAL 重写用临时文件 rename，禁止先删除 `wal.log`。std-fs 与 memory 同一路径同时只允许一个 Db（含其 Collection），第二个 open 为 E_BUSY 且不改已有文件，进程退出后释放，WASM 保持 no-op。§7.1：`Db.close()` 刷掉全部 collection buffer 并返回错误（与 auto-commit 开关无关），`Drop` 不刷盘；native 在 interval 到点后即使没有下一次 `add()` 也会自动 flush（wasm 仍在下一次 `add()` 和 `close()` 时检查）。

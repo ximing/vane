@@ -14,7 +14,7 @@
 //! 2. WAL flush 崩溃——WAL append 失败，已确认事务重放、未确认不可见
 //! 3. merge 中断崩溃——finalize_merge 的 write_inverted 失败，旧段保留
 //! 4. ENOSPC——write_at 返 ENOSPC，不损已有数据
-//! 5. 部分写——header.bin 写 8 字节后失败，损坏段被清理
+//! 5. 部分写——header.bin 写 8 字节后失败，flush 在返回前删掉半成品段，旧数据不丢
 
 use std::sync::Arc;
 
@@ -22,8 +22,7 @@ use vane_core::api::{
     CollectionOptions, Db, Doc, FusionSpec, OpenOptions, SearchMode, SearchQuery,
 };
 use vane_core::persistence::AutoCommitConfig;
-use vane_core::segment::header::decode_header;
-use vane_core::types::{FieldDef, Metric, Schema, VaneError};
+use vane_core::types::{FieldDef, Metric, Schema};
 use vane_core::vfs::fault::{Fault, FaultVfs, VfsOp};
 use vane_core::vfs::Vfs;
 
@@ -478,9 +477,9 @@ fn crash_4_enospc_graceful_degradation() {
 // ---------------------------------------------------------------------------
 
 /// 第一批 flush 成功。注入 PartialWrite{op:WriteAt, path:*/header.bin, bytes_before_fail:8}。
-/// 第二批 flush → SegmentWriter::finalize 的 header.bin write_at 写 8 字节（magic+version）后失败。
-/// finalize 返 Err → flush 返 Err → manifest 未切换 → 损坏段为孤儿。
-/// 验证：损坏 header.bin 恰好 8 字节（magic "VANE" + version 1）+ recover 清理孤儿 + 旧数据不丢。
+/// 第二批 flush → SegmentWriter::finalize 的 header.bin write_at 写 8 字节后失败。
+/// commit 前失败：FlushRollback 在 flush 返回前删掉半成品段（8 字节 header 的拒绝路径
+/// 由 segment::header 单测覆盖）。manifest 不切换，旧数据仍在，新文档不可见。
 #[test]
 fn crash_5_partial_write() {
     let vfs = Arc::new(FaultVfs::wrap_memory());
@@ -530,37 +529,24 @@ fn crash_5_partial_write() {
             "segment_count still 1 (flush failed)"
         );
 
-        // ---- 验证损坏 header.bin：8 字节（magic + version）----
+        // commit 前失败会删掉半成品段，调用方看不到 8 字节损坏 header。
         let seg_entries = vfs.list(&format!("{}/segments", db_path)).unwrap();
-        let orphan_entry: String = seg_entries
+        let orphans: Vec<_> = seg_entries
             .iter()
             .filter(|e| e.starts_with("seg_"))
-            .find(|e| {
+            .filter(|e| {
                 let ulid = &e[4..];
                 !baseline_ulids.iter().any(|u| u == ulid)
             })
-            .cloned()
-            .expect("orphan segment (failed flush) should exist on disk");
-
-        let header_path = format!("{}/segments/{}/header.bin", db_path, orphan_entry);
-        let mut buf = vec![0u8; 128];
-        let n = vfs.read_at(&header_path, &mut buf, 0).unwrap();
-        assert_eq!(
-            n, 8,
-            "corrupt header.bin should have exactly 8 bytes (magic+version), got {}",
-            n
-        );
-        assert_eq!(&buf[..4], b"VANE", "first 4 bytes should be magic 'VANE'");
-        let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        assert_eq!(ver, 1, "bytes 4-8 should be format_version=1 (LE)");
-        // 8 字节恰好含 magic+version 但缺少 ulid_len 及后续字段 → 不完整 header。
-        // decode_header 长度门 < 9 拒绝 8 字节，返 Corrupt("header too short")（非 panic）。
-        // 覆盖 decode_header 拒绝路径：损坏段被校验拒绝，recover 不尝试 open 孤儿段，直接清理。
-        let decode_result = decode_header(&buf[..n]);
+            .collect();
         assert!(
-            matches!(decode_result, Err(VaneError::Corrupt(ref ctx)) if ctx.message.contains("too short")),
-            "decode_header on 8-byte corrupt header should return Corrupt(\"header too short\")"
+            orphans.is_empty(),
+            "uncommitted segment must be deleted before flush returns: {:?}",
+            orphans
         );
+        let hits = col.search(&text_query(100)).unwrap();
+        assert!(contains_id(&hits, "d0") && contains_id(&hits, "d2"));
+        assert!(!contains_id(&hits, "d3"), "d3 not visible (flush failed)");
 
         // 不 close（模拟崩溃）
     }
@@ -594,4 +580,137 @@ fn crash_5_partial_write() {
             seg_dirs
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// flush 失败不得丢 buffer（commit 前放回；commit 后禁止再写一份）
+// ---------------------------------------------------------------------------
+
+/// commit 前写段失败：文档留在 buffer，下一次 flush 能写进唯一一段。
+#[test]
+fn flush_failure_before_manifest_keeps_docs_for_retry() {
+    let vfs = Arc::new(FaultVfs::wrap_memory());
+    let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+    let col = db.collection("c", schema(), col_opts()).unwrap();
+    col.add(&make_docs(0, 2)).unwrap();
+
+    vfs.inject(Fault::Enospc {
+        op: VfsOp::WriteAt,
+        path_pattern: "*vectors.bin".to_string(),
+        one_shot: true,
+        trigger_on_nth: 0,
+    });
+
+    let flush_err = col.flush();
+    assert!(
+        flush_err.is_err(),
+        "flush should fail when vectors.bin hits ENOSPC"
+    );
+    let hits = col.search(&text_query(100)).unwrap();
+    assert!(
+        !contains_id(&hits, "d0") && !contains_id(&hits, "d1"),
+        "uncommitted docs must not be searchable, got {:?}",
+        hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>()
+    );
+
+    // one_shot 已消费，重试应把同一批文档写进一段。
+    col.flush().unwrap();
+    let hits = col.search(&text_query(100)).unwrap();
+    assert!(contains_id(&hits, "d0"), "d0 searchable after retry flush");
+    assert!(contains_id(&hits, "d1"), "d1 searchable after retry flush");
+    assert_eq!(
+        col.segment_count(),
+        1,
+        "retry must not leave a duplicate segment"
+    );
+}
+
+/// auto-commit 的 flush 失败仍返回 Ok(AddReport)，但文档必须留在 buffer。
+/// 下一篇 add 触发的成功 flush 要把两篇一起写上。
+#[test]
+fn auto_commit_flush_failure_keeps_docs_until_next_add() {
+    let vfs = Arc::new(FaultVfs::wrap_memory());
+    let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+    let opts = CollectionOptions {
+        auto_commit: AutoCommitConfig::On {
+            interval_ms: 60_000,
+            max_docs: 1,
+        },
+        ..Default::default()
+    };
+    let col = db.collection("c", schema(), opts).unwrap();
+
+    vfs.inject(Fault::Enospc {
+        op: VfsOp::WriteAt,
+        path_pattern: "*vectors.bin".to_string(),
+        one_shot: true,
+        trigger_on_nth: 0,
+    });
+
+    let report = col.add(&make_docs(0, 1)).unwrap();
+    assert_eq!(
+        report.accepted, 1,
+        "add must still return Ok after auto-commit failure"
+    );
+    let hits = col.search(&text_query(100)).unwrap();
+    assert!(
+        !contains_id(&hits, "d0"),
+        "d0 must not be visible when auto-commit flush failed"
+    );
+
+    // 故障已消费。第二篇 add 再次触发 flush，应带上仍在 buffer 里的 d0。
+    col.add(&make_docs(1, 1)).unwrap();
+    let hits = col.search(&text_query(100)).unwrap();
+    assert!(
+        contains_id(&hits, "d0"),
+        "d0 searchable after later successful flush"
+    );
+    assert!(
+        contains_id(&hits, "d1"),
+        "d1 searchable after later successful flush"
+    );
+}
+
+/// add_segment 已成功之后的读失败：文档已提交，不得放回 buffer。
+/// 否则下一次 flush 会再写一段，重开后同一 id 落在两个段里（段数变成 3）。
+#[test]
+fn flush_failure_after_manifest_commit_does_not_duplicate() {
+    let vfs = Arc::new(FaultVfs::wrap_memory());
+    let db_path = "db";
+    {
+        let db = Db::open(vfs.clone(), db_path, OpenOptions::default()).unwrap();
+        let col = db.collection("c", schema(), col_opts()).unwrap();
+        col.add(&make_docs(0, 1)).unwrap();
+        col.flush().unwrap();
+        assert_eq!(col.segment_count(), 1, "d0 committed");
+
+        col.add(&make_docs(1, 1)).unwrap();
+        // 写入是 WriteAt。add_segment 之后 InvertedIndexReader::open 才 ReadAt inverted.bin。
+        vfs.inject(Fault::IoError {
+            op: VfsOp::ReadAt,
+            path_pattern: "*inverted.bin".to_string(),
+            msg: "simulated post-commit inverted.bin read".to_string(),
+            one_shot: true,
+            trigger_on_nth: 0,
+        });
+        let flush_err = col.flush();
+        assert!(
+            flush_err.is_err(),
+            "flush should fail when post-commit inverted.bin read fails"
+        );
+
+        // 无故障再 flush。若 d1 被错误放回 buffer，这里会多写一段。
+        col.flush().unwrap();
+    }
+
+    let db = Db::open(vfs, db_path, OpenOptions::default()).unwrap();
+    let col = db.collection("c", schema(), col_opts()).unwrap();
+    let hits = col.search(&text_query(100)).unwrap();
+    assert!(contains_id(&hits, "d0"), "d0 visible after reopen");
+    assert!(contains_id(&hits, "d1"), "d1 visible after reopen");
+    assert_eq!(
+        col.segment_count(),
+        2,
+        "reopen must see exactly d0's segment and d1's committed segment"
+    );
 }

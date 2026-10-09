@@ -81,6 +81,8 @@ fn m0_corpus_without_hnsw_bin_falls_back_to_brute() {
     // （M1 flush 写 hnsw.bin；测试手动删该文件模拟 M0 段）
     let seg_ulid = col.segment_ulids()[0].clone();
     let _ = vfs.delete(&format!("db/segments/seg_{}/hnsw.bin", seg_ulid));
+    drop(col);
+    drop(db);
     // reopen 后 HnswReader::open 缺失文件 → fallback brute
     // （重新 open Db 让 restore_from_manifest 走 HnswReader::open 缺失路径）
     let db2 = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();

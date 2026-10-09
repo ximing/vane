@@ -1,5 +1,5 @@
 use crate::types::{Result, VaneError};
-use crate::vfs::Vfs;
+use crate::vfs::{DbExclusiveLock, Vfs};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -112,9 +112,18 @@ impl Vfs for StdFsVfs {
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         let pf = self.resolve(from);
         let pt = self.resolve(to);
-        // 跨平台一致覆盖：先删目标（忽略不存在），再 rename（S11）
-        let _ = std::fs::remove_file(&pt);
-        std::fs::rename(&pf, &pt).map_err(io_err)
+        // 原子覆盖：禁止先删目标。崩溃若落在 delete 与 rename 之间，manifest.json 会消失。
+        #[cfg(windows)]
+        {
+            windows_replace(&pf, &pt)?;
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(&pf, &pt).map_err(io_err)?;
+            #[cfg(unix)]
+            sync_renamed_parent(&pt);
+        }
+        Ok(())
     }
 
     fn delete(&self, path: &str) -> Result<()> {
@@ -141,9 +150,103 @@ impl Vfs for StdFsVfs {
         out.sort();
         Ok(out)
     }
+
+    fn try_lock_exclusive(&self, db_path: &str) -> Result<Box<dyn DbExclusiveLock>> {
+        // 已存在必须能打开，不能走 Vfs::create（create 在文件已存在时失败）。
+        let path = self.resolve(&format!("{db_path}/.vane.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| VaneError::Io(e.to_string().into()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Box::new(StdFsExclusiveLock { file })),
+            Err(std::fs::TryLockError::WouldBlock) => Err(crate::vfs::db_already_open()),
+            Err(std::fs::TryLockError::Error(e)) => Err(VaneError::Io(e.to_string().into())),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StdFsExclusiveLock {
+    file: std::fs::File,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DbExclusiveLock for StdFsExclusiveLock {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StdFsExclusiveLock {
+    fn drop(&mut self) {
+        // unlock 失败也没关系：fd 关闭时操作系统会放锁。
+        let _ = self.file.unlock();
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn io_err(e: std::io::Error) -> VaneError {
-    VaneError::Io(e.to_string().into())
+    if e.kind() == std::io::ErrorKind::NotFound {
+        // 前缀固定，供 manifest 缺失判断识别（小写后含 "not found"）。
+        VaneError::Io(format!("not found: {e}").into())
+    } else {
+        VaneError::Io(e.to_string().into())
+    }
+}
+
+/// Unix：`rename` 本身原子覆盖。成功后 fsync 父目录；失败仍返回成功（调用方已看不到）。
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn sync_renamed_parent(target: &std::path::Path) {
+    let Some(parent) = target.parent() else {
+        return;
+    };
+    if parent.as_os_str().is_empty() {
+        return;
+    }
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+}
+
+/// Windows：`MoveFileExW` 覆盖已存在目标，不先删除。`WRITE_THROUGH` 在返回前落盘。
+#[cfg(windows)]
+fn windows_replace(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            dw_flags: u32,
+        ) -> i32;
+    }
+
+    let from_w: Vec<u16> = from
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let to_w: Vec<u16> = to
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: 两个缓冲区以 NUL 结尾，且在调用期间有效。
+    let rc = unsafe {
+        MoveFileExW(
+            from_w.as_ptr(),
+            to_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if rc == 0 {
+        Err(io_err(std::io::Error::last_os_error()))
+    } else {
+        Ok(())
+    }
 }

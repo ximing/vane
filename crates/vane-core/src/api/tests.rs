@@ -785,6 +785,9 @@ fn restore_multi_segment_uses_stored_docid_base() {
     .unwrap();
     col.flush().unwrap();
     db.close().unwrap();
+    // close 不释放句柄。同一路径的第二个 open 在 Db 和 Collection 都 drop 之前是 E_BUSY。
+    drop(col);
+    drop(db);
 
     // reopen：restore 应正确还原各段 docid_base
     let db2 = Db::open(vfs, "db", OpenOptions::default()).unwrap();
