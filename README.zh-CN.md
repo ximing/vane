@@ -543,7 +543,7 @@ native / Node，10 万文档 × 384 维：
 
 ## 状态
 
-**v0.4.0** —— 核心引擎按里程碑 M0–M3 功能完成，并附带人性化交互的本机侧车 CLI：
+**v0.4.1** —— 核心引擎按里程碑 M0–M3 功能完成，并附带人性化交互的本机侧车 CLI：
 
 - ✅ 核心 API、VFS、分词器（standard/cjk_bigram/jieba）、BM25、分段 HNSW、RRF 融合
 - ✅ 持久化（段 + manifest + WAL）、tombstone 删除、合并、快照导出
@@ -555,6 +555,8 @@ native / Node，10 万文档 × 384 维：
 - ✅ CLI 人性化交互：查询范围头行 + 精简命中、`vane read <n>`、人话状态看板、
   add 总结 + 进度条、裸 vane 分发 + 分组 `--help`、`vane watch`、MCP skill 安装、
   zh TTY 渲染（JSON/管道输出恒英文）
+- ✅ 嵌入式耐久性：manifest 原子覆盖、WAL 残尾修复、flush 回滚、独占打开、
+  `close()` 刷盘、native 空闲 auto-commit
 
 已知缺口：`filter` 已在核心接通但尚未通过绑定查询解析器暴露（见 [过滤](#过滤)）；musl/linux-arm64/
 winx64-arm 的 Node 预编译与 wazero 纯 Go 路径顺延。

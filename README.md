@@ -616,7 +616,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 
 ## Status
 
-**v0.4.0** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI with human-friendly UX:
+**v0.4.1** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI with human-friendly UX:
 
 - ✅ Core API, VFS, tokenizer (standard/cjk_bigram/jieba), BM25, segment HNSW, RRF fusion
 - ✅ Persistence (segments + manifest + WAL), tombstone delete, compaction, snapshot export
@@ -630,6 +630,8 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 - ✅ CLI Human UX: query scope header + lean hits, `vane read <n>`, human-readable
   status dashboard, add summary + progress bar, bare-vane dispatch + grouped `--help`,
   `vane watch`, MCP skill install, zh TTY rendering (JSON/piped stays English)
+- ✅ Embedded durability: atomic manifest replace, torn-WAL repair, flush rollback,
+  exclusive open, `close()` flushes, idle auto-commit on native
 
 Known gaps: `filter` is wired in core but not yet exposed through the binding query parsers
 (see [Filtering](#filtering)); musl/linux-arm64/winx64-arm Node prebuilts and the wazero
