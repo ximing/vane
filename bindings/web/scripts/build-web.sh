@@ -4,9 +4,11 @@
 # 流程（对应 docs/plans/m3/task-1-design.md §7.4）：
 #   1. 每变体：cargo build（simd128 / scalar，worker feature）
 #   2. 每变体：wasm-bindgen --target web 后处理（产出 _bg.wasm + glue .js + .d.ts）
-#   3. 每变体：wasm-opt -Oz 优化 _bg.wasm → vane_wasm_{simd,scalar}.wasm
+#   3. 每变体：wasm-opt -Oz 优化 _bg.wasm
+#   3b. 按导出名把 __wbindgen_externrefs 指到可增长的 externref 表（0.4.1 的
+#       Table.grow 失败：导出可能指到 min=max 的 funcref）。再拷进 dist/。
 #   4. 拷贝 JS 胶水 + .d.ts 到 dist/（双变体共享一份，导出一致）
-#   5. cp vane_wasm_scalar.wasm vane_wasm_bg.wasm 别名（§7.3 默认 URL 兼容）
+#   5. bg 别名同样过一遍 3b，再 cp 成 vane_wasm_bg.wasm（§7.3 默认 URL 兼容）
 #   6. tsc 编译 src/*.ts → dist/index.js / worker.js / probe.js + .d.ts（§7.4 Task 3）
 #   7. W8 校验：vane_wasm.js 含 __wbg_init + new URL(..., import.meta.url)
 #   8. 体积门禁（gzip ≤ 800KB，SPEC §13.2-3）
@@ -50,6 +52,17 @@ optimize() {
   fi
 }
 
+# 0.4.1 曾把 __wbindgen_externrefs 指到 min=max 的 funcref。按导出名改 index，
+# 不写死字节偏移。index 已经是可增长的 externref 表时不改文件；断言失败则构建失败。
+fix_externref_table() {
+  local wasm="$1"
+  if ! command -v node >/dev/null 2>&1; then
+    echo "FAIL: node is required to fix __wbindgen_externrefs (${wasm})" >&2
+    exit 1
+  fi
+  node bindings/web/scripts/fix-externref-table.mjs "$wasm"
+}
+
 # ---- 单变体构建：cargo build → wasm-bindgen → wasm-opt ----
 # 参数：$1=label (simd|scalar)  $2=extra_rustflags
 build_variant() {
@@ -80,9 +93,12 @@ build_variant() {
     }
   done
 
-  # wasm-opt 优化 → dist/vane_wasm_{label}.wasm
+  # wasm-opt 之后、拷进 dist/ 之前修正 table export。
+  local opt="$TMP/$label/${PKG_FILE}_opt.wasm"
   local dst="$DIST/vane_wasm_${label}.wasm"
-  optimize "$bg" "$dst"
+  optimize "$bg" "$opt"
+  fix_externref_table "$opt"
+  cp "$opt" "$dst"
   echo "→ $dst"
 
   # simd 变体记录 glue 路径（双变体 glue 相同，只拷一份）
@@ -117,7 +133,9 @@ echo "→ $DIST/vane_wasm.d.ts"
 #    双变体重命名为 _simd/_scalar 后无 _bg.wasm，bundler 静态分析会报错。
 #    cp scalar 别名保守默认 scalar；worker.js 显式传 URL 覆盖默认。
 # ============================================================
-cp "$DIST/vane_wasm_scalar.wasm" "$DIST/vane_wasm_bg.wasm"
+cp "$DIST/vane_wasm_scalar.wasm" "$TMP/vane_wasm_bg.wasm"
+fix_externref_table "$TMP/vane_wasm_bg.wasm"
+cp "$TMP/vane_wasm_bg.wasm" "$DIST/vane_wasm_bg.wasm"
 echo "→ $DIST/vane_wasm_bg.wasm (scalar 别名，默认 URL 兼容)"
 
 # ============================================================
