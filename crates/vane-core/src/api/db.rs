@@ -47,15 +47,43 @@ pub(crate) struct DbInner {
 
 impl Db {
     pub fn open(vfs: Arc<dyn Vfs>, path: &str, opts: OpenOptions) -> Result<Self> {
+        Self::open_inner(
+            vfs,
+            path,
+            opts,
+            #[cfg(feature = "jieba")]
+            None,
+        )
+    }
+
+    /// restore 之前注入词典。wasm 没有 dict-zh，重开已有 jieba collection 必须走这里。
+    #[cfg(feature = "jieba")]
+    pub fn open_with_jieba_dict(
+        vfs: Arc<dyn Vfs>,
+        path: &str,
+        opts: OpenOptions,
+        dict: std::sync::Arc<crate::tokenizer::jieba::JiebaDict>,
+    ) -> Result<Self> {
+        Self::open_inner(vfs, path, opts, Some(dict))
+    }
+
+    fn open_inner(
+        vfs: Arc<dyn Vfs>,
+        path: &str,
+        opts: OpenOptions,
+        #[cfg(feature = "jieba")] preload: Option<
+            std::sync::Arc<crate::tokenizer::jieba::JiebaDict>,
+        >,
+    ) -> Result<Self> {
         // 必须在 load / recover 之前拿锁。Busy 时不得写 manifest、不得清理段。
         let exclusive_lock = Arc::from(vfs.try_lock_exclusive(path)?);
         let manifest_store = Arc::new(ManifestStore::new(vfs.clone(), path));
         let manifest = manifest_store.load()?.unwrap_or_else(Manifest::empty);
         let collections = RwLock::new(HashMap::new());
-        // 07：dict-zh feature 启用时 Db::open 自动加载预编译 dict.bin（冷加载 <150ms，§13.1）。
-        // 加载失败不抛错（SPEC §13.2-2 ④）：jieba_dict=None → collection 创建时降级 CjkBigram。
+        // preload 优先于 dict-zh 捆绑词典，且必须在 restore 循环之前。
+        // 两者都没有时 jieba_dict=None；已有 jieba collection 的 restore 仍返回 DictUnavailable。
         #[cfg(feature = "jieba")]
-        let jieba_dict = load_default_jieba_dict();
+        let jieba_dict = preload.or_else(load_default_jieba_dict);
         // M2-10：Executor 工厂构造（平台分支在 executor/mod.rs，I-5）。
         let executor = crate::executor::default_executor();
         let inner = Arc::new(DbInner {

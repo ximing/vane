@@ -20,7 +20,7 @@
 //! ```
 //!
 //! ## 词典加载（SPEC §12.3）
-//! init 阶段加载词典（CDN fetch / 内联 dictData / 缓存），Db::open 后 `set_jieba_dict` 注入。
+//! init 阶段加载词典（CDN fetch / 内联 dictData / 缓存）。有词典字节时在 `Db::open` 之前注入，restore 才能重建 jieba collection。
 //! `collection(tokenizer=Jieba)` 时若词典不可用 → 降级 `CjkBigram` + warn（不抛错，§12.4）。
 //!
 //! ## I-8 薄壳
@@ -59,7 +59,7 @@ struct WorkerInner {
     next_col_id: u32,
     /// init 阶段选定的 Vfs（create 选，open 消费调 Db::open）。
     vfs: Option<Arc<dyn Vfs>>,
-    /// 词典字节（init 阶段 fetch/内联），Db::open 后注入 set_jieba_dict。
+    /// 词典字节（init 阶段 fetch/内联）。open 前 `load_zstd`，经 `open_with_jieba_dict` 注入。
     dict_bytes: Option<Vec<u8>>,
     closed: bool,
 }
@@ -682,7 +682,8 @@ impl VaneWorker {
         }
     }
 
-    /// open：Db::open(vfs, path, opts) + 词典注入。
+    /// open：有词典字节时先 load_zstd，再 `open_with_jieba_dict`（restore 之前）。
+    /// 加载失败或没有词典则普通 `Db::open`。open 之后不再 `set_jieba_dict`。
     fn open_sync(&self, path: &str, opts: OpenOptions) -> Result<(), VaneError> {
         let mut inner = self.inner.borrow_mut();
         inner.check_open()?;
@@ -690,20 +691,23 @@ impl VaneWorker {
             .vfs
             .clone()
             .ok_or_else(|| VaneError::InvalidArg("vfs not initialized".into()))?;
-        let db = Db::open(vfs, path, opts)?;
-        // 词典注入（若 init 阶段加载成功）。dict.bin 是 zstd 压缩 → load_zstd。
         #[cfg(feature = "jieba")]
-        if let Some(bytes) = inner.dict_bytes.as_ref() {
+        let db = if let Some(bytes) = inner.dict_bytes.as_ref() {
             match JiebaDict::load_zstd(bytes) {
-                Ok(dict) => db.set_jieba_dict(Arc::new(dict)),
+                Ok(dict) => Db::open_with_jieba_dict(vfs, path, opts, Arc::new(dict))?,
                 Err(e) => {
                     warn(&format!(
                         "vane: jieba dict load failed ({}), falling back to bigram",
                         e
                     ));
+                    Db::open(vfs, path, opts)?
                 }
             }
-        }
+        } else {
+            Db::open(vfs, path, opts)?
+        };
+        #[cfg(not(feature = "jieba"))]
+        let db = Db::open(vfs, path, opts)?;
         inner.db = Some(db);
         Ok(())
     }
@@ -1228,5 +1232,77 @@ mod tests {
         assert_eq!(&snap[..9], b"VANE_SNAP", "snapshot magic mismatch");
 
         worker.close_sync().unwrap();
+    }
+
+    /// 重开已有 jieba collection：词典必须在 restore 之前注入，否则 DictUnavailable。
+    /// 「器学」不命中说明重开后仍是 jieba，而不是 cjk_bigram。
+    #[cfg(feature = "jieba")]
+    #[test]
+    fn reopen_jieba_collection_keeps_dictionary_tokenizer() {
+        fn drop_db_keep_vfs(worker: &VaneWorker) {
+            let mut inner = worker.inner.borrow_mut();
+            inner.collections.clear();
+            if let Some(db) = inner.db.take() {
+                let _ = db.close();
+            }
+        }
+
+        let worker = VaneWorker::new_memory();
+        worker.inner.borrow_mut().dict_bytes = Some(vane_dict_zh::DICT_BIN.to_vec());
+        worker
+            .open_sync("reopen-db", OpenOptions::default())
+            .unwrap();
+
+        let schema = parse_schema(&serde_json::from_str(schema_json()).unwrap()).unwrap();
+        let opts = CollectionOptions {
+            tokenizer: BuiltinTokenizer::Jieba,
+            ..Default::default()
+        };
+        let col_id = worker.collection_sync("jieba", schema, opts).unwrap();
+        let accepted = worker
+            .add_sync(
+                col_id,
+                vec![Doc {
+                    id: "ml".into(),
+                    text: Some("机器学习入门笔记".into()),
+                    vector: Some(vec![1.0, 0.0, 0.0]),
+                    meta: None,
+                }],
+            )
+            .unwrap();
+        assert_eq!(accepted, 1);
+        worker.flush_sync(col_id).unwrap();
+
+        drop_db_keep_vfs(&worker);
+
+        worker
+            .open_sync("reopen-db", OpenOptions::default())
+            .expect("reopen jieba collection");
+
+        let schema = parse_schema(&serde_json::from_str(schema_json()).unwrap()).unwrap();
+        let opts = CollectionOptions {
+            tokenizer: BuiltinTokenizer::Jieba,
+            ..Default::default()
+        };
+        let col_id = worker.collection_sync("jieba", schema, opts).unwrap();
+
+        let q_hit = parse_search_query(
+            &serde_json::from_str(r#"{"text":"机器","topK":5,"mode":"text"}"#).unwrap(),
+        )
+        .unwrap();
+        let hits = worker.search_sync(col_id, q_hit).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&"ml"), "机器 should hit ml, got {ids:?}");
+
+        let q_miss = parse_search_query(
+            &serde_json::from_str(r#"{"text":"器学","topK":5,"mode":"text"}"#).unwrap(),
+        )
+        .unwrap();
+        let hits_miss = worker.search_sync(col_id, q_miss).unwrap();
+        let miss_ids: Vec<&str> = hits_miss.iter().map(|h| h.id.as_str()).collect();
+        assert!(
+            !miss_ids.contains(&"ml"),
+            "器学 must not hit ml under jieba, got {miss_ids:?}"
+        );
     }
 }
