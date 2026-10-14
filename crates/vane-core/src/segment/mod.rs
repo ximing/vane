@@ -642,6 +642,15 @@ impl SegmentReader {
             .find(|(_, eid)| eid.as_str() == external_id)
             .map(|(local, _)| *local)
     }
+
+    /// 段内该 external id 的全部 local docid。同一 id 被 add 多次时，id_map 会有多条。
+    pub fn local_docids_by_external(&self, external_id: &str) -> Vec<u64> {
+        self.id_map
+            .iter()
+            .filter(|(_, eid)| eid.as_str() == external_id)
+            .map(|(local, _)| *local)
+            .collect()
+    }
     /// 读取某文档的 stored.bin JSON（回填 Hit.fields，SPEC §6.2 stored.bin）。
     /// local_docid 为段内局部 docid（0 起，与 external_id 同一 key 空间）。
     /// M2-07：首次调用触发 stored OnceLock 加载；后续幂等。签名不变。

@@ -1264,19 +1264,15 @@ impl Collection {
         for id in ids {
             for reader in snap.iter() {
                 let base = offsets.get(&reader.meta().ulid).copied().unwrap_or(0);
-                // 段内 id_map 反查 local docid。
-                let local = reader.local_docid_by_external(id);
-                if let Some(l) = local {
-                    let abs = base + l;
+                for local in reader.local_docids_by_external(id) {
+                    let abs = base + local;
                     if abs > u32::MAX as u64 {
-                        // roaring 存 u32；超限记不进来（与 search 一致），跳过。
                         continue;
                     }
                     by_ulid
                         .entry(reader.meta().ulid.clone())
                         .or_default()
                         .push(abs);
-                    break; // 一个 external_id 只可能存在于一个段
                 }
             }
         }

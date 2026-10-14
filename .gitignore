@@ -12,3 +12,5 @@ __pycache__/
 !.agents/plugins/marketplace.json
 # M2-05：wasm 双变体产物（构建脚本产出，不入库）
 target/wasm-variants/
+# npm pack 本地 tarball（例如 bindings/web/vane-rs-web-*.tgz），不入库。
+*.tgz

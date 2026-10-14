@@ -243,6 +243,27 @@ fn tombstone_not_persisted_without_wal() {
     assert_eq!(col2.search(&text_query()).unwrap().len(), 1);
 }
 
+/// 同一 external id 落在两个段时，一次 delete 要给每一份都打 tombstone。
+#[test]
+fn delete_removes_every_copy_of_an_external_id() {
+    let vfs = Arc::new(MemoryVfs::new());
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let col = setup_col(&db);
+    col.add(&[doc("dup", "zephyrcopy")]).unwrap();
+    col.flush().unwrap();
+    col.add(&[doc("dup", "zephyrcopy")]).unwrap();
+    col.flush().unwrap();
+    let mut q = text_query();
+    q.text = Some("zephyrcopy".into());
+    q.top_k = 100;
+    let hits = col.search(&q).unwrap();
+    assert!(hits.len() >= 2, "expected both copies, got {}", hits.len());
+    assert!(hits.iter().all(|h| h.id == "dup"));
+    let n = col.delete(&["dup".into()]).unwrap();
+    assert!(n >= 2, "delete should tombstone every copy, got {n}");
+    assert_eq!(col.search(&q).unwrap().len(), 0);
+}
+
 fn file_size(vfs: &Arc<MemoryVfs>, path: &str) -> Option<usize> {
     use vane_core::vfs::Vfs;
     let mut buf = [0u8; 1];
