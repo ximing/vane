@@ -1,3 +1,5 @@
 # @vane-rs/web 构建产物（bash scripts/build-web.sh 产出）
 dist/
 .build-tmp/
+# npm pack 写出的包（vane-rs-web-*.tgz）
+*.tgz
