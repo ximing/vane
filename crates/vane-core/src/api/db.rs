@@ -172,10 +172,21 @@ impl Db {
             user_dict: opts.user_dict,
             segment_ulids: vec![],
         };
-        self.inner.manifest_store.update(|m| {
+        // 先插入再写 manifest。写失败时只撤掉仍是本次插入的 Arc；
+        // 并发路径若已换成别的句柄，不能误删。
+        if let Err(err) = self.inner.manifest_store.update(|m| {
             m.collections.insert(name.to_string(), col_meta);
             Ok(())
-        })?;
+        }) {
+            let mut collections = self.inner.collections.write().unwrap();
+            if collections
+                .get(name)
+                .is_some_and(|existing| Arc::ptr_eq(existing, &arc))
+            {
+                collections.remove(name);
+            }
+            return Err(err);
+        }
         Ok(Collection { inner: arc })
     }
 

@@ -110,6 +110,51 @@ fn db_collection_idempotent_different_schema_rejected() {
     assert!(matches!(r, Err(VaneError::Schema(_))));
 }
 
+/// manifest rename 失败时不能留下仅存在于内存的 collection。
+/// 否则下一次同名同 schema 走幂等分支，返回 Ok 却不写 manifest。
+#[test]
+fn db_collection_manifest_failure_drops_memory_entry() {
+    use crate::vfs::fault::{Fault, FaultVfs, VfsOp};
+
+    let vfs = std::sync::Arc::new(FaultVfs::wrap_memory());
+    // 新库 open 不提升 manifest.json.tmp。第一次匹配的 rename 就是建表的原子切换。
+    vfs.inject(Fault::IoError {
+        op: VfsOp::Rename,
+        path_pattern: "*manifest.json.tmp".to_string(),
+        msg: "injected rename failure on manifest.json.tmp".to_string(),
+        one_shot: true,
+        trigger_on_nth: 1,
+    });
+    let db = Db::open(vfs.clone(), "mydb", OpenOptions::default())
+        .expect("open must succeed before the one-shot rename fault fires");
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let first = db.collection("docs", schema.clone(), CollectionOptions::default());
+    assert!(
+        first.is_err(),
+        "collection create must fail when manifest rename fails"
+    );
+    assert!(
+        !db.collections().iter().any(|name| name == "docs"),
+        "failed create must not leave an in-memory collection"
+    );
+    db.collection("docs", schema, CollectionOptions::default())
+        .expect("retry after the one-shot fault must persist the collection");
+    drop(db);
+
+    let reopened = Db::open(vfs, "mydb", OpenOptions::default()).unwrap();
+    assert!(
+        reopened.collections().iter().any(|name| name == "docs"),
+        "retry must have written the manifest, not only an in-memory handle"
+    );
+}
+
 // ---- Task 3: add ----
 
 #[test]
