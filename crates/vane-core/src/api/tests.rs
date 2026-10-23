@@ -164,6 +164,105 @@ fn collection_add_buffers_docs() {
 }
 
 #[test]
+fn collection_add_rejects_mixed_dimension_before_buffer() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let schema = Schema::new(vec![
+        ("body".into(), FieldDef::Text),
+        (
+            "v".into(),
+            FieldDef::Vector {
+                dim: 2,
+                metric: Metric::Cosine,
+            },
+        ),
+    ])
+    .unwrap();
+    let col = db
+        .collection("docs", schema, CollectionOptions::default())
+        .unwrap();
+    let rejected = col.add(&[
+        Doc {
+            id: "a".into(),
+            text: Some("hello world".into()),
+            vector: Some(vec![1.0, 0.0]),
+            meta: None,
+        },
+        Doc {
+            id: "b".into(),
+            text: Some("bad dim".into()),
+            vector: Some(vec![1.0, 0.0, 0.0]),
+            meta: None,
+        },
+    ]);
+    assert!(matches!(rejected, Err(VaneError::Schema(_))));
+
+    col.add(&[Doc {
+        id: "c".into(),
+        text: Some("foo bar".into()),
+        vector: Some(vec![0.0, 1.0]),
+        meta: None,
+    }])
+    .unwrap();
+    col.flush().unwrap();
+
+    let live = db
+        .stats()
+        .collections
+        .into_iter()
+        .find(|c| c.name == "docs")
+        .map(|c| c.live_docs);
+    assert_eq!(live, Some(1), "failed batch prefix must not be stored");
+
+    let leaked = col
+        .search(&SearchQuery {
+            text: Some("hello".into()),
+            vector: None,
+            top_k: 10,
+            mode: SearchMode::Text,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert!(
+        leaked.iter().all(|h| h.id != "a"),
+        "failed batch id a must not be an extra copy, hits={leaked:?}"
+    );
+    let hits = col
+        .search(&SearchQuery {
+            text: Some("foo".into()),
+            vector: None,
+            top_k: 10,
+            mode: SearchMode::Text,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "c");
+
+    let report = col
+        .add(&[
+            Doc {
+                id: "d".into(),
+                text: Some("red apple".into()),
+                vector: Some(vec![1.0, 0.0]),
+                meta: None,
+            },
+            Doc {
+                id: "e".into(),
+                text: Some("blue sky".into()),
+                vector: Some(vec![0.0, 1.0]),
+                meta: None,
+            },
+        ])
+        .unwrap();
+    assert_eq!(report.accepted, 2);
+}
+
+#[test]
 fn collection_auto_commit_off_does_not_trigger_flush() {
     let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
     let opts = OpenOptions {

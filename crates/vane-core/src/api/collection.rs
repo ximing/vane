@@ -325,7 +325,8 @@ impl Collection {
         }
         let mut state = self.inner.write_state.lock().unwrap();
         let schema_dim = self.inner.schema.vector_field().map(|(_, d, _)| d).ok();
-        let mut count = 0u64;
+        // 先校验整批维度。中途 E_SCHEMA 不能改 next_docid 或 buffer：
+        // 失败前缀不会进入 record_docs，留在缓冲里会让重试再存一份。
         for doc in docs {
             if let (Some(dim), Some(v)) = (schema_dim, &doc.vector) {
                 if v.len() as u32 != dim {
@@ -342,6 +343,9 @@ impl Collection {
                     ));
                 }
             }
+        }
+        let mut count = 0u64;
+        for doc in docs {
             let docid = state.next_docid;
             state.next_docid += 1;
             state.buffer.push(BufferedDoc {
