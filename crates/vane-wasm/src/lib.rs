@@ -59,13 +59,6 @@ impl RegistryEntry {
             reindex: None,
         }
     }
-    fn new_reindex(rh: ReindexHandle) -> Self {
-        Self {
-            db: None,
-            col: None,
-            reindex: Some(rh),
-        }
-    }
 }
 
 static REGISTRY: RwLock<Option<HashMap<u64, RegistryEntry>>> = RwLock::new(None);
@@ -594,7 +587,6 @@ pub fn vane_reindex(col_h: u64) -> JsResult<f32> {
         .map_err(err_to_js)?;
     let rh = col.reindex().map_err(err_to_js)?;
     let progress = rh.progress();
-    let _ = alloc_handle(RegistryEntry::new_reindex(rh)).map_err(err_to_js)?;
     Ok(progress)
 }
 
@@ -653,4 +645,50 @@ pub fn vane_close(handle: u64) -> JsResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry_len() -> usize {
+        REGISTRY
+            .read()
+            .expect("registry lock")
+            .as_ref()
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    struct CloseOnDrop(u64);
+
+    impl Drop for CloseOnDrop {
+        fn drop(&mut self) {
+            let _ = vane_close(self.0);
+        }
+    }
+
+    /// 同步 reindex 已完成，句柄不得进入 REGISTRY（否则无法 vane_close）。
+    #[test]
+    fn vane_reindex_does_not_grow_registry() {
+        let db = vane_open("reindex-no-leak", "{}").expect("open");
+        let _db_guard = CloseOnDrop(db);
+        let schema = r#"{"fields":[{"name":"title","type":"text"},{"name":"vec","type":"vector","dim":2,"metric":"cosine"}]}"#;
+        let col_h = vane_collection(db, "docs", schema, "{}").expect("collection");
+        let _col_guard = CloseOnDrop(col_h);
+
+        let col = lookup_col(col_h)
+            .expect("lookup")
+            .expect("collection handle");
+        col.set_user_dict(&[UserDictEntry::Word("newterm".into())])
+            .expect("set_user_dict");
+
+        let before = registry_len();
+        let progress = vane_reindex(col_h).expect("reindex");
+        assert!(
+            (progress - 1.0).abs() < 1e-6,
+            "sync reindex progress, got {progress}"
+        );
+        assert_eq!(registry_len(), before);
+    }
 }

@@ -110,6 +110,62 @@ fn db_collection_idempotent_different_schema_rejected() {
     assert!(matches!(r, Err(VaneError::Schema(_))));
 }
 
+/// manifest rename 失败时不能留下仅存在于内存的 collection。
+/// 否则下一次同名同 schema 走幂等分支，返回 Ok 却不写 manifest。
+#[test]
+fn db_collection_manifest_failure_drops_memory_entry() {
+    use crate::vfs::fault::{Fault, FaultVfs, VfsOp};
+
+    let vfs = std::sync::Arc::new(FaultVfs::wrap_memory());
+    // 新库 open 不提升 manifest.json.tmp。第一次匹配的 rename 就是建表的原子切换。
+    vfs.inject(Fault::IoError {
+        op: VfsOp::Rename,
+        path_pattern: "*manifest.json.tmp".to_string(),
+        msg: "injected rename failure on manifest.json.tmp".to_string(),
+        one_shot: true,
+        trigger_on_nth: 1,
+    });
+    let db = Db::open(vfs.clone(), "mydb", OpenOptions::default())
+        .expect("open must succeed before the one-shot rename fault fires");
+    let schema = Schema::new(vec![(
+        "v".into(),
+        FieldDef::Vector {
+            dim: 4,
+            metric: Metric::Cosine,
+        },
+    )])
+    .unwrap();
+    let first = db.collection("docs", schema.clone(), CollectionOptions::default());
+    assert!(
+        first.is_err(),
+        "collection create must fail when manifest rename fails"
+    );
+    assert!(
+        !db.collections().iter().any(|name| name == "docs"),
+        "failed create must not leave an in-memory collection"
+    );
+    db.collection("docs", schema, CollectionOptions::default())
+        .expect("retry after the one-shot fault must persist the collection");
+    drop(db);
+
+    let reopened = Db::open(vfs, "mydb", OpenOptions::default()).unwrap();
+    assert!(
+        reopened.collections().iter().any(|name| name == "docs"),
+        "retry must have written the manifest, not only an in-memory handle"
+    );
+}
+
+/// 最后一个句柄返回前必须放开 MemoryVfs 锁。锁若留在 Drop 之后，立刻 reopen 是 Busy。
+#[test]
+fn drop_releases_memory_lock_before_reopen() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
+    for _ in 0..100 {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        drop(db);
+        Db::open(vfs.clone(), "db", OpenOptions::default()).expect("reopen after drop must be Ok");
+    }
+}
+
 // ---- Task 3: add ----
 
 #[test]
@@ -161,6 +217,105 @@ fn collection_add_buffers_docs() {
         })
         .unwrap();
     assert!(hits.is_empty(), "unflushed data should not be searchable");
+}
+
+#[test]
+fn collection_add_rejects_mixed_dimension_before_buffer() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
+    let db = Db::open(vfs, "db", OpenOptions::default()).unwrap();
+    let schema = Schema::new(vec![
+        ("body".into(), FieldDef::Text),
+        (
+            "v".into(),
+            FieldDef::Vector {
+                dim: 2,
+                metric: Metric::Cosine,
+            },
+        ),
+    ])
+    .unwrap();
+    let col = db
+        .collection("docs", schema, CollectionOptions::default())
+        .unwrap();
+    let rejected = col.add(&[
+        Doc {
+            id: "a".into(),
+            text: Some("hello world".into()),
+            vector: Some(vec![1.0, 0.0]),
+            meta: None,
+        },
+        Doc {
+            id: "b".into(),
+            text: Some("bad dim".into()),
+            vector: Some(vec![1.0, 0.0, 0.0]),
+            meta: None,
+        },
+    ]);
+    assert!(matches!(rejected, Err(VaneError::Schema(_))));
+
+    col.add(&[Doc {
+        id: "c".into(),
+        text: Some("foo bar".into()),
+        vector: Some(vec![0.0, 1.0]),
+        meta: None,
+    }])
+    .unwrap();
+    col.flush().unwrap();
+
+    let live = db
+        .stats()
+        .collections
+        .into_iter()
+        .find(|c| c.name == "docs")
+        .map(|c| c.live_docs);
+    assert_eq!(live, Some(1), "failed batch prefix must not be stored");
+
+    let leaked = col
+        .search(&SearchQuery {
+            text: Some("hello".into()),
+            vector: None,
+            top_k: 10,
+            mode: SearchMode::Text,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert!(
+        leaked.iter().all(|h| h.id != "a"),
+        "failed batch id a must not be an extra copy, hits={leaked:?}"
+    );
+    let hits = col
+        .search(&SearchQuery {
+            text: Some("foo".into()),
+            vector: None,
+            top_k: 10,
+            mode: SearchMode::Text,
+            fusion: FusionSpec::Rrf,
+            filter: None,
+            candidate_multiplier: 3,
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "c");
+
+    let report = col
+        .add(&[
+            Doc {
+                id: "d".into(),
+                text: Some("red apple".into()),
+                vector: Some(vec![1.0, 0.0]),
+                meta: None,
+            },
+            Doc {
+                id: "e".into(),
+                text: Some("blue sky".into()),
+                vector: Some(vec![0.0, 1.0]),
+                meta: None,
+            },
+        ])
+        .unwrap();
+    assert_eq!(report.accepted, 2);
 }
 
 #[test]

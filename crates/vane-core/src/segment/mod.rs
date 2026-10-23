@@ -824,8 +824,8 @@ fn decode_stored_v2(buf: &[u8]) -> Result<std::collections::HashMap<u64, StoredR
     if buf.len() < 16 + zstd_len {
         return Err(VaneError::Corrupt("stored v2 zstd_block truncated".into()));
     }
-    let mut decoder = ruzstd::streaming_decoder::StreamingDecoder::new(&buf[16..16 + zstd_len])
-        .map_err(|e| {
+    let mut decoder =
+        ruzstd::decoding::StreamingDecoder::new(&buf[16..16 + zstd_len]).map_err(|e| {
             VaneError::Corrupt(format!("stored v2 zstd decompress failed: {}", e).into())
         })?;
     let mut owned = Vec::with_capacity(raw_len);

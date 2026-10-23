@@ -53,17 +53,13 @@ impl JiebaDict {
     /// 解析 zstd 压缩的 dict.bin 字节（绑定层调用：Node/Go 加载 dict.bin 后调此）。
     pub fn load_zstd(compressed: &[u8]) -> Result<Self> {
         use std::io::Read;
-        let mut decoder =
-            ruzstd::streaming_decoder::StreamingDecoder::new(compressed).map_err(|e| {
-                VaneError::Corrupt(
-                    crate::types::ErrorContext::new(format!(
-                        "dict.bin zstd decompress failed: {}",
-                        e
-                    ))
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(compressed).map_err(|e| {
+            VaneError::Corrupt(
+                crate::types::ErrorContext::new(format!("dict.bin zstd decompress failed: {}", e))
                     .op("dict load")
                     .hint("词典数据损坏，重新构建或联系支持"),
-                )
-            })?;
+            )
+        })?;
         let mut buf = Vec::with_capacity(compressed.len() * 4);
         decoder.read_to_end(&mut buf).map_err(|e| {
             VaneError::Corrupt(

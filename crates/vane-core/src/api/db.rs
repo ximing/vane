@@ -6,6 +6,7 @@ use crate::tokenizer::compute_tokenizer_id;
 use crate::types::{Result, Schema, VaneError};
 use crate::vfs::{DbExclusiveLock, Vfs};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
@@ -43,6 +44,8 @@ pub(crate) struct DbInner {
     #[cfg(feature = "jieba")]
     pub(crate) jieba_dict:
         std::sync::RwLock<Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>>,
+    /// 用户 `Db` 句柄数。局部 `Arc` 和空闲线程的 `Weak` 升级都不计。
+    handles: AtomicUsize,
 }
 
 impl Db {
@@ -97,6 +100,8 @@ impl Db {
             auto_commit: opts.auto_commit.clone(),
             #[cfg(feature = "jieba")]
             jieba_dict: std::sync::RwLock::new(jieba_dict),
+            // 紧接着的 `Db` 是唯一用户句柄。上面的 `inner` 局部不是句柄。
+            handles: AtomicUsize::new(1),
         });
         let db = Db {
             inner: inner.clone(),
@@ -200,10 +205,21 @@ impl Db {
             user_dict: opts.user_dict,
             segment_ulids: vec![],
         };
-        self.inner.manifest_store.update(|m| {
+        // 先插入再写 manifest。写失败时只撤掉仍是本次插入的 Arc；
+        // 并发路径若已换成别的句柄，不能误删。
+        if let Err(err) = self.inner.manifest_store.update(|m| {
             m.collections.insert(name.to_string(), col_meta);
             Ok(())
-        })?;
+        }) {
+            let mut collections = self.inner.collections.write().unwrap();
+            if collections
+                .get(name)
+                .is_some_and(|existing| Arc::ptr_eq(existing, &arc))
+            {
+                collections.remove(name);
+            }
+            return Err(err);
+        }
         Ok(Collection { inner: arc })
     }
 
@@ -335,8 +351,19 @@ impl Db {
 
 impl Clone for Db {
     fn clone(&self) -> Self {
+        let _ = self.inner.handles.fetch_add(1, Ordering::AcqRel);
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for Db {
+    fn drop(&mut self) {
+        // 还握着 Arc 时 join，空闲线程先丢掉 upgrade，随后字段 drop 才放锁。
+        // 提前的 clone 不能进这里。IdleScheduler 的 Drop 会再 shutdown 一次，那次是空操作。
+        if self.inner.handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.idle.shutdown();
         }
     }
 }
@@ -452,17 +479,14 @@ fn load_default_jieba_dict() -> Option<Arc<crate::tokenizer::jieba::JiebaDict>> 
 /// 测试专用：注入 jieba 词典（绕过 dict-zh 自动加载）。
 ///
 /// M2 parked minor 2.1.5：jieba 并发测试需在不启用 dict-zh feature 时构造
-/// jieba collection。Db::open 后立即调用（此时 inner 无其他 Arc 强引用，
-/// Arc::get_mut 成功）。`#[cfg(test)]` 保证不进生产产物。
+/// jieba collection。空闲线程可能已经 upgrade `DbInner`，不能用 `Arc::get_mut`。
+/// 与 `set_jieba_dict` 一样写 RwLock。`#[cfg(test)]` 保证不进生产产物。
 #[cfg(all(test, feature = "jieba"))]
 impl Db {
     pub(crate) fn set_jieba_dict_for_test(
         &mut self,
         dict: std::sync::Arc<crate::tokenizer::jieba::JiebaDict>,
     ) {
-        match std::sync::Arc::get_mut(&mut self.inner) {
-            Some(inner) => *inner.jieba_dict.write().unwrap() = Some(dict),
-            None => panic!("Db::inner has other Arc references, cannot inject jieba dict"),
-        }
+        *self.inner.jieba_dict.write().unwrap() = Some(dict);
     }
 }

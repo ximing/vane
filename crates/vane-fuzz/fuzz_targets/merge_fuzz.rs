@@ -15,7 +15,7 @@ mod common;
 
 use std::sync::Arc;
 
-use libfuzzer::fuzz_target;
+use libfuzzer_sys::fuzz_target;
 
 use common::{build_schema, ByteCursor};
 use vane_core::api::{
