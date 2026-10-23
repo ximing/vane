@@ -155,6 +155,17 @@ fn db_collection_manifest_failure_drops_memory_entry() {
     );
 }
 
+/// 最后一个句柄返回前必须放开 MemoryVfs 锁。锁若留在 Drop 之后，立刻 reopen 是 Busy。
+#[test]
+fn drop_releases_memory_lock_before_reopen() {
+    let vfs = std::sync::Arc::new(MemoryVfs::new()) as std::sync::Arc<dyn crate::vfs::Vfs>;
+    for _ in 0..100 {
+        let db = Db::open(vfs.clone(), "db", OpenOptions::default()).unwrap();
+        drop(db);
+        Db::open(vfs.clone(), "db", OpenOptions::default()).expect("reopen after drop must be Ok");
+    }
+}
+
 // ---- Task 3: add ----
 
 #[test]

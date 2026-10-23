@@ -6,6 +6,7 @@ use crate::tokenizer::compute_tokenizer_id;
 use crate::types::{Result, Schema, VaneError};
 use crate::vfs::{DbExclusiveLock, Vfs};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
@@ -43,6 +44,8 @@ pub(crate) struct DbInner {
     #[cfg(feature = "jieba")]
     pub(crate) jieba_dict:
         std::sync::RwLock<Option<std::sync::Arc<crate::tokenizer::jieba::JiebaDict>>>,
+    /// 用户 `Db` 句柄数。局部 `Arc` 和空闲线程的 `Weak` 升级都不计。
+    handles: AtomicUsize,
 }
 
 impl Db {
@@ -69,6 +72,8 @@ impl Db {
             auto_commit: opts.auto_commit.clone(),
             #[cfg(feature = "jieba")]
             jieba_dict: std::sync::RwLock::new(jieba_dict),
+            // 紧接着的 `Db` 是唯一用户句柄。上面的 `inner` 局部不是句柄。
+            handles: AtomicUsize::new(1),
         });
         let db = Db {
             inner: inner.clone(),
@@ -318,8 +323,19 @@ impl Db {
 
 impl Clone for Db {
     fn clone(&self) -> Self {
+        let _ = self.inner.handles.fetch_add(1, Ordering::AcqRel);
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for Db {
+    fn drop(&mut self) {
+        // 还握着 Arc 时 join，空闲线程先丢掉 upgrade，随后字段 drop 才放锁。
+        // 提前的 clone 不能进这里。IdleScheduler 的 Drop 会再 shutdown 一次，那次是空操作。
+        if self.inner.handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.idle.shutdown();
         }
     }
 }
