@@ -6,10 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use vane::cas::Cas;
 use vane::config::{ChunkConfig, EmbedConfig, ResolvedPolicy, TypeRule};
+use vane::dirty::DirtyQueue;
 use vane::embed::{embed_model_id, Embedder, MockEmbedder};
 use vane::error::VaneCliError;
-use vane::index::{doc_id, open_or_create, state_path, ProjectState};
+use vane::index::{doc_id, open_or_create, state_path, ProjectIndex, ProjectState};
 use vane::live::LiveSet;
+use vane::progress::{load_skips, skips_path, SkipFileReason};
 use vane::project::project_id;
 use vane::sync::{reconcile_project, SyncCtx, SyncReport};
 use vane_core::api::{FusionSpec, SearchMode, SearchQuery};
@@ -113,6 +115,9 @@ fn text_query(q: &str) -> SearchQuery {
 
 const AUTH_BODY: &str =
     "# 鉴权\n\n如何做登录鉴权，这是一段足够长的说明文字以便通过最小切片长度。\n";
+
+const REPLACED_BODY: &str =
+    "# invoice\n\nReplacement text about invoices only, long enough for the minimum slice.\n";
 
 fn write_file(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -309,6 +314,252 @@ fn model_mismatch_requires_rebuild() {
         err.message.contains("model rebuild required"),
         "expected rebuild error, got {}",
         err.message
+    );
+}
+
+struct RestoreMode {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode));
+    }
+}
+
+fn deny_read(path: &Path) -> RestoreMode {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if path.is_dir() { 0o755 } else { 0o644 };
+    let guard = RestoreMode {
+        path: path.to_path_buf(),
+        mode,
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+    guard
+}
+
+struct Indexed {
+    root: PathBuf,
+    pid: String,
+    dim: u32,
+    cas: Cas,
+    idx: ProjectIndex,
+}
+
+fn index_auth(tmp: &TempHome, rel: &str) -> Indexed {
+    let (root, pid, dim, model) = setup_project(tmp);
+    write_file(&root.join(rel), AUTH_BODY);
+    let cas = Cas::new(tmp.join("rag").join("cas"));
+    let idx = open_or_create(tmp, &pid, dim, &model).unwrap();
+    let embedder = mock_embedder(dim);
+    let mut ctx = SyncCtx {
+        home: tmp,
+        project_id: &pid,
+        cas: &cas,
+        index: &idx,
+        embedder: &embedder,
+        now: 1_700_000_000,
+        dirty: None,
+    };
+    let first = reconcile_project(&mut ctx, &root, &policy()).unwrap();
+    assert_eq!(first.added, 1, "setup index should add {rel}");
+    assert_eq!(first.deleted, 0);
+    Indexed {
+        root,
+        pid,
+        dim,
+        cas,
+        idx,
+    }
+}
+
+#[test]
+fn unreadable_file_keeps_indexed_chunks() {
+    let tmp = tempfile_dir();
+    let rel = "docs/auth.md";
+    let indexed = index_auth(&tmp, rel);
+    let _mode = deny_read(&indexed.root.join(rel));
+
+    let embedder = mock_embedder(indexed.dim);
+    let mut ctx = SyncCtx {
+        home: &tmp,
+        project_id: &indexed.pid,
+        cas: &indexed.cas,
+        index: &indexed.idx,
+        embedder: &embedder,
+        now: 1_700_000_001,
+        dirty: None,
+    };
+    let report = reconcile_project(&mut ctx, &indexed.root, &policy()).unwrap();
+    assert_eq!(report.deleted, 0, "a read error must not delete chunks");
+    assert!(
+        report.skipped >= 1,
+        "read error must count as skipped: {report:?}"
+    );
+
+    let live = LiveSet::load_for_project(&tmp, &indexed.pid).unwrap();
+    assert!(
+        live.files.contains_key(rel),
+        "live set must keep the unreadable path"
+    );
+
+    let hits = indexed.idx.search(&text_query("鉴权")).unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == doc_id(&indexed.pid, rel, 0)),
+        "old id must still hit after a read error, hits={:?}",
+        hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+    );
+
+    assert_eq!(SkipFileReason::ReadError.as_str(), "read_error");
+    let log = load_skips(&tmp, &indexed.pid);
+    assert!(
+        log.files
+            .iter()
+            .any(|f| f.path == rel && f.reason == SkipFileReason::ReadError),
+        "skips must record read_error, got {:?}",
+        log.files
+    );
+    let raw = fs::read_to_string(skips_path(&tmp, &indexed.pid)).unwrap();
+    assert!(
+        raw.contains("\"read_error\""),
+        "skips.json reason must be read_error: {raw}"
+    );
+}
+
+#[test]
+fn not_found_deletes_indexed_file() {
+    let tmp = tempfile_dir();
+    let rel = "docs/auth.md";
+    let indexed = index_auth(&tmp, rel);
+    fs::remove_file(indexed.root.join(rel)).unwrap();
+
+    let embedder = mock_embedder(indexed.dim);
+    let mut ctx = SyncCtx {
+        home: &tmp,
+        project_id: &indexed.pid,
+        cas: &indexed.cas,
+        index: &indexed.idx,
+        embedder: &embedder,
+        now: 1_700_000_001,
+        dirty: None,
+    };
+    let report = reconcile_project(&mut ctx, &indexed.root, &policy()).unwrap();
+    assert!(
+        report.deleted >= 1,
+        "a missing file must still be deleted: {report:?}"
+    );
+
+    let hits = indexed.idx.search(&text_query("鉴权")).unwrap();
+    let gone = doc_id(&indexed.pid, rel, 0);
+    assert!(
+        hits.iter().all(|h| h.id != gone),
+        "deleted path must not hit, hits={:?}",
+        hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn embed_failure_keeps_old_chunks() {
+    let tmp = tempfile_dir();
+    let rel = "docs/auth.md";
+    let indexed = index_auth(&tmp, rel);
+    let old_hash = LiveSet::load_for_project(&tmp, &indexed.pid).unwrap().files[rel]
+        .content_sha256
+        .clone();
+    write_file(&indexed.root.join(rel), REPLACED_BODY);
+
+    let embedder = MockEmbedder {
+        dim: indexed.dim,
+        fail: true,
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut dirty = DirtyQueue::new();
+    let mut ctx = SyncCtx {
+        home: &tmp,
+        project_id: &indexed.pid,
+        cas: &indexed.cas,
+        index: &indexed.idx,
+        embedder: &embedder,
+        now: 1_700_000_001,
+        dirty: Some(&mut dirty),
+    };
+    let report = reconcile_project(&mut ctx, &indexed.root, &policy()).unwrap();
+    assert_eq!(
+        report.deleted, 0,
+        "embed failure must not delete old chunks"
+    );
+    assert_eq!(
+        report.added, 0,
+        "embed failure must not publish the new body"
+    );
+    assert_eq!(dirty.paths_for(&indexed.pid), vec![rel.to_string()]);
+
+    let live = LiveSet::load_for_project(&tmp, &indexed.pid).unwrap();
+    assert_eq!(
+        live.files[rel].content_sha256, old_hash,
+        "stored hash must stay on the old body so the next reconcile retries"
+    );
+
+    let hits = indexed.idx.search(&text_query("鉴权")).unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == doc_id(&indexed.pid, rel, 0)),
+        "a word that exists only in the old body must still hit, hits={:?}",
+        hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+    );
+
+    let log = load_skips(&tmp, &indexed.pid);
+    assert!(
+        log.files
+            .iter()
+            .any(|f| f.path == rel && f.reason == SkipFileReason::EmbedError),
+        "skip reason must stay embed_error, got {:?}",
+        log.files
+    );
+    assert_eq!(SkipFileReason::EmbedError.as_str(), "embed_error");
+}
+
+#[test]
+fn unreadable_directory_keeps_indexed_chunks() {
+    let tmp = tempfile_dir();
+    let rel = "sub/a.md";
+    let indexed = index_auth(&tmp, rel);
+    let _mode = deny_read(&indexed.root.join("sub"));
+
+    let embedder = mock_embedder(indexed.dim);
+    let mut ctx = SyncCtx {
+        home: &tmp,
+        project_id: &indexed.pid,
+        cas: &indexed.cas,
+        index: &indexed.idx,
+        embedder: &embedder,
+        now: 1_700_000_001,
+        dirty: None,
+    };
+    let report = reconcile_project(&mut ctx, &indexed.root, &policy()).unwrap();
+    assert_eq!(
+        report.deleted, 0,
+        "an unlistable directory must not delete children"
+    );
+
+    let live = LiveSet::load_for_project(&tmp, &indexed.pid).unwrap();
+    assert!(live.files.contains_key(rel), "live set must keep {rel}");
+
+    let hits = indexed.idx.search(&text_query("鉴权")).unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == doc_id(&indexed.pid, rel, 0)),
+        "hit must remain while the directory cannot be listed, hits={:?}",
+        hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+    );
+
+    let log = load_skips(&tmp, &indexed.pid);
+    assert!(
+        log.files
+            .iter()
+            .any(|f| f.path == rel && f.reason == SkipFileReason::ReadError),
+        "unlistable directory must record read_error, got {:?}",
+        log.files
     );
 }
 

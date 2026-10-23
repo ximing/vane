@@ -106,6 +106,7 @@ pub enum SkipFileReason {
     InvalidUtf8,
     EmbedError,
     ExtractorUnsupported,
+    ReadError,
 }
 
 impl SkipFileReason {
@@ -115,6 +116,7 @@ impl SkipFileReason {
             Self::InvalidUtf8 => "invalid_utf8",
             Self::EmbedError => "embed_error",
             Self::ExtractorUnsupported => "extractor_unsupported",
+            Self::ReadError => "read_error",
         }
     }
 }

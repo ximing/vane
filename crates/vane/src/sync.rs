@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -108,7 +108,8 @@ fn reconcile_once(
     let strategy_id = chunk_strategy_id(&policy.chunk, EXTRACTOR_VER);
 
     let mut unsupported = Vec::new();
-    let on_disk = collect_files(root_canon, policy, &mut unsupported)?;
+    let mut unreadable = Vec::new();
+    let on_disk = collect_files(root_canon, policy, &mut unsupported, &mut unreadable)?;
     let live = LiveSet::load_for_project(ctx.home, ctx.project_id)?;
 
     let mut report = SyncReport {
@@ -137,8 +138,23 @@ fn reconcile_once(
     for (rel, disk) in &on_disk {
         let hash = match sha256_file(&disk.abs) {
             Ok(h) => h,
-            Err(_) => {
+            Err(e) if e.kind == ErrorKind::NotFound => {
                 progress.scanned += 1;
+                continue;
+            }
+            Err(e) => {
+                keep_indexed_on_read_error(
+                    live.files.get(rel),
+                    &mut new_live,
+                    new_skips,
+                    &mut report,
+                    rel,
+                    e.detail,
+                );
+                progress.scanned += 1;
+                apply_report(progress, &report);
+                progress.touch();
+                let _ = progress.save(ctx.home);
                 continue;
             }
         };
@@ -157,7 +173,6 @@ fn reconcile_once(
                 let _ = progress.save(ctx.home);
                 continue;
             }
-            push_ids(&mut to_delete, ctx.project_id, rel, old.chunk_count);
         }
 
         progress.phase = ProgressPhase::Extract;
@@ -186,6 +201,21 @@ fn reconcile_once(
                 progress.scanned += 1;
                 continue;
             }
+            Ok(LoadExtract::ReadError { detail }) => {
+                keep_indexed_on_read_error(
+                    live.files.get(rel),
+                    &mut new_live,
+                    new_skips,
+                    &mut report,
+                    rel,
+                    detail,
+                );
+                progress.scanned += 1;
+                apply_report(progress, &report);
+                progress.touch();
+                let _ = progress.save(ctx.home);
+                continue;
+            }
             Err(e) => return Err(e),
         };
 
@@ -203,6 +233,9 @@ fn reconcile_once(
                     SkipFileReason::EmbedError,
                     e.message,
                 ));
+                if let Some(old) = live.files.get(rel) {
+                    new_live.files.insert(rel.clone(), old.clone());
+                }
                 report.skipped += 1;
                 progress.scanned += 1;
                 apply_report(progress, &report);
@@ -217,6 +250,10 @@ fn reconcile_once(
         report.embedded += embedded.n_embed;
         ctx.cas.touch(&ek, &embedded.keys, ctx.now);
 
+        // Drop old chunk ids only after the replacement embed succeeds.
+        if let Some(old) = live.files.get(rel) {
+            push_ids(&mut to_delete, ctx.project_id, rel, old.chunk_count);
+        }
         for (doc, vector) in docs.iter().zip(embedded.vectors) {
             to_add.push(index_doc(ctx.project_id, root_str, doc, Some(vector)));
         }
@@ -237,10 +274,26 @@ fn reconcile_once(
     }
 
     for (rel, old) in &live.files {
-        if !new_live.files.contains_key(rel) {
-            push_ids(&mut to_delete, ctx.project_id, rel, old.chunk_count);
-            report.deleted += 1;
+        if new_live.files.contains_key(rel) {
+            continue;
         }
+        // A parent that could not be listed is not evidence the file is gone.
+        if let Some((prefix, err)) = unreadable
+            .iter()
+            .find(|(prefix, _)| under_rel_prefix(rel, prefix))
+        {
+            keep_indexed_on_read_error(
+                Some(old),
+                &mut new_live,
+                new_skips,
+                &mut report,
+                rel,
+                format!("cannot list directory {prefix}: {err}"),
+            );
+            continue;
+        }
+        push_ids(&mut to_delete, ctx.project_id, rel, old.chunk_count);
+        report.deleted += 1;
     }
 
     progress.phase = ProgressPhase::Flush;
@@ -470,6 +523,9 @@ fn docs_for_rebuild(
         LoadExtract::Gone => Err(VaneCliError::new(format!(
             "cannot extract {rel} during rebuild"
         ))),
+        LoadExtract::ReadError { detail } => Err(VaneCliError::new(format!(
+            "cannot extract {rel} during rebuild ({detail})"
+        ))),
     }
 }
 
@@ -568,6 +624,9 @@ enum LoadExtract {
         detail: String,
     },
     Gone,
+    ReadError {
+        detail: String,
+    },
 }
 
 fn load_or_extract(
@@ -585,7 +644,12 @@ fn load_or_extract(
     }
     let meta_len = match fs::metadata(abs) {
         Ok(m) => m.len(),
-        Err(_) => return Ok(LoadExtract::Gone),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(LoadExtract::Gone),
+        Err(e) => {
+            return Ok(LoadExtract::ReadError {
+                detail: format!("metadata {}: {e}", abs.display()),
+            });
+        }
     };
     if too_large(extractor, meta_len) {
         return Ok(LoadExtract::Skip {
@@ -595,7 +659,12 @@ fn load_or_extract(
     }
     let bytes = match fs::read(abs) {
         Ok(b) => b,
-        Err(_) => return Ok(LoadExtract::Gone),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(LoadExtract::Gone),
+        Err(e) => {
+            return Ok(LoadExtract::ReadError {
+                detail: format!("read {}: {e}", abs.display()),
+            });
+        }
     };
     match extract_docs(rel, &bytes, extractor, chunk) {
         Ok(docs) => {
@@ -741,6 +810,7 @@ fn collect_files(
     root: &Path,
     policy: &ResolvedPolicy,
     unsupported: &mut Vec<(String, String)>,
+    unreadable: &mut Vec<(String, String)>,
 ) -> Result<BTreeMap<String, DiskFile>, VaneCliError> {
     let mut out = BTreeMap::new();
     let mut stack = vec![WalkFrame {
@@ -758,7 +828,10 @@ fn collect_files(
                     frame.dir.display()
                 )));
             }
-            Err(_) => continue,
+            Err(e) => {
+                unreadable.push((frame.rel.clone(), e.to_string()));
+                continue;
+            }
         };
         for entry in entries {
             let entry = match entry {
@@ -878,6 +951,32 @@ fn maybe_add_file(
     }
 }
 
+fn under_rel_prefix(rel: &str, prefix: &str) -> bool {
+    let Some(rest) = rel.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with('/')
+}
+
+fn keep_indexed_on_read_error(
+    previous: Option<&LiveFile>,
+    new_live: &mut LiveSet,
+    new_skips: &mut Vec<SkipFile>,
+    report: &mut SyncReport,
+    rel: &str,
+    detail: impl Into<String>,
+) {
+    if let Some(old) = previous {
+        new_live.files.insert(rel.to_string(), old.clone());
+    }
+    new_skips.push(skip_file(
+        rel.to_string(),
+        SkipFileReason::ReadError,
+        detail,
+    ));
+    report.skipped += 1;
+}
+
 fn join_rel(parent: &str, name: &str) -> String {
     if parent.is_empty() {
         name.replace('\\', "/")
@@ -897,15 +996,28 @@ fn is_path_prefix(prefix: &Path, path: &Path) -> bool {
     true
 }
 
-fn sha256_file(path: &Path) -> Result<String, VaneCliError> {
-    let mut file =
-        File::open(path).map_err(|e| VaneCliError::new(format!("open {}: {e}", path.display())))?;
+struct HashFileError {
+    kind: ErrorKind,
+    detail: String,
+}
+
+impl HashFileError {
+    fn io(op: &str, path: &Path, err: std::io::Error) -> Self {
+        Self {
+            kind: err.kind(),
+            detail: format!("{op} {}: {err}", path.display()),
+        }
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, HashFileError> {
+    let mut file = File::open(path).map_err(|e| HashFileError::io("open", path, e))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
         let n = file
             .read(&mut buf)
-            .map_err(|e| VaneCliError::new(format!("read {}: {e}", path.display())))?;
+            .map_err(|e| HashFileError::io("read", path, e))?;
         if n == 0 {
             break;
         }
