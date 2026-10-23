@@ -17,7 +17,7 @@ cargo-fuzz = true
 vane-core = { path = "../vane-core" }
 libfuzzer-sys = "0.4"
 
-# fuzz targets（每个独立 [[bin]]，#![no_main] + libfuzzer::fuzz_target!）
+# fuzz targets（每个独立 [[bin]]，#![no_main] + libfuzzer_sys::fuzz_target!）
 [[bin]]
 name = "brute_search_fuzz"
 path = "fuzz_targets/brute_search_fuzz.rs"
