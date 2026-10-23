@@ -57,7 +57,7 @@ fn sha256_prefix_is_real_sha256_of_payload() {
 
     // 解压 DICT_BIN（zstd 压缩）得到原始 dict.bin 字节。
     let mut decoder =
-        ruzstd::streaming_decoder::StreamingDecoder::new(DICT_BIN).expect("decode dict.bin zstd");
+        ruzstd::decoding::StreamingDecoder::new(DICT_BIN).expect("decode dict.bin zstd");
     use std::io::Read;
     let mut buf = Vec::with_capacity(DICT_BIN.len() * 4);
     decoder

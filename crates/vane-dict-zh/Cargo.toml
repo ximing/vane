@@ -19,7 +19,7 @@ path = "src/lib.rs"
 vane-core = { workspace = true, features = ["jieba"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-ruzstd = "0.5"
+ruzstd = "0.9.1"
 zstd = "0.13"
 criterion = "0.5"
 
