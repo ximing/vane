@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -447,6 +447,37 @@ fn select_projects<'a>(
     Ok(cfg.projects.iter().collect())
 }
 
+fn cached_serving(shared: &Shared, pid: &str) -> Option<ProjectIndex> {
+    shared
+        .serving
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(pid).cloned())
+}
+
+/// Writer publishes the handle only after its open returns. That open already
+/// holds the flock, so another `open_existing` cannot succeed; wait for the map.
+fn serving_published_after_busy(
+    shared: &Shared,
+    pid: &str,
+    open_err: &VaneCliError,
+) -> Option<ProjectIndex> {
+    if let Some(idx) = cached_serving(shared, pid) {
+        return Some(idx);
+    }
+    if !open_err.message.contains("E_BUSY") {
+        return None;
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(15));
+        if let Some(idx) = cached_serving(shared, pid) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 fn open_search_targets<'a>(
     shared: &Shared,
     cfg: &Config,
@@ -466,28 +497,30 @@ fn open_search_targets<'a>(
             continue;
         };
         let prefer_cjk = state.tokenizer_fallback.as_deref() == Some("cjk_bigram");
-        let cached = shared
-            .serving
-            .lock()
-            .ok()
-            .and_then(|g| g.get(&pid).cloned());
+        let cached = cached_serving(shared, &pid);
         let index = if let Some(idx) = cached {
             idx
         } else {
             match open_existing(home, &pid, dim, &model_id, prefer_cjk) {
                 Ok(i) => i,
                 Err(e) => {
-                    let db = crate::index::project_db_path(home, &pid);
-                    log_msg(
-                        shared,
-                        Level::Warn,
-                        &format!(
-                            "open {pid} for search: {e} (db={} exists={})",
-                            db.display(),
-                            db.is_dir()
-                        ),
-                    );
-                    continue;
+                    // Linux 上同一进程的第二次 flock 会失败，macOS 不会；writer 刚把句柄放进
+                    // serving 时，搜索必须复用那份句柄，不能再 open。
+                    if let Some(idx) = serving_published_after_busy(shared, &pid, &e) {
+                        idx
+                    } else {
+                        let db = crate::index::project_db_path(home, &pid);
+                        log_msg(
+                            shared,
+                            Level::Warn,
+                            &format!(
+                                "open {pid} for search: {e} (db={} exists={})",
+                                db.display(),
+                                db.is_dir()
+                            ),
+                        );
+                        continue;
+                    }
                 }
             }
         };
