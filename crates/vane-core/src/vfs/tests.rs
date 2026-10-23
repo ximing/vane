@@ -142,6 +142,29 @@ mod std_fs_tests {
         assert_eq!(std::fs::read(dir.join("dst.bin")).unwrap(), b"source-bytes");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn std_fs_retries_mkdir_after_blocked_parent() {
+        // 父路径被普通文件挡住时 create_dir_all 失败。删掉阻塞后同一 VFS 必须重试。
+        let dir = std::env::temp_dir().join(format!(
+            "vane-vfs-mkdir-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocked = dir.join("blocked");
+        std::fs::File::create(&blocked).unwrap();
+        let vfs = StdFsVfs::with_root(dir.to_str().unwrap());
+        assert!(vfs.create("blocked/x.bin").is_err());
+        std::fs::remove_file(&blocked).unwrap();
+        vfs.create("blocked/x.bin").unwrap();
+        assert!(dir.join("blocked").join("x.bin").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[test]

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 pub struct StdFsVfs {
     root: PathBuf,
-    // P4 生产化缓存：已 create_dir_all 的父目录集合，避免每次 resolve 都 stat。
+    // 仅缓存 create_dir_all 已成功的父目录。失败不入缓存，阻塞消失后同一进程可重试。
     // create_dir_all 本身幂等，此缓存仅减少重复系统调用。
     created_dirs: Mutex<HashSet<PathBuf>>,
 }
@@ -30,21 +30,22 @@ impl StdFsVfs {
         }
     }
 
-    fn resolve(&self, path: &str) -> PathBuf {
+    fn resolve(&self, path: &str) -> Result<PathBuf> {
         // 简化：路径相对于 root
         let p = self.root.join(path);
-        // 确保父目录存在（缓存命中则跳过 create_dir_all）
-        if let Some(parent) = p.parent() {
-            if !parent.as_os_str().is_empty() {
-                let mut cache = self.created_dirs.lock().unwrap();
-                if cache.insert(parent.to_path_buf()) {
-                    // 新插入（首次见到此目录）：实际建目录
-                    drop(cache);
-                    let _ = std::fs::create_dir_all(parent);
-                }
-            }
+        // 空父路径不建目录。命中缓存才跳过 create_dir_all；失败不写入缓存。
+        let Some(parent) = p.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+            return Ok(p);
+        };
+        if self.created_dirs.lock().unwrap().contains(parent) {
+            return Ok(p);
         }
-        p
+        std::fs::create_dir_all(parent).map_err(io_err)?;
+        self.created_dirs
+            .lock()
+            .unwrap()
+            .insert(parent.to_path_buf());
+        Ok(p)
     }
 }
 
@@ -58,7 +59,7 @@ impl Default for StdFsVfs {
 #[cfg(not(target_arch = "wasm32"))]
 impl Vfs for StdFsVfs {
     fn create(&self, path: &str) -> Result<()> {
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         if p.exists() {
             return Err(VaneError::Io(
                 format!("file already exists: {}", path).into(),
@@ -70,7 +71,7 @@ impl Vfs for StdFsVfs {
 
     fn read_at(&self, path: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
         use std::io::{Read, Seek, SeekFrom};
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         let mut f = std::fs::File::open(&p).map_err(io_err)?;
         f.seek(SeekFrom::Start(offset)).map_err(io_err)?;
         f.read(buf).map_err(io_err)
@@ -78,7 +79,7 @@ impl Vfs for StdFsVfs {
 
     fn write_at(&self, path: &str, buf: &[u8], offset: u64) -> Result<()> {
         use std::io::{Seek, SeekFrom, Write};
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -91,7 +92,7 @@ impl Vfs for StdFsVfs {
 
     fn append(&self, path: &str, buf: &[u8]) -> Result<u64> {
         use std::io::{Seek, SeekFrom, Write};
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -104,14 +105,14 @@ impl Vfs for StdFsVfs {
     }
 
     fn sync(&self, path: &str) -> Result<()> {
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         let f = std::fs::File::open(&p).map_err(io_err)?;
         f.sync_all().map_err(io_err)
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let pf = self.resolve(from);
-        let pt = self.resolve(to);
+        let pf = self.resolve(from)?;
+        let pt = self.resolve(to)?;
         // 原子覆盖：禁止先删目标。崩溃若落在 delete 与 rename 之间，manifest.json 会消失。
         #[cfg(windows)]
         {
@@ -127,7 +128,7 @@ impl Vfs for StdFsVfs {
     }
 
     fn delete(&self, path: &str) -> Result<()> {
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         if p.is_dir() {
             std::fs::remove_dir_all(&p).map_err(io_err)
         } else {
@@ -136,7 +137,7 @@ impl Vfs for StdFsVfs {
     }
 
     fn list(&self, dir: &str) -> Result<Vec<String>> {
-        let p = self.resolve(dir);
+        let p = self.resolve(dir)?;
         let mut out = Vec::new();
         let entries = std::fs::read_dir(&p).map_err(io_err)?;
         for entry in entries {
@@ -153,7 +154,7 @@ impl Vfs for StdFsVfs {
 
     fn try_lock_exclusive(&self, db_path: &str) -> Result<Box<dyn DbExclusiveLock>> {
         // 已存在必须能打开，不能走 Vfs::create（create 在文件已存在时失败）。
-        let path = self.resolve(&format!("{db_path}/.vane.lock"));
+        let path = self.resolve(&format!("{db_path}/.vane.lock"))?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
