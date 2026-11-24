@@ -94,9 +94,11 @@ npm install @vane-rs/node
 | 平台 | npm 子包 |
 |---|---|
 | Linux x64（glibc） | `@vane-rs/node-linux-x64-gnu` |
+| Linux arm64（glibc） | `@vane-rs/node-linux-arm64-gnu` |
 | macOS arm64 | `@vane-rs/node-darwin-arm64` |
 | macOS x64 | `@vane-rs/node-darwin-x64` |
 | Windows x64（MSVC） | `@vane-rs/node-win32-x64-msvc` |
+| Windows arm64（MSVC） | `@vane-rs/node-win32-arm64-msvc` |
 
 这些平台无需从源码编译。`jieba` 词典随包捆绑，open 时自动加载——中文搜索开箱即用。
 
@@ -549,7 +551,7 @@ native / Node，10 万文档 × 384 维：
 - ✅ 持久化（段 + manifest + WAL）、tombstone 删除、合并、快照导出
 - ✅ 核心 pre-filter 位图、SQ8 量化、rayon 并行执行器
 - ✅ `setUserDict` / `reindex` 状态机、中文词典三侧分发（Node/Go/WASM）
-- ✅ 绑定：Node（napi-rs，4 平台）、Go（cgo，4 平台 + wazero 桩）、浏览器
+- ✅ 绑定：Node（napi-rs，6 平台）、Go（cgo，4 平台 + wazero 桩）、浏览器
   （wasm-bindgen + Worker，OPFS/IDB，SIMD 双变体）
 - ✅ 本机侧车 CLI（`vane`）：目录监听、CAS、混合检索、MCP stdio（macOS/Linux）
 - ✅ CLI 人性化交互：查询范围头行 + 精简命中、`vane read <n>`、人话状态看板、
@@ -558,8 +560,8 @@ native / Node，10 万文档 × 384 维：
 - ✅ 嵌入式耐久性：manifest 原子覆盖、WAL 残尾修复、flush 回滚、独占打开、
   `close()` 刷盘、native 空闲 auto-commit
 
-已知缺口：`filter` 已在核心接通但尚未通过绑定查询解析器暴露（见 [过滤](#过滤)）；musl/linux-arm64/
-winx64-arm 的 Node 预编译与 wazero 纯 Go 路径顺延。
+已知缺口：`filter` 已在核心接通但尚未通过绑定查询解析器暴露（见 [过滤](#过滤)）；musl 的 Node
+预编译与 wazero 纯 Go 路径顺延。
 
 ## 示例
 

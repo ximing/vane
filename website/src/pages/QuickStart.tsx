@@ -203,6 +203,12 @@ export default function QuickStart() {
                     </td>
                   </tr>
                   <tr>
+                    <td>Linux arm64 (glibc)</td>
+                    <td>
+                      <code>@vane-rs/node-linux-arm64-gnu</code>
+                    </td>
+                  </tr>
+                  <tr>
                     <td>macOS arm64</td>
                     <td>
                       <code>@vane-rs/node-darwin-arm64</code>
@@ -218,6 +224,12 @@ export default function QuickStart() {
                     <td>Windows x64 (MSVC)</td>
                     <td>
                       <code>@vane-rs/node-win32-x64-msvc</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Windows arm64 (MSVC)</td>
+                    <td>
+                      <code>@vane-rs/node-win32-arm64-msvc</code>
                     </td>
                   </tr>
                 </tbody>

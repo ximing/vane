@@ -119,7 +119,7 @@
 - 并发模型：**每进程单 DB 实例、多查询并发**为主场景；句柄注册表粗粒度 RwLock 即可
 - 分发：npm 主包 + 分平台 optionalDependencies 子包；主包内运行时 fallback 加载；CI 跑 npm/yarn/pnpm/bun 四包管理器安装矩阵
 - **中文词典分发（v1.1）**：独立平台无关数据包 `@vane/dict-zh`（仅含预编译 `dict.bin`）作主包**正式 dependency**，随装随有、离线可用；**拒绝 postinstall 下载**（pnpm 禁脚本/企业断网/`--ignore-scripts` 静默失效）；另提供 `@vane/slim`（无词典依赖，中文退化 bigram 并文档明示）
-- **M0 预编译产物 4 个**：`linux-x64-gnu`、`darwin-arm64`、`darwin-x64`、`win32-x64-msvc`（P0-1 是桌面场景，不能没有 Windows）；musl/linux-arm64 顺延 M1；永不要求用户从源码构建
+- **M0 预编译产物 4 个**：`linux-x64-gnu`、`darwin-arm64`、`darwin-x64`、`win32-x64-msvc`（P0-1 是桌面场景，不能没有 Windows）。当前发布矩阵另加 `linux-arm64-gnu` 与 `win32-arm64-msvc`；musl ×2 仍不发布。永不要求用户从源码构建
 
 ### 4.3 Go
 - **cgo + staticlib 为一等公民**：CI 预编译全平台 `.a`（Linux 交叉用 zig cc），Go 模块按 GOOS/GOARCH 嵌入；性能最优、部署形态符合 Go 用户直觉

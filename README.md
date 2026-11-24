@@ -110,9 +110,11 @@ Prebuilt native binaries are selected automatically via `optionalDependencies` f
 | Platform | npm sub-package |
 |---|---|
 | Linux x64 (glibc) | `@vane-rs/node-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@vane-rs/node-linux-arm64-gnu` |
 | macOS arm64 | `@vane-rs/node-darwin-arm64` |
 | macOS x64 | `@vane-rs/node-darwin-x64` |
 | Windows x64 (MSVC) | `@vane-rs/node-win32-x64-msvc` |
+| Windows arm64 (MSVC) | `@vane-rs/node-win32-arm64-msvc` |
 
 You should never need to compile from source on these platforms. The bundled `jieba`
 dictionary loads automatically on open — Chinese search works out of the box.
@@ -622,7 +624,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 - ✅ Persistence (segments + manifest + WAL), tombstone delete, compaction, snapshot export
 - ✅ Pre-filter bitmaps in core, SQ8 quantization, rayon parallel executor
 - ✅ `setUserDict` / `reindex` state machine, Chinese dictionary distribution (Node/Go/WASM)
-- ✅ Bindings: Node (napi-rs, 4 platforms), Go (cgo, 4 platforms + wazero stub), Browser
+- ✅ Bindings: Node (napi-rs, 6 platforms), Go (cgo, 4 platforms + wazero stub), Browser
   (@vane-rs/web npm package — wasm-bindgen + Worker, OPFS/IDB, SIMD dual variants)
 - ✅ `@vane-rs/web` + `@vane-rs/dict-zh` npm packages (ESM, vite 6+/webpack 5 native,
   dictData inline transfer, zero CDN)
@@ -634,8 +636,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
   exclusive open, `close()` flushes, idle auto-commit on native
 
 Known gaps: `filter` is wired in core but not yet exposed through the binding query parsers
-(see [Filtering](#filtering)); musl/linux-arm64/winx64-arm Node prebuilts and the wazero
-pure-Go path are deferred.
+(see [Filtering](#filtering)); musl Node prebuilts and the wazero pure-Go path are deferred.
 
 ## Examples
 
