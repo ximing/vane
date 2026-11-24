@@ -470,7 +470,7 @@ fn run_doctor(home: &Path) -> ExitCode {
     } else {
         match serde_json::to_value(&report) {
             Ok(v) => {
-                print_json(&v);
+                let _ = print_json(&v);
             }
             Err(e) => {
                 vane::ui::error(&format!("encode doctor report: {e}"));
@@ -773,7 +773,7 @@ fn print_add_report(root: &Path, v: &serde_json::Value) {
             vane::ui::format_add_summary(added, unchanged, skipped, vane::i18n::Lang::detect())
         );
     } else {
-        print_json(v);
+        let _ = print_json(v);
     }
 }
 
@@ -1499,7 +1499,7 @@ fn print_search_result(
             vane::ui::print_why(why.id, &why.message);
             return ExitCode::SUCCESS;
         }
-        print_json(v);
+        let _ = print_json(v);
         eprintln!("{}", why.message);
         return ExitCode::SUCCESS;
     }
