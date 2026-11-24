@@ -545,7 +545,7 @@ native / Node，10 万文档 × 384 维：
 
 ## 状态
 
-**v0.4.2** —— 核心引擎按里程碑 M0–M3 功能完成，并附带人性化交互的本机侧车 CLI：
+**v0.4.3** —— 核心引擎按里程碑 M0–M3 功能完成，并附带人性化交互的本机侧车 CLI：
 
 - ✅ 核心 API、VFS、分词器（standard/cjk_bigram/jieba）、BM25、分段 HNSW、RRF 融合
 - ✅ 持久化（段 + manifest + WAL）、tombstone 删除、合并、快照导出

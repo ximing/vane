@@ -1,16 +1,16 @@
 {
   "name": "@vane-rs/node",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "main": "main.js",
   "types": "main.d.ts",
   "files": ["main.js", "main.d.ts", "index.js", "index.d.ts"],
   "optionalDependencies": {
-    "@vane-rs/node-linux-x64-gnu": "0.4.2",
-    "@vane-rs/node-linux-arm64-gnu": "0.4.2",
-    "@vane-rs/node-darwin-arm64": "0.4.2",
-    "@vane-rs/node-darwin-x64": "0.4.2",
-    "@vane-rs/node-win32-x64-msvc": "0.4.2",
-    "@vane-rs/node-win32-arm64-msvc": "0.4.2"
+    "@vane-rs/node-linux-x64-gnu": "0.4.3",
+    "@vane-rs/node-linux-arm64-gnu": "0.4.3",
+    "@vane-rs/node-darwin-arm64": "0.4.3",
+    "@vane-rs/node-darwin-x64": "0.4.3",
+    "@vane-rs/node-win32-x64-msvc": "0.4.3",
+    "@vane-rs/node-win32-arm64-msvc": "0.4.3"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3",

@@ -618,7 +618,7 @@ full-feature ≤ 1.2 MB; Chinese dictionary ≤ 1.5 MB per channel.
 
 ## Status
 
-**v0.4.2** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI with human-friendly UX:
+**v0.4.3** — the core engine is feature-complete through milestones M0–M3, plus the native sidecar CLI with human-friendly UX:
 
 - ✅ Core API, VFS, tokenizer (standard/cjk_bigram/jieba), BM25, segment HNSW, RRF fusion
 - ✅ Persistence (segments + manifest + WAL), tombstone delete, compaction, snapshot export

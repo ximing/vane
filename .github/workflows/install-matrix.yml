@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         pkg_manager: [npm, yarn, pnpm, bun]
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest, windows-11-arm]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     # 注：bun 在 windows 上的支持仍在演进，该组合为软门禁（报警但不阻断）。

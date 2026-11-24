@@ -34,7 +34,8 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             node_platform: linux-arm64-gnu
-          - os: macos-14
+          # macos-14 已于 2026-11-02 退役，arm64 改到 macos-15。
+          - os: macos-15
             target: aarch64-apple-darwin
             node_platform: darwin-arm64
           # Z1 标注 pre-existing：macos-13（Intel）已于 2025-12 被 GitHub 退役，
@@ -181,7 +182,8 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: vane-x86_64-unknown-linux-gnu
-          - os: macos-14
+          # macos-14 已于 2026-11-02 退役，arm64 改到 macos-15。
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact: vane-aarch64-apple-darwin
           - os: macos-15-intel
