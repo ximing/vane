@@ -22,7 +22,8 @@ ulid = { workspace = true }
 ruzstd = { version = "0.9.1", optional = true }
 # zstd：C 库编码器（写期，zstd-encode feature）。仅 native/node 启用；
 # wasm32 不启（zstd-sys C 库不进 wasm，红线）。
-zstd = { version = "0.13", optional = true }
+# 0.13.4 起才修掉 RUSTSEC-2026-0391，并带上已修补的 zstd-safe / zstd-sys。
+zstd = { version = "0.13.4", optional = true }
 # 词典数据包（SPEC §12.3）：dict-zh feature 启用时 Db::open 自动加载预编译 dict.bin。
 # 独立 crate，wasm32 构建永不启用（词典永不进 wasm，红线）。
 vane-dict-zh = { path = "../vane-dict-zh", optional = true }

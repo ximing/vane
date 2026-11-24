@@ -99,6 +99,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
       - uses: goto-bus-stop/setup-zig@v2
         with:
@@ -110,6 +111,7 @@ jobs:
       - name: Verify + rename staticlib
         run: |
           test -f target/${{ matrix.target }}/release/libvane_ffi.a
+          bash bindings/go/scripts/strip-llvm-bitcode.sh target/${{ matrix.target }}/release/libvane_ffi.a
           cp target/${{ matrix.target }}/release/libvane_ffi.a libvane_ffi-${{ matrix.lib_dir }}.a
           ls -lh libvane_ffi-${{ matrix.lib_dir }}.a
       - uses: actions/upload-artifact@v4

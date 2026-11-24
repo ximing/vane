@@ -234,6 +234,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # llvm-objcopy strips .llvmbc / .llvmcmd before cgo. GNU objcopy also
+          # works for this ELF host archive; the component keeps one tool for
+          # the Mach-O archives produced by go-cross.
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-go@v5
         with:
@@ -244,6 +249,7 @@ jobs:
         run: |
           mkdir -p bindings/go/lib/linux-amd64
           cp target/release/libvane_ffi.a bindings/go/lib/linux-amd64/
+          bash bindings/go/scripts/strip-llvm-bitcode.sh bindings/go/lib/linux-amd64/libvane_ffi.a
       - name: Go build
         run: cd bindings/go && go build ./...
       - name: Go test
@@ -283,6 +289,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
       # Z1 修复（Z0 必炸 #1）：zig 0.13.0 过旧 + cargo-zigbuild 未 pin。
       # pin zig 0.15.2（2025.11 最新 stable）+ cargo-zigbuild 0.23.0
@@ -306,6 +313,7 @@ jobs:
         # 产物目录是 Rust triple（matrix.target），非 zig-style。
         run: |
           test -f target/${{ matrix.target }}/release/libvane_ffi.a
+          bash bindings/go/scripts/strip-llvm-bitcode.sh target/${{ matrix.target }}/release/libvane_ffi.a
           ls -lh target/${{ matrix.target }}/release/libvane_ffi.a
 
   wasm-recall:

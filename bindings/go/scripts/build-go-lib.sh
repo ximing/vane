@@ -27,5 +27,7 @@ esac
 
 mkdir -p "$LIB_BASE/$LIB_DIR"
 cp "target/release/libvane_ffi.a" "$LIB_BASE/$LIB_DIR/"
+# Go 1.26 rejects LLVM bitcode sections inside this staticlib.
+bash "$SCRIPT_DIR/strip-llvm-bitcode.sh" "$LIB_BASE/$LIB_DIR/libvane_ffi.a"
 echo "[build-go-lib] copied to lib/$LIB_DIR/libvane_ffi.a"
 ls -lh "$LIB_BASE/$LIB_DIR/libvane_ffi.a"

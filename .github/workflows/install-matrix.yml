@@ -22,7 +22,9 @@ jobs:
         pkg_manager: [npm, yarn, pnpm, bun]
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
+    # workflow_run also fires when release failed. There is nothing to install then.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     # 注：bun 在 windows 上的支持仍在演进，该组合为软门禁（报警但不阻断）。
     # SPEC §13.2-4：npm/yarn/pnpm × 五 OS + bun × (linux x64/arm64 + macos) 硬通过。
     # arm64 两台 runner 要等带 linux-arm64-gnu / win32-arm64-msvc 的版本上 npm 后才会绿。
@@ -53,16 +55,59 @@ jobs:
             VER=$(node -p "require('./crates/vane-node/package.json').version")
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
+      - name: Wait until npm has indexed this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          case "${{ matrix.os }}" in
+            ubuntu-latest) PLAT="@vane-rs/node-linux-x64-gnu" ;;
+            ubuntu-24.04-arm) PLAT="@vane-rs/node-linux-arm64-gnu" ;;
+            macos-15) PLAT="@vane-rs/node-darwin-arm64" ;;
+            windows-latest) PLAT="@vane-rs/node-win32-x64-msvc" ;;
+            windows-11-arm) PLAT="@vane-rs/node-win32-arm64-msvc" ;;
+            *) echo "no platform package mapped for ${{ matrix.os }}"; exit 1 ;;
+          esac
+          # Publish returns before every replica can answer `npm install`.
+          # The first post-release matrix failed with ETARGET for that reason.
+          for i in $(seq 1 36); do
+            if npm view "@vane-rs/node@${VER}" version >/dev/null 2>&1 \
+              && npm view "${PLAT}@${VER}" version >/dev/null 2>&1; then
+              echo "npm has @vane-rs/node@${VER} and ${PLAT}@${VER}"
+              exit 0
+            fi
+            echo "registry is missing @vane-rs/node@${VER} or ${PLAT}@${VER} (${i}/36)"
+            sleep 10
+          done
+          echo "npm did not index @vane-rs/node@${VER} within 6 minutes"
+          exit 1
       - name: Init test project
         shell: bash
         run: |
+          set -euo pipefail
           mkdir test-install && cd test-install
           case "${{ matrix.pkg_manager }}" in
-            npm)  npm init -y; npm install @vane-rs/node@${{ steps.ver.outputs.version }} ;;
-            yarn) yarn init -y; echo 'nodeLinker: node-modules' > .yarnrc.yml; yarn add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
-            pnpm) pnpm init; pnpm add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
-            bun)  bun init -y; bun add @vane-rs/node@${{ steps.ver.outputs.version }} ;;
+            npm)  npm init -y ;;
+            yarn) yarn init -y; echo 'nodeLinker: node-modules' > .yarnrc.yml ;;
+            pnpm) pnpm init ;;
+            bun)  bun init -y ;;
           esac
+          install_once() {
+            case "${{ matrix.pkg_manager }}" in
+              npm)  npm install "@vane-rs/node@${{ steps.ver.outputs.version }}" ;;
+              yarn) yarn add "@vane-rs/node@${{ steps.ver.outputs.version }}" ;;
+              pnpm) pnpm add "@vane-rs/node@${{ steps.ver.outputs.version }}" ;;
+              bun)  bun add "@vane-rs/node@${{ steps.ver.outputs.version }}" ;;
+            esac
+          }
+          for i in 1 2 3 4 5 6; do
+            if install_once; then
+              exit 0
+            fi
+            echo "install attempt ${i} failed; retrying in 10s"
+            sleep 10
+          done
+          exit 1
       - name: Require and smoke test
         shell: bash
         run: |

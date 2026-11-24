@@ -20,7 +20,7 @@ vane-core = { workspace = true, features = ["jieba"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 ruzstd = "0.9.1"
-zstd = "0.13"
+zstd = "0.13.4"
 criterion = "0.5"
 
 # 词典冷加载 bench（Task 5，SPEC §13.1 <150ms）。
