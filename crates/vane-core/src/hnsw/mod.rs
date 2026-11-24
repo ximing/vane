@@ -475,8 +475,7 @@ pub fn write_hnsw(vfs: &dyn Vfs, segment_dir: &str, graph: &HnswGraph) -> Result
             ));
         }
         buf.push(n.level as u8);
-        for lc in 0..=n.level as usize {
-            let layer = &n.neighbors[lc];
+        for layer in &n.neighbors[..=n.level as usize] {
             buf.extend_from_slice(&(layer.len() as u32).to_le_bytes());
             for &nb in layer {
                 buf.extend_from_slice(&nb.to_le_bytes());
