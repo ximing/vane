@@ -18,18 +18,14 @@ if [[ $# -lt 1 ]]; then
 fi
 
 find_objcopy() {
+  # Prefer the toolchain llvm-objcopy. /usr/bin/objcopy is GNU binutils and
+  # cannot rewrite Mach-O members or ELF for an architecture it was not
+  # built with (aarch64 objects on an x86_64 runner).
   if [[ -n "${LLVM_OBJCOPY:-}" ]]; then
     echo "$LLVM_OBJCOPY"
     return
   fi
-  local candidate
-  for candidate in llvm-objcopy rust-objcopy objcopy; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      command -v "$candidate"
-      return
-    fi
-  done
-  local sysroot host
+  local sysroot host candidate
   sysroot="$(rustc --print sysroot 2>/dev/null || true)"
   host="$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')"
   if [[ -n "$sysroot" && -n "$host" ]]; then
@@ -43,11 +39,22 @@ find_objcopy() {
       fi
     done
   fi
+  for candidate in llvm-objcopy rust-objcopy; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return
+    fi
+  done
+  if command -v objcopy >/dev/null 2>&1; then
+    command -v objcopy
+    return
+  fi
   echo "strip-llvm-bitcode: need llvm-objcopy (rustup component add llvm-tools) or objcopy" >&2
   exit 1
 }
 
 OBJCOPY="$(find_objcopy)"
+echo "strip-llvm-bitcode: using $OBJCOPY" >&2
 
 python3 - "$OBJCOPY" "$@" <<'PY'
 import os
